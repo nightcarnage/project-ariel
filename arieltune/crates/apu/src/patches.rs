@@ -201,14 +201,17 @@ pub const SERIES: &[Patch] = &[
     ),
     patch!(
         "12",
-        "12-unlock-all-40-compute-units.patch",
-        "amdgpu.bc250_cc_write_mode: CC + SPI(0x1F) + RLC(0x1F) -> 40 CUs",
-        "Re-enables all 40 CUs on the Sony-binned board (default 24). Clears \
-         the CC_GC_SHADER_ARRAY_CONFIG harvest mask, sets the per-shader-array \
-         SPI dispatch mask to 0x1F, and the RLC power-gate override to 0x1F — \
-         all three are required; any one alone is a no-op. Gated on PCI \
-         0x13FE and off by default (bc250_cc_write_mode; mode 3 = full \
-         liberation, measured +69% FP32).",
+        "16-cu-unlock-cc-spi-safe-no-rlc.patch",
+        "BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm/HSA)",
+        "Re-enables all 40 CUs using CC_GC_SHADER_ARRAY_CONFIG=0 and \
+         SPI_PG_ENABLE_STATIC_WGP_MASK=0x1f per shader array. \
+         RLC_PG_ALWAYS_ON_WGP_MASK is deliberately NOT written: doing so \
+         while RLC firmware is running hangs the RLC on uninitialized WGP \
+         handshake registers, causing a system hang on first rocBLAS/HSA \
+         launch. BC-250 already has global PG off, making the RLC write \
+         redundant. Safe for both Vulkan/RADV and ROCm/HSA. Controlled \
+         via amdgpu.bc250_cc_write_mode=3. This is the bc-250-rocm variant \
+         — safer than the RLC-inclusive version for compute workloads.",
         "gfx_v10_0.c",
         Tell::ModParam("bc250_cc_write_mode")
     ),
