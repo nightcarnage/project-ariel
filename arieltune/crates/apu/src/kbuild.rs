@@ -586,14 +586,14 @@ mod tests {
     #[test]
     fn doctor_json_parsing() {
         let d = parse_doctor_json(
-            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":16,\
-             \"total\":16,\"fully\":true}\n",
+            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":15,\
+             \"total\":15,\"fully\":true}\n",
         )
         .unwrap();
         assert!(d.is_bc250);
         assert_eq!(d.kernel, "6.12.4-aputune");
-        assert_eq!(d.present, 16);
-        assert_eq!(d.total, 16);
+        assert_eq!(d.present, 15);
+        assert_eq!(d.total, 15);
         assert!(d.fully);
         assert!(parse_doctor_json("not json").is_err());
         assert!(parse_doctor_json("").is_err());
