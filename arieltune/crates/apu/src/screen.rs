@@ -1460,7 +1460,7 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     let intro = Style::default().fg(DIM);
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            " The curated 12-patch amdgpu series arieltune embeds and builds into",
+            format!(" The curated {}-patch amdgpu series arieltune embeds and builds into", patches::count()),
             intro,
         )),
         Line::from(Span::styled(

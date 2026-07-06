@@ -227,8 +227,8 @@ mod tests {
         let d = DoctorJson {
             is_bc250: true,
             kernel: "6.12.4-aputune".into(),
-            present: 12,
-            total: 12,
+            present: patches::count(),
+            total: patches::count(),
             fully: true,
         };
         let s = serde_json::to_string(&d).unwrap();
@@ -239,9 +239,9 @@ mod tests {
         assert!(v["kernel"].is_string());
         assert_eq!(v["kernel"], "6.12.4-aputune");
         assert!(v["present"].is_u64());
-        assert_eq!(v["present"], 12);
+        assert_eq!(v["present"], patches::count() as u64);
         assert!(v["total"].is_u64());
-        assert_eq!(v["total"], 12);
+        assert_eq!(v["total"], patches::count() as u64);
         assert_eq!(v["fully"], serde_json::Value::Bool(true));
         // And it round-trips.
         let back: DoctorJson = serde_json::from_str(&s).unwrap();

@@ -3,7 +3,7 @@
 //!
 //! One Rust tool that owns the whole Cyan Skillfish liberation surface:
 //!
-//!   patches              report per-patch kernel state (the 12-patch series)
+//!   patches              report per-patch kernel state (the liberation series)
 //!   build                build the patch series into the system (kernel rebuild)
 //!   liberate             guided build: gate, report, explicit tier choice
 //!   cu / cumap           40-CU enable + the harvest map
@@ -40,7 +40,7 @@ use ariel_smu::smu::{self, Smu};
 /// writes act live via the SMU. build/liberate PREVIEW by default and only execute with --run.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Report the per-patch state of the 12-patch liberation series on the booted kernel. Read-only.
+    /// Report the per-patch state of the liberation series on the booted kernel. Read-only.
     Patches {
         /// Print the embedded patch body for one id (e.g. 12) instead of the status table.
         #[arg(long, value_name = "ID")]

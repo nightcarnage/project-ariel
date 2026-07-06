@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Build the liberation series into the system.
 //!
-//! aputune carries the 12-patch amdgpu series as data; this module reconstructs
+//! aputune carries the amdgpu liberation patch series as data; this module reconstructs
 //! a patched kernel package and installs it, following the validated flow:
 //!
 //!   1. materialize the embedded patches to the work dir
@@ -586,14 +586,14 @@ mod tests {
     #[test]
     fn doctor_json_parsing() {
         let d = parse_doctor_json(
-            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":12,\
-             \"total\":12,\"fully\":true}\n",
+            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":16,\
+             \"total\":16,\"fully\":true}\n",
         )
         .unwrap();
         assert!(d.is_bc250);
         assert_eq!(d.kernel, "6.12.4-aputune");
-        assert_eq!(d.present, 12);
-        assert_eq!(d.total, 12);
+        assert_eq!(d.present, 16);
+        assert_eq!(d.total, 16);
         assert!(d.fully);
         assert!(parse_doctor_json("not json").is_err());
         assert!(parse_doctor_json("").is_err());
