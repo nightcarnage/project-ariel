@@ -1,0 +1,18 @@
+smiflash - licensing notice
+===========================
+
+This subtree (the `smiflash.c` kernel module and its build/packaging files) is a
+Linux kernel module: it is compiled against and links the GPL-2.0 Linux kernel,
+and it declares `MODULE_LICENSE("GPL")` with an `SPDX-License-Identifier:
+GPL-2.0` header.
+
+This subtree is therefore licensed **GPL-2.0**, **separate from and overriding**
+the GPL-3.0-or-later license that covers the arieltune project at the repository top level.
+arieltune (GPL-3.0-or-later) carries this GPL-2.0 subtree as an asset the way a package
+manager carries the kernel modules it builds - the GPL-3.0-or-later top level does not
+relicense it.
+
+    author: Cachenetics
+
+The `smiflash.c` source shipped here satisfies the GPL-2.0 source-availability
+requirement for any built `smiflash.ko` binary.
