@@ -10,10 +10,10 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, renumbered **01-12** in apply order. See "Excluded" below for
+on any BC-250 ship, renumbered **01-16** in apply order. See "Excluded" below for
 what was deliberately dropped.
 
-## Patch list (12)
+## Patch list (16)
 
 | # | Source | Purpose |
 |---|---|---|
@@ -28,15 +28,70 @@ what was deliberately dropped.
 | `09` | `cyan_skillfish_ppt.c` | `cclk_soft_min/max` debugfs (CPU clock control) |
 | `10` | `cyan_skillfish_ppt.c` | CAC print widened to 32-bit (correct CAC-node output) |
 | `11` | `cyan_skillfish_ppt.c` | `cyan_skillfish_telemetry` node (clocks/pstates/voltages) |
-| `12` | `gfx_v10_0.c` | `amdgpu.bc250_cc_write_mode`: CC + SPI(0x1F) + RLC(0x1F) -> all 40 CUs |
+| `12` | `gfx_v10_0.c` | `amdgpu.bc250_cc_write_mode`: CC + SPI(0x1F) + RLC(0x1F) → all 40 CUs (⚠️ Vulkan-only) |
+| `13` | `gfx_v10_0.c` | **NEW** GFXOFF disabled for gfx1013 — prevents GPU power-state hangs |
+| `14` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) |
+| `15` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) |
+| `16` | `gfx_v10_0.c` | **NEW** BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm+HSA) |
 
 ## What aputune does with them
 
-- **40-CU unlock** (12): `amdgpu.bc250_cc_write_mode=3`, default-off, gated on PCI 0x13FE.
+- **GPU stability** (13/14/15): Three-layer protection against BC-250 GPU hangs.
+  - Layer 1 (13): GFXOFF disabled for gfx1013 — prevents GPU entering unrecoverable power state.
+  - Layer 2a (14): gmc_v10_0 KIQ bypass + dead-GPU detection — 5 sub-patches protecting TLB flush.
+  - Layer 2b (15): amdgpu_gmc KIQ bypass + dead-GPU detection — centralized GMC protection.
+  Together these eliminate the infamous BC-250 KIQ hang and provide graceful
+  recovery when the GPU becomes unreachable (0xFFFFFFFF MMIO reads).
+- **40-CU unlock** (12 or 16): See comparison below. Patch 16 is recommended for compute workloads.
 - **Clock control** (01/02/03 + 07/08): `ForceGfxFreq` via the race-free
   `amdgpu_smu_send_raw` node - GPU `force`/`wake`/`deep-sleep`/`autosleep`.
 - **CPU cclk** (09): soft min/max.
 - **Telemetry** (04/05/11): live clocks, temp, voltages.
+
+### CU unlock: patch 12 vs patch 16
+
+| Aspect | Patch 12 (existing) | Patch 16 (NEW, recommended) |
+|---|---|---|
+| Registers | CC + SPI + **RLC** | CC + SPI only |
+| RLC_PG_ALWAYS_ON_WGP_MASK | Written (mode 3) | **NOT written** |
+| Vulkan/RADV | ✅ Works | ✅ Works |
+| ROCm/HSA (rocBLAS, HIP) | ❌ Hangs on first KFD queue | ✅ Works |
+| Module param | `bc250_cc_write_mode=3` | `bc250_cc_write_mode=3` |
+| Probe modes | 1 (SE0 only), 4 (all SAs) | 1 (SE0 only), 4 (all SAs) |
+
+**Why no RLC write?** Writing RLC_PG_ALWAYS_ON_WGP_MASK while RLC firmware is
+running triggers the WGP bring-up state machine for harvested WGPs 3-4 whose
+handshake registers are uninitialized. The RLC stalls waiting for an ACK that
+never arrives → any subsequent KFD queue operation hangs. BC-250 already has
+RLC_PG_CNTL=0 (PG globally off via ppfeaturemask), so the RLC write is
+redundant.
+
+**Recommendation:** Use patch 16 for general-purpose compute (ROCm + Vulkan).
+Patch 12 remains available for Vulkan-only setups but should NOT be used if
+any ROCm/HSA workload is planned.
+
+## GPU stability architecture (patches 13-15)
+
+The BC-250 has a known hardware issue: when the GPU enters certain power states
+(GFXOFF) or paths that require firmware coordination (KIQ ring), it can become
+unresponsive. Because the BC-250's internal PCIe fabric lacks completion
+timeout, any MMIO read to a dead GPU hangs the CPU indefinitely.
+
+The three-layer protection:
+
+```
+Layer 1 (patch 13): Prevent entry into dangerous power states
+  └─ gfx_v10_0_check_gfxoff_flag() → disable GFXOFF for gfx1013
+
+Layer 2 (patches 14+15): Bypass dangerous code paths + detect dead GPU
+  ├─ gmc_v10_0_flush_gpu_tlb() → goto use_mmio for gfx10.1.x
+  ├─ amdgpu_gmc_flush_gpu_tlb_pasid() → direct MMIO callout
+  ├─ amdgpu_gmc_fw_reg_write_reg_wait() → direct MMIO poll loop
+  └─ All paths: pre-read health check + 0xFFFFFFFF dead-GPU detection
+```
+
+All three layers are gated on `IP_VERSION(10, 1, x)` so they are no-ops on
+non-BC-250 hardware.
 
 ## Excluded (deliberately not shipped)
 
