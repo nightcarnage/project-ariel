@@ -52,11 +52,23 @@ Also know: the APU, MEM, and BIOS tabs write real hardware (SMU, CMOS/NVRAM, SPI
 
 ## Acknowledgments
 
-- The **bc250-collective** (mrfrakes and dantistnfs), who started the BC-250 effort: original board bring-up, SMU mailboxing, and the enablement groundwork.
-- **duggasco**, for the 40-CU unlock research and the enumeration/dispatch investigation on Cyan Skillfish.
-- **WinnieLV**, whose BC-250 live CU manager's `apply_target_masks` register sequence this project ports (`crates/apu/src/curoute.rs`).
-- **ethkey**, for sharing the memory-timing tool and configs the MEM tab is built on; the ASRock `bc250_memcfg` tool and **RobinMemTiming** for CMOS layout and timing semantics; and **walkjivefly** for taking the first plunge.
-- We contribute our CU map back: shader-array topology and the empirical dispatch model (effective_CU = 4 x the two smallest per-array WGP counts). See `docs/bc250-cu-map.md`.
+arieltune stands on prior BC-250 community work. With thanks:
+
+- **the bc250-collective** (**mrfrakes** and **dantistnfs**) for starting the BC-250
+  effort - the original board bring-up, SMU mailboxing, and enablement groundwork that
+  everything here builds on.
+- **duggasco** for the CU-unlock research - the 40-CU enumeration/dispatch investigation
+  on Cyan Skillfish.
+- **WinnieLV** for the BC-250 live CU manager, whose proven `apply_target_masks` register
+  sequence this project ports (`crates/apu/src/curoute.rs`).
+- **ethkey** for sharing the memory-timing tool and timing configurations the **MEM** tab
+  is built on; the ASRock `bc250_memcfg` tool and the RobinMemTiming work for the CMOS
+  layout and timing semantics; and **walkjivefly** for taking the first plunge.
+
+Building on that, we contribute our **CU map** back to the commons - the shader-array
+topology and the empirical dispatch model (`effective_CU = 4 × min(SE0, SE1) WGP total`,
+i.e. throughput is gated by the weaker shader engine) that predicts real throughput from a
+CU routing. See [`docs/bc250-cu-map.md`](docs/bc250-cu-map.md).
 
 ## License
 
