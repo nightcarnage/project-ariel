@@ -10,10 +10,12 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, renumbered **01-16** in apply order. See "Excluded" below for
-what was deliberately dropped.
+on any BC-250 ship, numbered **01-18**. Every one except `12` is applied, in the
+order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
+alternate to `16` but not built. See "Excluded" below for what was deliberately
+dropped.
 
-## Patch list (18)
+## Patch list (17 applied, plus `12` on disk as an alternate)
 
 | # | Source | Purpose |
 |---|---|---|
@@ -28,7 +30,7 @@ what was deliberately dropped.
 | `09` | `cyan_skillfish_ppt.c` | `cclk_soft_min/max` debugfs (CPU clock control) |
 | `10` | `cyan_skillfish_ppt.c` | CAC print widened to 32-bit (correct CAC-node output) |
 | `11` | `cyan_skillfish_ppt.c` | `cyan_skillfish_telemetry` node (clocks/pstates/voltages) |
-| `12` | `gfx_v10_0.c` | `amdgpu.bc250_cc_write_mode`: CC + SPI(0x1F) + RLC(0x1F) → all 40 CUs (⚠️ Vulkan-only) |
+| `12` | `gfx_v10_0.c` | *(on disk, NOT applied)* Studebaker's CU unlock: CC + SPI(0x1F) + RLC(0x1F) → all 40 CUs (⚠️ Vulkan-only, hangs ROCm/HSA) — superseded by `16` |
 | `13` | `gfx_v10_0.c` | **NEW** GFXOFF disabled for gfx1013 — prevents GPU power-state hangs |
 | `14` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) |
 | `15` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) |
@@ -44,7 +46,8 @@ what was deliberately dropped.
   - Layer 2b (15): amdgpu_gmc KIQ bypass + dead-GPU detection — centralized GMC protection.
   Together these eliminate the infamous BC-250 KIQ hang and provide graceful
   recovery when the GPU becomes unreachable (0xFFFFFFFF MMIO reads).
-- **40-CU unlock** (12 or 16): See comparison below. Patch 16 is recommended for compute workloads.
+- **40-CU unlock** (16): `16` is the one the build applies. Studebaker's `12`
+  stays on disk as the Vulkan-only alternate — see the comparison below.
 - **Clock control** (01/02/03 + 07/08): `ForceGfxFreq` via the race-free
   `amdgpu_smu_send_raw` node - GPU `force`/`wake`/`deep-sleep`/`autosleep`.
 - **CPU cclk** (09): soft min/max.
@@ -52,7 +55,10 @@ what was deliberately dropped.
 
 ### CU unlock: patch 12 vs patch 16
 
-| Aspect | Patch 12 (existing) | Patch 16 (NEW, recommended) |
+`12` is Studebaker's original 40-CU unlock, written for Vulkan/RADV. `16` is the
+ROCm-safe derivative, and it is the one `apu build` applies.
+
+| Aspect | Patch 12 (Studebaker, Vulkan) | Patch 16 (applied) |
 |---|---|---|
 | Registers | CC + SPI + **RLC** | CC + SPI only |
 | RLC_PG_ALWAYS_ON_WGP_MASK | Written (mode 3) | **NOT written** |
@@ -68,9 +74,10 @@ never arrives → any subsequent KFD queue operation hangs. BC-250 already has
 RLC_PG_CNTL=0 (PG globally off via ppfeaturemask), so the RLC write is
 redundant.
 
-**Recommendation:** Use patch 16 for general-purpose compute (ROCm + Vulkan).
-Patch 12 remains available for Vulkan-only setups but should NOT be used if
-any ROCm/HSA workload is planned.
+**Which ships:** `16`, because it covers both Vulkan and ROCm. Studebaker's `12`
+stays on disk for Vulkan-only setups — swap it in by pointing the `16` registry
+entry in `crates/apu/src/patches.rs` at `12-unlock-all-40-compute-units.patch`.
+Do NOT use `12` if any ROCm/HSA workload is planned.
 
 ## GPU stability architecture (patches 13-15)
 

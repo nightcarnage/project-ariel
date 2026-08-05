@@ -515,10 +515,10 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
             if !detect::report()
                 .rows
                 .iter()
-                .any(|r| r.id == "12" && matches!(r.state, detect::State::Present))
+                .any(|r| r.id == "16" && matches!(r.state, detect::State::Present))
             {
                 println!(
-                    "WARNING: the 40-CU kernel patch (12) is not detected live, \
+                    "WARNING: the 40-CU kernel patch (16) is not detected live, \
                      enable will be a no-op until the patched kernel is built in (`arieltune apu build`)."
                 );
             }
