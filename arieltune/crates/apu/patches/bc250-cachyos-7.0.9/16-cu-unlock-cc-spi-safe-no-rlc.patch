@@ -65,8 +65,8 @@ index fc65fb3..c0f3044 100644
  #include "amdgpu.h"
  #include "amdgpu_gfx.h"
  #include "amdgpu_psp.h"
-@@ -10127,6 +10135,58 @@ static int gfx_v10_0_get_cu_info(struct amdgpu_device *adev,
- 	amdgpu_gfx_parse_disable_cu(disable_masks, 4, 2);
+@@ -10117,6 +10125,58 @@ static int gfx_v10_0_get_cu_info(struct amdgpu_device *adev,
+ 	amdgpu_gfx_parse_disable_cu(adev, disable_masks, 4, 2);
  
  	mutex_lock(&adev->grbm_idx_mutex);
 +
