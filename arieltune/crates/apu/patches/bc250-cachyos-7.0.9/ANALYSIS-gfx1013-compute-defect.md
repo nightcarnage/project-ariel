@@ -427,8 +427,8 @@ and is highly niche to high-memory-churn work.
 ---
 
 ## Credits
-
-- **Fabian** ([git.sudx.de/Fabian](https://git.sudx.de/Fabian)) and **Dani** — production repo, fundamental research
+- **Studebaker** (https://github.com/cachenetics/project-ariel)
+- **Fabian** (https://git.sudx.de/BC250/ROCm)) and **Dani** — production repo, fundamental research
 - **Gabriel Duarte Guerra** ([GabriWar](https://github.com/GabriWar)) — fault corpus, MEC firmware disassembly and aligned diff, TTM NULL guard (patch 18), and the retrospective on his own two bad dismissals, which is the most useful part of that repo
-- **neoney** (BC-250 Discord) — KIQ bypass discovery
+- **neoney** (BC-250 Discord) — KIQ bypass discovery NIXOS Maniac
 - **anrp**, **wtfuzz** (BC-250 Discord) — additional findings
