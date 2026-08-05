@@ -256,6 +256,35 @@ pub const SERIES: &[Patch] = &[
         "amdgpu_gmc.c",
         Tell::Bundled
     ),
+    patch!(
+        "17",
+        "17-bc250-gfx1013-fault-probe.patch",
+        "gfx1013 instruction-fetch fault probe (diagnostic, report-only)",
+        "Diagnostic for the open multi-phase compute defect: the second heavy \
+         GPU phase dies on an SQC (inst) GPUVM fault whose address is the \
+         right one with bit 47 wrongly set (0x7f.. read back as 0xff..). \
+         Logs the raw interrupt vector and the bit-47-cleared candidate for \
+         gfx1013 so the candidate can be checked against the faulting \
+         process's GPU VA map. Changes no control flow and fixes nothing — \
+         it exists to identify the root cause. Set amdgpu.bc250_fault_probe=0 \
+         to silence it.",
+        "gmc_v10_0.c",
+        Tell::ModParam("bc250_fault_probe")
+    ),
+    patch!(
+        "18",
+        "18-ttm-guard-null-pages-on-unpopulate.patch",
+        "Guard NULL ttm->pages[] on unpopulate — survive compute faults",
+        "amdgpu_ttm_tt_unpopulate walks ttm->pages[] and writes \
+         pages[i]->mapping without a NULL check, so a buffer left partially \
+         populated by an aborted GPU command panics the kernel on cleanup \
+         (CR2=0x18). On the BC-250 that turned every compute fault into a \
+         dead blade. Containment, not a fix: the faulting process still \
+         dies, but the machine survives long enough to read what patch 17 \
+         logged. Upstream bug, not distro-specific. By Gabriel Duarte Guerra.",
+        "amdgpu_ttm.c",
+        Tell::Bundled
+    ),
 ];
 
 /// Number of patches in the embedded series.

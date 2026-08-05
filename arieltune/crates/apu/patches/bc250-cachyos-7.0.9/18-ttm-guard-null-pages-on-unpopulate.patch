@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gabriel Duarte Guerra <72227489+GabriWar@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: guard against NULL entries in ttm->pages during
+ unpopulate
+
+amdgpu_ttm_tt_unpopulate() walks ttm->pages[] and writes pages[i]->mapping
+without checking for NULL. If a GPU command fails partway through, the buffer
+object can be left partially populated and cleanup dereferences a NULL page:
+
+  RIP: 0010:amdgpu_ttm_tt_unpopulate+0x77/0xd0 [amdgpu]
+  CR2: 0000000000000018
+  RAX: 0000000000000000  RBX: ffff8c72d0b6e180  RCX: 0000000000000000
+  Kernel panic - not syncing: Fatal exception
+
+CR2 = 0x18 is the offset of struct page::mapping, confirming pages[i] was NULL.
+
+This matters on the BC-250 because GPU command failures on gfx1013 are routine
+while the compute defect is unresolved, and every one of them risked taking the
+whole blade down -- four hard hangs in a single debugging session upstream, with
+unclean shutdowns and filesystem data loss. With the guard the failing process
+still dies but the machine survives.
+
+This addresses the crash, not the reason a BO ends up partially populated. It
+is a containment patch: it keeps a fault survivable so the defect can be
+investigated with patch 17 instead of rebooting the blade. The missing NULL
+check is upstream code, not distro-specific, and is worth upstreaming
+independently of the BC-250.
+
+Originally authored and tested by Gabriel Duarte Guerra against a full Stable
+Diffusion pipeline on gfx1013; carried here unmodified in substance, with the
+comment reworded. Source:
+http://192.168.40.16:3000/nightcarnage/bc250-rocm-gabriwar
+patches/0001-drm-amdgpu-guard-against-NULL-pages.patch
+
+Signed-off-by: Gabriel Duarte Guerra <72227489+GabriWar@users.noreply.github.com>
+---
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
+@@ -1168,8 +1168,13 @@
+ 	if (ttm->page_flags & TTM_TT_FLAG_EXTERNAL)
+ 		return;
+ 
++	/* A BO left partially populated by an aborted GPU command has NULL
++	 * holes in pages[]; without this the cleanup path panics on
++	 * NULL->mapping (CR2=0x18). Fixes the crash, not the abort.
++	 */
+ 	for (i = 0; i < ttm->num_pages; ++i)
+-		ttm->pages[i]->mapping = NULL;
++		if (ttm->pages[i])
++			ttm->pages[i]->mapping = NULL;
+ 
+ 	adev = amdgpu_ttm_adev(bdev);
+ 

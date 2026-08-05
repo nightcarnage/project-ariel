@@ -13,7 +13,7 @@ This set is **curated for portability** - only patches that are safe and useful
 on any BC-250 ship, renumbered **01-16** in apply order. See "Excluded" below for
 what was deliberately dropped.
 
-## Patch list (16)
+## Patch list (18)
 
 | # | Source | Purpose |
 |---|---|---|
@@ -33,6 +33,8 @@ what was deliberately dropped.
 | `14` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) |
 | `15` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) |
 | `16` | `gfx_v10_0.c` | **NEW** BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm+HSA) |
+| `17` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only |
+| `18` | `amdgpu_ttm.c` | **NEW** Guard NULL `ttm->pages[]` on unpopulate — survive compute faults |
 
 ## What aputune does with them
 
@@ -92,6 +94,38 @@ Layer 2 (patches 14+15): Bypass dangerous code paths + detect dead GPU
 
 All three layers are gated on `IP_VERSION(10, 1, x)` so they are no-ops on
 non-BC-250 hardware.
+
+## The open compute defect (patches 17-18)
+
+ROCm inference is stable on this part. What is not stable is any workload with a
+second heavy GPU phase — a training backward pass, an img2img reverse pass,
+multi-step generation. The first phase completes; the next one dies.
+
+When it surfaces as a page fault rather than a HIP error, the fault is always an
+`SQC (inst)` read — the shader *instruction* cache. The wave's PC was already
+wrong before the fault was raised, so the fault handler is reporting the
+symptom, not causing it.
+
+Seven of nine faults collected across separate boots with ASLR active share an
+exact shape: top byte `0xff`, low 20 bits `0xbb000`, only bits [39:20] moving.
+The process's own code objects live at `0x7f...`. `0x7f` -> `0xff` is one bit —
+bit 47, the canonical-form boundary — and the top byte of a 48-bit shader
+address is exactly `COMPUTE_PGM_HI`, which is 8 bits wide and carries bits
+[47:40]. So this is one wrong bit in a otherwise plausible address.
+
+- **`17` is the measurement.** It logs the raw interrupt vector and the
+  bit-47-cleared candidate so the candidate can be checked against the faulting
+  process's GPU VA map. It changes no control flow and fixes nothing. Gate with
+  `amdgpu.bc250_fault_probe=0`.
+- **`18` is containment.** Compute faults on this part were escalating to kernel
+  panics via a missing NULL check in TTM cleanup, which made the defect
+  expensive to study — you lose the blade instead of getting a log. With the
+  guard the process dies and the machine survives.
+
+Neither patch claims a fix. They exist so the defect can be isolated. Deliberately
+*not* shipped: fault-handler retry, address rewriting, warmup dispatches, and
+`AMD_SERIALIZE_KERNEL`-style throttling — those change timing or hide the symptom
+without addressing why bit 47 is set.
 
 ## Excluded (deliberately not shipped)
 
