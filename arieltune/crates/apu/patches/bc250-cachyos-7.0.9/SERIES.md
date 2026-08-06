@@ -15,7 +15,7 @@ order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
 alternate to `16` but not built. See "Excluded" below for what was deliberately
 dropped.
 
-## Patch list (18 applied, plus `12` on disk as an alternate)
+## Patch list (19 applied, plus `12` on disk as an alternate)
 
 | # | Source | Purpose |
 |---|---|---|
