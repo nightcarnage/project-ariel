@@ -166,3 +166,5 @@ running `linux-cachyos-bore-7.0.9`.
 |---|-------|------|-------------|
 | 20 | amdgpu-ttm-unpopulate-null-guard | amdgpu_ttm.c | Guard against NULL pages[i] during unpopulate (CR2=0x18) |
 | 21 | amdgpu-gmc-flush-pasid-kiq | gmc_v10_0.c | Disable KIQ for PASID TLB flushes on gfx1013 (prevents GPU wedge) |
+
+| 22 | amdgpu-ttm-fno-lto | Makefile | Disable ThinLTO for amdgpu_ttm.o (prevents NULL guard elision, CR2=0x18) |
