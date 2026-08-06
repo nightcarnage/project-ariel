@@ -285,6 +285,13 @@ pub const SERIES: &[Patch] = &[
         "amdgpu_ttm.c",
         Tell::Bundled
     ),
+    patch!(
+        "19",
+        "19-bc250-kfd-skip-sdma0.patch",
+        "BC-250 SDMA0 skip — restrict user queues to SDMA1",
+        "SDMA0 loses its completion interrupt at every boot (Fence fallback timer expired on ring sdma0 seen twice). User queues landing on engine 0 spin forever (SDMA=1) or corrupt H2D copies (SDMA=0). This patch clears the even-numbered SDMA queue bits so user queues only use engine 1, leaving engine 0 to the kernel ring. Controlled by amdgpu.bc250_skip_sdma0=1.",        "kfd_device_queue_manager.c",        Tell::ModParam("bc250_skip_sdma0")
+    ),
+
 ];
 
 /// Number of patches in the embedded series.

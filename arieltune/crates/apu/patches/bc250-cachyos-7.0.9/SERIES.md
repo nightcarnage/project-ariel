@@ -15,7 +15,7 @@ order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
 alternate to `16` but not built. See "Excluded" below for what was deliberately
 dropped.
 
-## Patch list (17 applied, plus `12` on disk as an alternate)
+## Patch list (18 applied, plus `12` on disk as an alternate)
 
 | # | Source | Purpose |
 |---|---|---|
@@ -155,3 +155,4 @@ Patches that exist in the research tree but are left out of the curated series:
 installs the package, arms 40-CU via modprobe.d, rebuilds initramfs, and (with
 `--target user@host`) deploys + reboots. Verified end-to-end on a real BC-250
 running `linux-cachyos-bore-7.0.9`.
+| `19` | `kfd_device_queue_manager.c` | **NEW** BC-250 SDMA0 skip — restrict user queues to SDMA1 (SDMA0 completion IRQ is lost at boot) |
