@@ -10,7 +10,7 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-18**. Every one except `12` is applied, in the
+on any BC-250 ship, numbered **01-19**. Every one except `12` is applied, in the
 order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
 alternate to `16` but not built. See "Excluded" below for what was deliberately
 dropped.
@@ -52,6 +52,7 @@ dropped.
   `amdgpu_smu_send_raw` node - GPU `force`/`wake`/`deep-sleep`/`autosleep`.
 - **CPU cclk** (09): soft min/max.
 - **Telemetry** (04/05/11): live clocks, temp, voltages.
+- **SDMA reliability** (19): Steers user SDMA queues off engine 0 to engine 1 (lost completion IRQ). Controlled by amdgpu.bc250_skip_sdma0=1. By Gabriel Duarte Guerra.
 
 ### CU unlock: patch 12 vs patch 16
 
@@ -97,6 +98,8 @@ Layer 2 (patches 14+15): Bypass dangerous code paths + detect dead GPU
   ├─ amdgpu_gmc_flush_gpu_tlb_pasid() → direct MMIO callout
   ├─ amdgpu_gmc_fw_reg_write_reg_wait() → direct MMIO poll loop
   └─ All paths: pre-read health check + 0xFFFFFFFF dead-GPU detection
+
+Layer 3 (patch 19): Steer user DMA away from broken SDMA0. Clear even-numbered SDMA queue bits so user queues use engine 1 only. amdgpu.bc250_skip_sdma0=1 (default off, A/B-testable).
 ```
 
 All three layers are gated on `IP_VERSION(10, 1, x)` so they are no-ops on
