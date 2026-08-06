@@ -291,6 +291,30 @@ pub const SERIES: &[Patch] = &[
         "BC-250 SDMA0 skip — restrict user queues to SDMA1",
         "SDMA0 loses its completion interrupt at every boot (Fence fallback timer expired on ring sdma0 seen twice). User queues landing on engine 0 spin forever (SDMA=1) or corrupt H2D copies (SDMA=0). This patch clears the even-numbered SDMA queue bits so user queues only use engine 1, leaving engine 0 to the kernel ring. Controlled by amdgpu.bc250_skip_sdma0=1.",        "kfd_device_queue_manager.c",        Tell::ModParam("bc250_skip_sdma0")
     ),
+    patch!(
+        "20",
+        "20-amdgpu-ttm-unpopulate-null-guard.patch",
+        "Guard NULL ttm->pages[] on unpopulate — survive compute faults",
+        "amdgpu_ttm_tt_unpopulate walks ttm->pages[] and writes pages[i]->mapping without a NULL check. When a GPU command fails midway the BO can be left partially populated, and the cleanup path dereferences a NULL page (CR2=0x18). On BC-250 this turned every compute fault into a hard machine hang. With this check the process dies but the machine survives. Upstream bug. By Gabriel Duarte Guerra.",
+        "amdgpu_ttm.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "21",
+        "21-amdgpu-gmc-flush-pasid-kiq.patch",
+        "Disable KIQ for PASID TLB flushes on gfx1013",
+        "Without this the KIQ fence times out, the CP ends up in an unrecoverable state and GPU reset fails to bring SDMA back. The module parameter flush_pasid_uses_kiq is set to false for BC-250, preventing KIQ-based TLB flushes that wedge the GPU. By neoney (BC-250 community), verified by GabriWar.",
+        "gmc_v10_0.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "22",
+        "22-amdgpu-ttm-fno-lto.patch",
+        "Disable ThinLTO for amdgpu_ttm.o (defeats NULL guard elision)",
+        "ThinLTO optimizes away the NULL guard from patch 20, causing kernel panics (CR2=0x18) to return. Adding -fno-lto to amdgpu_ttm.o prevents the compiler from proving pages[i] is never NULL across the call graph. This is required because the underlying BC-250 GPU aliasing bug (GPU reads outside its own page table) produces partially-populated BOs that will trigger the NULL path.",
+        "Makefile",
+        Tell::Bundled
+    ),
 
 ];
 
