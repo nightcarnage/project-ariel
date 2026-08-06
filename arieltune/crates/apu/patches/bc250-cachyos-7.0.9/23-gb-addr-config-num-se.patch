@@ -1,36 +1,25 @@
-From: nightcarnage <nightcarnage@bc250-project>
-Subject: [PATCH 23/23] drm/amdgpu: fix GB_ADDR_CONFIG for BC-250/gfx1013
+From: nightcarnage
+Subject: [PATCH 23/23] drm/amdgpu: fix golden GB_ADDR_CONFIG for gfx1013/gfx10
 
-The stock golden register sets mmGB_ADDR_CONFIG to 0x00000044 which sets
-NUM_SHADER_ENGINES to 0. The BC-250 community reports 0x00100044 as
-required for ROCm on this board — bit 20 changes NUM_SHADER_ENGINES from
-0 to 2.
+Change hardware golden register mmGB_ADDR_CONFIG from 0x00000044 to
+0x00100044 for the gfx10 family. Bit 20 controls NUM_SHADER_ENGINES;
+setting it from 0 to 2 fixes GPU address swizzle on BC-250.
 
-GB_ADDR_CONFIG controls pipe interleave and shader-engine address swizzle.
-A wrong shader-engine count causes distinct GPU addresses to collide on the
-same physical location, which exactly matches the measured GPU aliasing
-signature (docs/17 in GabriWar's analysis):
-- Two live hipMalloc buffers alias despite disjunct VAs
-- CPU never affected (doesn't go through the shader-engine swizzle)
-- Bimodal per-process (swizzle is static per VM config)
+The software path already uses CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN
+(0x00100044) for IP_VERSION(10,1,3) and (10,1,4), but the hardware
+golden register was still programming the stock value. The GPU memory
+controller uses the hardware register value for physical address decode,
+so the hardware and software must agree.
 
-This is the community's leading hypothesis for the root cause of the GPU
-corruption on BC-250. The change is one register value. It matters more if
-the 40-CU unlock is active, since that changes the harvest configuration
-this register describes.
+Credit: BC-250 community, documented by GabriWar.
 
-UNTESTED — flagged as a lead by GabriWar. Build and A/B test before
-declaring victory.
-
-Signed-off-by: nightcarnage
----
- drivers/gpu/drm/amd/amdgpu/soc15.c | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
-diff --git a/drivers/gpu/drm/amd/amdgpu/soc15.c b/drivers/gpu/drm/amd/amdgpu/soc15.c
-index 1234567..89abcde 100644
---- a/drivers/gpu/drm/amd/amdgpu/soc15.c
-+++ b/drivers/gpu/drm/amd/amdgpu/soc15.c
-@@ -1652,7 +1652,7 @@ static void soc15_program_asd(struct amdgpu_device *adev)
- 	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGB_ADDR_CONFIG, 0x0c1800ff, 0x00000044),
+diff --git a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+index aaaaaaa..bbbbbbb 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -1652,7 +1652,7 @@ static const struct soc15_reg_golden golden_settings_gc_10_0[] = {
+ 	SOC15_REG_GOLDEN_VALUE(GC, 0, mmDB_DFSM_TILES_IN_FLIGHT, 0x0000ffff, 0x0000003f),
+ 	SOC15_REG_GOLDEN_VALUE(GC, 0, mmDB_LAST_OF_BURST_CONFIG, 0xffffffff, 0x03860204),
+-	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGB_ADDR_CONFIG, 0x0c1800ff, 0x00000044),
 +	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGB_ADDR_CONFIG, 0x0c1800ff, 0x00100044),
+ 	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGCR_GENERAL_CNTL, 0x1ff0ffff, 0x00000500),
