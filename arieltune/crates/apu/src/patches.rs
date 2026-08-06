@@ -315,6 +315,14 @@ pub const SERIES: &[Patch] = &[
         "Makefile",
         Tell::Bundled
     ),
+    patch!(
+        "23",
+        "23-gb-addr-config-num-se.patch",
+        "Fix GB_ADDR_CONFIG NUM_SHADER_ENGINES 0→2 (BC-250 community)",
+        "The stock mmGB_ADDR_CONFIG=0x00000044 sets NUM_SHADER_ENGINES=0. The BC-250 community reports 0x00100044 (bit 20→NUM_SE=2) as required for ROCm. GB_ADDR_CONFIG controls pipe interleave and shader-engine address swizzle; a wrong SE count causes distinct GPU addresses to collide — the measured aliasing signature. Credit: BC-250 community, documented by GabriWar.",
+        "soc15.c",
+        Tell::Bundled
+    ),
 
 ];
 

@@ -1,0 +1,36 @@
+From: nightcarnage <nightcarnage@bc250-project>
+Subject: [PATCH 23/23] drm/amdgpu: fix GB_ADDR_CONFIG for BC-250/gfx1013
+
+The stock golden register sets mmGB_ADDR_CONFIG to 0x00000044 which sets
+NUM_SHADER_ENGINES to 0. The BC-250 community reports 0x00100044 as
+required for ROCm on this board — bit 20 changes NUM_SHADER_ENGINES from
+0 to 2.
+
+GB_ADDR_CONFIG controls pipe interleave and shader-engine address swizzle.
+A wrong shader-engine count causes distinct GPU addresses to collide on the
+same physical location, which exactly matches the measured GPU aliasing
+signature (docs/17 in GabriWar's analysis):
+- Two live hipMalloc buffers alias despite disjunct VAs
+- CPU never affected (doesn't go through the shader-engine swizzle)
+- Bimodal per-process (swizzle is static per VM config)
+
+This is the community's leading hypothesis for the root cause of the GPU
+corruption on BC-250. The change is one register value. It matters more if
+the 40-CU unlock is active, since that changes the harvest configuration
+this register describes.
+
+UNTESTED — flagged as a lead by GabriWar. Build and A/B test before
+declaring victory.
+
+Signed-off-by: nightcarnage
+---
+ drivers/gpu/drm/amd/amdgpu/soc15.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/soc15.c b/drivers/gpu/drm/amd/amdgpu/soc15.c
+index 1234567..89abcde 100644
+--- a/drivers/gpu/drm/amd/amdgpu/soc15.c
++++ b/drivers/gpu/drm/amd/amdgpu/soc15.c
+@@ -1652,7 +1652,7 @@ static void soc15_program_asd(struct amdgpu_device *adev)
+ 	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGB_ADDR_CONFIG, 0x0c1800ff, 0x00000044),
++	SOC15_REG_GOLDEN_VALUE(GC, 0, mmGB_ADDR_CONFIG, 0x0c1800ff, 0x00100044),

@@ -168,3 +168,5 @@ running `linux-cachyos-bore-7.0.9`.
 | 21 | amdgpu-gmc-flush-pasid-kiq | gmc_v10_0.c | Disable KIQ for PASID TLB flushes on gfx1013 (prevents GPU wedge) |
 
 | 22 | amdgpu-ttm-fno-lto | Makefile | Disable ThinLTO for amdgpu_ttm.o (prevents NULL guard elision, CR2=0x18) |
+
+| 23 | gb-addr-config-num-se | soc15.c | Fix GB_ADDR_CONFIG NUM_SHADER_ENGINES 0→2 (BC-250 community aliasing fix) |
