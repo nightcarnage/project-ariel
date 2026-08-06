@@ -159,3 +159,10 @@ Patches that exist in the research tree but are left out of the curated series:
 installs the package, arms 40-CU via modprobe.d, rebuilds initramfs, and (with
 `--target user@host`) deploys + reboots. Verified end-to-end on a real BC-250
 running `linux-cachyos-bore-7.0.9`.
+
+### Layer 4 — GPU Stability (GabriWar)
+
+| # | Patch | File | Description |
+|---|-------|------|-------------|
+| 20 | amdgpu-ttm-unpopulate-null-guard | amdgpu_ttm.c | Guard against NULL pages[i] during unpopulate (CR2=0x18) |
+| 21 | amdgpu-gmc-flush-pasid-kiq | gmc_v10_0.c | Disable KIQ for PASID TLB flushes on gfx1013 (prevents GPU wedge) |
