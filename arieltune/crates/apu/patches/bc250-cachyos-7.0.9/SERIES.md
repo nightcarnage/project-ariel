@@ -10,12 +10,42 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-24**. Every one except `12` is applied, in the
+on any BC-250 ship, numbered **01-24**. Patches `12` and `23` are NOT applied, in the
 order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
 alternate to `16` but not built. See "Excluded" below for what was deliberately
 dropped.
 
-## Patch list (22 applied, plus `12` on disk as an alternate)
+
+## Quick reference: all 24 patches
+
+| # | Filename | Status |
+|---|----------|--------|
+| `01` | `01-declare-20-smu-message-enums.patch` | ✅ applied |
+| `02` | `02-map-23-pmfw-messages-raise-sclk-max.patch` | ✅ applied |
+| `03` | `03-gfx-clock-force-and-dpm-levels.patch` | ✅ applied |
+| `04` | `04-start-pmfw-telemetry-reporting.patch` | ✅ applied |
+| `05` | `05-raceless-direct-gfxclk-query.patch` | ✅ applied |
+| `06` | `06-read-cac-weight-baselines.patch` | ✅ applied |
+| `07` | `07-cac-weight-and-sendraw-debugfs.patch` | ✅ applied |
+| `08` | `08-smu-cmn-send-raw-debugfs-definitions.patch` | ✅ applied |
+| `09` | `09-cpu-cclk-soft-limits-debugfs.patch` | ✅ applied |
+| `10` | `10-print-full-32bit-cac-value.patch` | ✅ applied |
+| `11` | `11-full-telemetry-dump-debugfs.patch` | ✅ applied |
+| `12` | `12-unlock-all-40-compute-units.patch` | ❌ NOT applied — Vulkan-only |
+| `13` | `13-gfxoff-disable-gfx1013.patch` | ✅ applied |
+| `14` | `14-gmc-kiq-bypass-dead-gpu.patch` | ✅ applied |
+| `15` | `15-amdgpu-gmc-kiq-bypass.patch` | ✅ applied |
+| `16` | `16-cu-unlock-cc-spi-safe-no-rlc.patch` | ✅ applied |
+| `17` | `17-bc250-gfx1013-fault-probe.patch` | ✅ applied |
+| `18` | `18-ttm-guard-null-pages-on-unpopulate.patch` | ✅ applied |
+| `19` | `19-bc250-kfd-skip-sdma0.patch` | ✅ applied |
+| `20` | `20-amdgpu-ttm-unpopulate-null-guard.patch` | ✅ applied |
+| `21` | `21-amdgpu-gmc-flush-pasid-kiq.patch` | ✅ applied |
+| `22` | `22-amdgpu-ttm-fno-lto.patch` | ✅ applied |
+| `23` | `23-gb-addr-config-num-se.patch` | ❌ NOT applied — regression |
+| `24` | `24-gmc-v10-flush-all-vmids.patch` | ✅ applied — active on snap-a0af1eeb |
+
+## Detailed patch list
 
 | # | Source | Purpose |
 |---|---|---|
