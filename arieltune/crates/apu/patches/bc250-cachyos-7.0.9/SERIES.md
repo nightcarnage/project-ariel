@@ -39,6 +39,11 @@ dropped.
 | `17` | `17-bc250-gfx1013-fault-probe.patch` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only |
 | `18` | `18-ttm-guard-null-pages-on-unpopulate.patch` | `amdgpu_ttm.c` | **NEW** Guard NULL `ttm->pages[]` on unpopulate — survive compute faults |
 | `19` | `19-bc250-kfd-skip-sdma0.patch` | `kfd_device_queue_manager.c` | **NEW** BC-250 SDMA0 skip — restrict user queues to SDMA1 (SDMA0 completion IRQ is lost at boot) |
+| `20` | `20-amdgpu-ttm-unpopulate-null-guard.patch` | `amdgpu_ttm.c` | **NEW** READ_ONCE NULL guard on TTM *unpopulate* path — completes patch 18 crash protection |
+| `21` | `21-amdgpu-gmc-flush-pasid-kiq.patch` | `gmc_v10_0.c` | **NEW** Disable KIQ for PASID TLB flushes on gfx1013 (`flush_pasid_uses_kiq = false`) — prevents KIQ wedge |
+| `22` | `22-amdgpu-ttm-fno-lto.patch` | `Makefile` | **NEW** `CFLAGS_amdgpu_ttm.o += -fno-lto` — prevents ThinLTO from eliding NULL guards from patches 18+20 |
+| `23` | `23-gb-addr-config-num-se.patch` | `gfx_v10_0.c` | *(on disk, NOT applied)* GB_ADDR_CONFIG change (0x00100044) — causes regression, GPU instability worsens |
+| `24` | `24-gmc-v10-flush-all-vmids.patch` | `gmc_v10_0.c` | **NEW** TLB flush all mapped VMIDs on BC-250 — direct MMIO path, no KIQ. Fixes GPU aliasing bug. **Active on snap-a0af1eeb.** |
 
 ## What aputune does with them
 
