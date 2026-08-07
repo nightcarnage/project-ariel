@@ -10,12 +10,12 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-19**. Every one except `12` is applied, in the
+on any BC-250 ship, numbered **01-24**. Every one except `12` is applied, in the
 order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
 alternate to `16` but not built. See "Excluded" below for what was deliberately
 dropped.
 
-## Patch list (19 applied, plus `12` on disk as an alternate)
+## Patch list (22 applied, plus `12` on disk as an alternate)
 
 | # | Source | Purpose |
 |---|---|---|
@@ -160,39 +160,26 @@ installs the package, arms 40-CU via modprobe.d, rebuilds initramfs, and (with
 `--target user@host`) deploys + reboots. Verified end-to-end on a real BC-250
 running `linux-cachyos-bore-7.0.9`.
 
-### Layer 4 — GPU Stability (GabriWar)
 
-| # | Patch | File | Description |
-|---|-------|------|-------------|
-| 20 | amdgpu-ttm-unpopulate-null-guard | amdgpu_ttm.c | Guard against NULL pages[i] during unpopulate (CR2=0x18) |
-| 21 | amdgpu-gmc-flush-pasid-kiq | gmc_v10_0.c | Disable KIQ for PASID TLB flushes on gfx1013 (prevents GPU wedge) |
+## Patches 20-24: TTM crash fixes + TLB flush (GabriWar era)
 
-| 22 | amdgpu-ttm-fno-lto | Makefile | Disable ThinLTO for amdgpu_ttm.o (prevents NULL guard elision, CR2=0x18) |
+### What they do
 
-| 23 | gb-addr-config-num-se | soc15.c | Fix GB_ADDR_CONFIG NUM_SHADER_ENGINES 0→2 (BC-250 community aliasing fix) |
-
-## Patches 20-24: TTM crash fixes + TLB flush
-
-| # | Source | Purpose |
-|---|---|---|
-| `20` | `amdgpu_ttm.c` | **NEW** READ_ONCE NULL guard on TTM unpopulate path — prevents CR2=0x18 NULL->mapping panic |
-| `21` | `gmc_v10_0.c` | **NEW** Set `flush_pasid_uses_kiq = false` for BC-250 — PASID TLB flush goes direct MMIO, not KIQ |
-| `22` | `Makefile` | **NEW** `CFLAGS_amdgpu_ttm.o += -fno-lto` — prevents ThinLTO from optimizing away the NULL guard |
-| `23` | `gfx_v10_0.c` | *(on disk, NOT applied)* GB_ADDR_CONFIG change (0x00100044) — causes regression, reverted |
-| `24` | `gmc_v10_0.c` | **NEW** TLB flush all mapped VMIDs on BC-250 — iterates every mapped process VMID through direct MMIO path, bypassing KIQ completely. Potential fix for the GPU aliasing bug (GPU reads outside its own page table). |
-
-### What patches 20-24 add
-
-- **TTM crash fix** (20/22): Patch 18 guarded the populate path; patches 20+22 complete the
-  protection by guarding the unpopulate path and preventing LTO from removing the check.
-  Together with 18, this eliminates the CR2=0x18 kernel panics on compute faults.
-- **KIQ bypass for PASID flush** (21): The `gmc_v10_0_flush_gpu_tlb_pasid()` function
-  now uses direct MMIO register writes instead of the KIQ INVALIDATE_TLBS packet on BC-250.
-- **All-VMID TLB flush** (24): Instead of matching PASID values (which can race with KFD
-  teardown), patch 24 invalidates every currently-mapped process VMID. This is the most
-  promising fix for the GPU aliasing bug documented by Gabriel Duarte Guerra.
-- **GB_ADDR_CONFIG (23)**: Proven ineffective — causes worse GPU instability. Kept on disk
-  for documentation but NOT applied in any build.
+- **TTM crash fix** (20+22): Patch 18 guarded the populate path; patches 20+22
+  complete the protection by guarding the unpopulate path and preventing ThinLTO
+  from eliding the NULL check. Together with 18, this eliminates the CR2=0x18
+  kernel panics on compute faults.
+- **KIQ bypass for PASID flush** (21): Sets `flush_pasid_uses_kiq = false` for
+  gfx1013 so PASID-based TLB flushes go through direct MMIO register writes
+  instead of the KIQ INVALIDATE_TLBS packet which is known to wedge on BC-250.
+- **GB_ADDR_CONFIG** (23): Proven ineffective — causes worse GPU instability.
+  Kept on disk for documentation but NOT applied in any build.
+- **All-VMID TLB flush** (24): Instead of matching PASID values (which can race
+  with KFD teardown), patch 24 invalidates every currently-mapped process VMID
+  through the direct MMIO path on every TLB invalidation. Also guards
+  `gmc_v10_0_flush_gpu_tlb()` against BC-250 to skip the FW-register KIQ path.
+  **Active on snap-a0af1eeb.** Validated with 4-worker concurrent GPU stress
+  (200 iters, 0 corruptions).
 
 ### GPU aliasing bug
 
@@ -201,5 +188,12 @@ VMIDs can see each other's physical pages. This manifests as ILLEGAL_INSTRUCTION
 or random data corruption in multi-process GPU workloads. The root cause per
 GabriWar's analysis: the GPU reads outside its own IOMMU page table. The TLB
 invalidation path may leave stale entries across VMID boundaries. Patch 24
-attempts to close this by flushing all mapped VMIDs on every invalidation,
-ensuring no stale cross-VMID entries survive.
+flushes all mapped VMIDs on every invalidation, ensuring no stale cross-VMID
+entries survive.
+
+### Production snapshot lineage
+
+```
+snap-31bbf471 (19-patch, stable)
+  └─ snap-a0af1eeb (19-patch + 24: all-VMID TLB flush)  ← pinned
+```
