@@ -1,0 +1,60 @@
+From: BC-250 community
+Subject: [PATCH 24/24] drm/amdgpu: flush all mapped VMIDs on BC-250 TLB invalidation
+
+The PASID-to-VMID query in gmc_v10_0_flush_gpu_tlb_pasid() races with
+KFD teardown on gfx1013 (BC-250 / Oberon), and the INVALIDATE_TLBS
+packet wedges the KIQ. Instead of depending on PASID equality, iterate
+every currently mapped process VMID and invalidate through the direct
+register path.
+
+The BC-250 GPU aliasing bug (GPU reads outside its own page table,
+documented in GabriWar's analysis) may be caused by stale TLB entries
+across VMID boundaries. Flushing all mapped VMIDs ensures no stale
+entries survive across process switches.
+
+Also add a guard in gmc_v10_0_flush_gpu_tlb() to skip the KIQ path
+for BC-250 (device 0x13fe), since KIQ TLB invalidation is known to
+wedge on this hardware (patch 21 already addresses the PASID path).
+
+Signed-off-by: BC-250 community
+---
+ drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c | 34 ++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+index aaaaaaa..bbbbbbb 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+@@ -261,7 +261,8 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+-	if (adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
++	if (adev->pdev->device != 0x13fe &&
++	    adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
+ 	    (amdgpu_sriov_runtime(adev) || !amdgpu_sriov_vf(adev))) {
+@@ -338,8 +339,35 @@ static void gmc_v10_0_flush_gpu_tlb_pasid(struct amdgpu_device *adev,
+ 	uint16_t queried;
+ 	int vmid, i;
+ 
++	/* BC-250: PASID-to-VMID query races KFD teardown and the INVALIDATE_TLBS
++	 * packet wedges KIQ. Instead, invalidate every currently mapped process
++	 * VMID through the direct register path.
++	 */
++	if (adev->pdev->device == 0x13fe) {
++		dev_info_once(adev->dev,
++			      "BC-250: directly invalidating mapped VMIDs\n");
++		for (vmid = 1; vmid < AMDGPU_NUM_VMID; vmid++) {
++			if (!gmc_v10_0_get_atc_vmid_pasid_mapping_info(
++				    adev, vmid, &queried))
++				continue;
++			if (all_hub)
++				for_each_set_bit(i, adev->vmhubs_mask,
++						 AMDGPU_MAX_VMHUBS)
++					gmc_v10_0_flush_gpu_tlb(adev, vmid, i,
++								flush_type);
++			else
++				gmc_v10_0_flush_gpu_tlb(adev, vmid,
++							AMDGPU_GFXHUB(0), flush_type);
++		}
++		return;
++	}
++
+ 	for (vmid = 1; vmid < AMDGPU_NUM_VMID; vmid++) {
