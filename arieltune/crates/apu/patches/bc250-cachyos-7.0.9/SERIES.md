@@ -19,7 +19,7 @@ dropped.
 ## Detailed patch list
 
 | # | Filename | Source | Purpose |
-|---|---|---|
+|---|---|---|---|
 | `01` | `01-declare-20-smu-message-enums.patch` | `smu_types.h` | Declare the new `SMU_MSG_*` enum values the msg map needs |
 | `02` | `02-map-23-pmfw-messages-raise-sclk-max.patch` | `cyan_skillfish_ppt.c` | Map 23 msgids (11->34); raise `CYAN_SKILLFISH_SCLK_MAX` 2000->2500 |
 | `03` | `03-gfx-clock-force-and-dpm-levels.patch` | `cyan_skillfish_ppt.c` | `set_performance_level` + `ForceGfxFreq`/`UnForceGfxFreq` |
@@ -67,7 +67,7 @@ dropped.
 ROCm-safe derivative, and it is the one `apu build` applies.
 
 | Aspect | Patch 12 (Studebaker, Vulkan) | Patch 16 (applied) |
-|---|---|---|
+|---|---|---|---|
 | Registers | CC + SPI + **RLC** | CC + SPI only |
 | RLC_PG_ALWAYS_ON_WGP_MASK | Written (mode 3) | **NOT written** |
 | Vulkan/RADV | ✅ Works | ✅ Works |
