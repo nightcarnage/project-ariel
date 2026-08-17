@@ -1422,7 +1422,11 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
 
 fn cmd_patches(show: Option<String>) -> Result<()> {
     if let Some(id) = show {
-        match patches::SERIES.iter().find(|p| p.id == id) {
+        let found = patches::SERIES
+            .iter()
+            .find(|p| p.id == id)
+            .or_else(|| patches::ON_DISK.iter().find(|p| p.id == id));
+        match found {
             Some(p) => {
                 println!("# {}, {}\n# touches: {}\n", p.id, p.title, p.touches);
                 print!("{}", p.body);
@@ -1449,6 +1453,20 @@ fn cmd_patches(show: Option<String>) -> Result<()> {
     println!();
     for r in &rep.rows {
         println!("{} {:<5} {}", r.state.glyph(), r.id, r.title);
+    }
+    if !rep.on_disk.is_empty() {
+        println!("\non disk, not applied:");
+        for r in &rep.on_disk {
+            let tell = match r.tell {
+                patches::Tell::ModParam(n) => format!("amdgpu.{n}"),
+                patches::Tell::Debugfs(n) => n.to_string(),
+                patches::Tell::SclkMax(m) => format!("sclk >= {m} MHz"),
+                patches::Tell::CuCount(n) => format!(">= {n} CUs"),
+                patches::Tell::Bundled => "none (superseded/shared)".into(),
+            };
+            println!("    [od] {:<5} {}   (tell: {})", r.id, r.title, tell);
+        }
+        println!("    (not built by `arieltune apu build` — opt in via the series)");
     }
     let missing = rep.missing();
     if !missing.is_empty() {

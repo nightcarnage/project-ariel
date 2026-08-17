@@ -348,6 +348,62 @@ pub const SERIES: &[Patch] = &[
 
 ];
 
+/// Patches that ship on disk and are tracked in the TUI, but are NOT part of
+/// the applied series — `aputune build` does not materialize them. Opt one in
+/// by moving its entry into [`SERIES`] (mind apply-order and hunk overlaps).
+pub const ON_DISK: &[Patch] = &[
+    patch!(
+        "12",
+        "12-unlock-all-40-compute-units.patch",
+        "Vulkan-only 40-CU unlock (Studebaker)",
+        "The original 40-CU unlock that also writes RLC_PG_ALWAYS_ON_WGP_MASK. \
+         Safe for Vulkan/RADV; hangs ROCm/HSA on the first KFD queue, which is \
+         why patch 16 (no RLC write) is the applied one. Kept on disk for \
+         Vulkan-only setups. Note: its tell is shared with patch 16, so the \
+         TUI cannot tell the two apart on a live kernel.",
+        "gfx_v10_0.c",
+        Tell::ModParam("bc250_cc_write_mode")
+    ),
+    patch!(
+        "21",
+        "21-amdgpu-gmc-flush-pasid-kiq.patch",
+        "KIQ PASID-flush disable (neoney, verified by GabriWar)",
+        "Sets flush_pasid_uses_kiq = false for gfx1013 so PASID TLB flushes go \
+         through direct MMIO instead of the KIQ INVALIDATE_TLBS packet that \
+         wedges this board. Superseded in the applied series by patch 14(e), \
+         which implements the same change — kept on disk for attribution and \
+         as a standalone reference.",
+        "gmc_v10_0.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "26",
+        "26-bc250-sdma-firmware-override.patch",
+        "SDMA firmware override (navi10/navi12 blob instead of cyan)",
+        "The cyan_skillfish2 SDMA firmware never drives the user queues \
+         (GabriWar docs/28+29: 0 bytes copied, signal never drops; any other \
+         SDMA 5.0 blob copies 4 MiB in 0.04 s with correct data). This is the \
+         exit strategy for patch 19: validate with HSA_ENABLE_SDMA=1 round \
+         trips, then retire bc250_skip_sdma0. Gated by \
+         amdgpu.bc250_sdma_fw=<base>; empty = stock cyan blob.",
+        "amdgpu_sdma.c",
+        Tell::ModParam("bc250_sdma_fw")
+    ),
+    patch!(
+        "27",
+        "27-bc250-early-sdma-trap.patch",
+        "Write SDMA TRAP_ENABLE during gfx_resume",
+        "TRAP_ENABLE is normally written only after amdgpu_device_ip_init() \
+         returns in full, so early SDMA0 fence waits always hit the 500 ms \
+         fallback timer — the two 'Fence fallback timer expired on ring sdma0' \
+         boot lines. Writing the bit in gfx_resume removes them; a readback \
+         log proves the write landed (GabriWar docs/28). Ship together with \
+         patch 26.",
+        "sdma_v5_0.c",
+        Tell::ModParam("bc250_early_sdma_trap")
+    ),
+];
+
 /// Number of patches in the embedded series.
 pub fn count() -> usize {
     SERIES.len()

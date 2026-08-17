@@ -46,6 +46,8 @@ pub struct PatchStatus {
 
 pub struct Report {
     pub rows: Vec<PatchStatus>,
+    /// Patches that ship on disk but are not in the applied series.
+    pub on_disk: Vec<PatchStatus>,
     /// amdgpu debugfs dir found at probe time (None if unavailable).
     pub dbg_dir: Option<PathBuf>,
     /// Is this host actually a BC-250?
@@ -211,8 +213,26 @@ pub fn report() -> Report {
         }
     }
 
+    // On-disk (not applied) members: probe each tell directly — no bundled
+    // inference, no cross-patch logic. A shared tell (12 with 16) reads as
+    // Present when the applied patch carrying it is live; the TUI labels the
+    // section accordingly.
+    let on_disk: Vec<PatchStatus> = patches::ON_DISK
+        .iter()
+        .map(|p| PatchStatus {
+            id: p.id,
+            title: p.title,
+            tell: p.tell,
+            state: match p.tell {
+                Tell::Bundled => State::Unknown,
+                t => probe(t, dbg.as_deref()),
+            },
+        })
+        .collect();
+
     Report {
         rows,
+        on_disk,
         dbg_dir: dbg,
         is_bc250: ariel_hal::ariel_apu_present(),
     }

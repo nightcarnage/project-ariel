@@ -10,12 +10,14 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-25**. Two patches are on disk but NOT applied,
+on any BC-250 ship, numbered **01-27**. Four patches are on disk but NOT applied,
 in the order listed: `12` (Studebaker's Vulkan-only CU unlock, kept as an
-alternate to `16`) and `21` (KIQ PASID-flush disable - superseded by patch
-`14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x;
-keeping both in the series would fail to apply). See "Excluded" below for what
-was deliberately dropped.
+alternate to `16`), `21` (KIQ PASID-flush disable - superseded by patch
+`14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x),
+`26` and `27` (the SDMA firmware fix and its companion boot trap fix - staged
+for the SDMA validation round, then patch `19` retires). All four are tracked
+in the `aputune` TUI under "on disk, not applied". See "Excluded" below for
+what was deliberately dropped.
 
 
 ## Detailed patch list
@@ -47,6 +49,8 @@ was deliberately dropped.
 | `23` | `23-gb-addr-config-num-se.patch` | `gfx_v10_0.c` | **APPLIED** GB_ADDR_CONFIG 0x00000044→0x00100044 in the gc_10_1_2 golden table — deployed form; GabriWar later retracted it upstream, but the production build carries it |
 | `24` | `24-gmc-v10-flush-all-vmids.patch` | `gmc_v10_0.c` | **NEW** TLB flush all mapped VMIDs on BC-250 — direct MMIO path, no KIQ. Fixes GPU aliasing bug. **Active on snap-a0af1eeb.** |
 | `25` | `25-bc250-flush-tlb-by-runlist.patch` | `kfd_device_queue_manager.c`, `kfd_chardev.c`, `kfd_device_queue_manager.h` | **NEW** Rebuild the runlist on unmap so the firmware really invalidates the compute TLB. **Active on snap-8fe794e8** — the patch that made PyTorch work. |
+| `26` | `26-bc250-sdma-firmware-override.patch` | `amdgpu_sdma.c` | *(on disk, NOT applied)* SDMA firmware override — the cyan_skillfish2 blob never drives user queues (GabriWar docs/28+29); navi10/navi12 blobs work. Gated by `amdgpu.bc250_sdma_fw=<base>`. Validation path to retiring patch 19. |
+| `27` | `27-bc250-early-sdma-trap.patch` | `sdma_v5_0.c` | *(on disk, NOT applied)* Write SDMA TRAP_ENABLE in gfx_resume — removes the two 500 ms "Fence fallback" stalls at boot. Companion to patch 26. |
 
 ## What aputune does with them
 
@@ -242,3 +246,27 @@ NOT in production; patch 19 is the SDMA workaround). The two
 "Fence fallback timer expired on ring sdma0" boot messages still appear
 (GabriWar's `bc250_early_sdma_trap` fix from his SDMA instrumentation patch
 is not in production).
+
+## Roadmap — the SDMA exit and what it retires
+
+The two "Fence fallback timer expired on ring sdma0" lines at every boot are
+init-order artifacts, not lost interrupts (GabriWar docs/28), and the user-queue
+hang is the firmware itself: AMD's `cyan_skillfish2_sdma.bin` never drives user
+queues, while navi10/navi12 blobs copy 4 MiB in 0.04 s with correct data
+(docs/29). Patch 19 (`bc250_skip_sdma0=1`) is the current workaround.
+
+Planned sequence, each step measured before the next:
+
+1. Boot a blade with `amdgpu.bc250_sdma_fw=navi12` (patch 26, opt-in param) and
+   patch 27. Validate: completion signal drops, `torch.equal` on 16 MiB round
+   trips with `HSA_ENABLE_SDMA=1`, magnum bandwidth, RCCL collectives.
+2. Retire patch 19 (`bc250_skip_sdma0=1` off) once SDMA0 is proven.
+3. Re-test `vm_update_mode` (SDMA page-table updates) against the Navi 1x
+   invalidation-vs-translation errata in `amdgpu_gmc.c:743`.
+4. Promote 26 + 27 into the applied series.
+
+Known performance work on top of that: the runlist flush (25) currently rebuilds
+on every unmap — coalescing or VA-reuse gating is the next tuning step
+(GabriWar's own "still owed" list); patch 24's all-VMID loop may be a no-op
+behind the same empty ATC query and should be measured before it is trusted;
+`amdgpu.noretry=1` removes retry stalls on the rare real fault.

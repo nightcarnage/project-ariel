@@ -1512,6 +1512,48 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
         ]));
         lines.push(Line::from(""));
     }
+
+    if !patches::ON_DISK.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                " On disk, not applied ({}) — tracked here so the full patch\
+                 inventory is visible; `aputune build` does not apply them.",
+                patches::ON_DISK.len()
+            ),
+            Style::default()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+        for p in patches::ON_DISK {
+            let tell = match p.tell {
+                patches::Tell::ModParam(n) => format!("module param amdgpu.{n}"),
+                patches::Tell::Debugfs(n) => format!("debugfs node {n}"),
+                patches::Tell::SclkMax(m) => format!("pp_dpm_sclk >= {m} MHz"),
+                patches::Tell::CuCount(n) => format!(">= {n} active CUs"),
+                patches::Tell::Bundled => "none (superseded/shared)".into(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  [od] ", Style::default().fg(DIM)),
+                Span::styled(
+                    p.title.to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for seg in wrap_words(p.desc, 64) {
+                lines.push(Line::from(Span::styled(format!("        {seg}"), intro)));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("        touches: ", intro),
+                Span::styled(p.touches.to_string(), Style::default().fg(ACCENT)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("        tell:    ", intro),
+                Span::raw(tell),
+            ]));
+            lines.push(Line::from(""));
+        }
+    }
     lines
 }
 
