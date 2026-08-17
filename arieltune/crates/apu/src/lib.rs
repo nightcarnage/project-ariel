@@ -59,6 +59,11 @@ pub fn screen() -> ApuScreen {
 }
 
 /// Run an APU CLI subcommand (the non-TUI liberation + tuner surface).
+///
+/// Root-only by policy: arieltune talks to the hardware via the SMN aperture
+/// and the 0600 root-owned amdgpu debugfs nodes, and a non-root run only
+/// produces confusing EACCES / `[??]` detection rows. Refuse up front.
 pub fn run_cli(cmd: Cmd) -> anyhow::Result<()> {
+    ariel_hal::require_root()?;
     cli::run(cmd)
 }
