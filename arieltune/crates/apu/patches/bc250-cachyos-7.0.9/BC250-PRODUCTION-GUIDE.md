@@ -1,8 +1,8 @@
 # BC-250 Production Guide — ROCm + PyTorch on CachyOS 7.0.9
 
-**Date**: 2026-08-07  
+**Date**: 2026-08-17 (updated for the 25-patch runlist build)  
 **Hardware**: AMD BC-250 (gfx1013 / Cyan Skillfish), 40 CU, 17.2 GB VRAM  
-**Kernel**: 7.0.9-cachyos with 22 applied patches (19 baseline + 24)  
+**Kernel**: 7.0.9-cachyos, 25-patch series (modtree=build2, module srcversion C484A6D2)  
 **ROCm**: 7.2.4-1 (arch4edu)  
 **PyTorch**: 2.12.0a0 custom gfx1013 build  
 **Status**: ✅ PRODUCTION READY
@@ -16,6 +16,9 @@
 export HSA_ENABLE_SDMA=0
 export HSA_OVERRIDE_GFX_VERSION=10.1.0   # ← MUST be shell env var, NOT os.environ!
 
+# The patch that makes PyTorch work (patch 25) — on the blade:
+cat /etc/modprobe.d/bc250-runlist.conf   # options amdgpu bc250_flush_by_runlist=1
+
 # Test
 python3 -c "import torch; print(torch.cuda.is_available())"
 ```
@@ -24,12 +27,12 @@ python3 -c "import torch; print(torch.cuda.is_available())"
 
 ## Active Snapshot
 
-**snap-a0af1eeb** — 19-patch baseline + patch 24 (all-VMID TLB flush)  
-Pinned as GRUB default. Survives reboots.
+**snap-8fe794e8** — "25-patch (GabriWar): fix aliasing — flush TLB via runlist rebuild"  
+Active and pinned. Parent: snap-a0af1eeb (19-patch + 24).
 
 ---
 
-## Patch Stack (22 applied, 2 on-disk alternates)
+## Patch Stack (25 numbered, 2 on-disk alternates)
 
 | # | Filename | What it does |
 |---|----------|-------------|
@@ -40,11 +43,14 @@ Pinned as GRUB default. Survives reboots.
 | 15 | `15-amdgpu-gmc-kiq-bypass.patch` | KIQ bypass in centralized GMC |
 | 16 | `16-cu-unlock-cc-spi-safe-no-rlc.patch` | 40 CU unlock — ROCm-safe |
 | 17 | `17-bc250-gfx1013-fault-probe.patch` | Instruction-fetch fault probe (diagnostic) |
-| 18 | `18-ttm-guard-null-pages-on-unpopulate.patch` | NULL guard on TTM populate |
+| 18 | `18-ttm-guard-null-pages-on-unpopulate.patch` | NULL guard on TTM *unpopulate* |
 | 19 | `19-bc250-kfd-skip-sdma0.patch` | Skip broken SDMA0 (bc250_skip_sdma0=1) |
-| 20-22 | TTM unpopulate + fno-lto | CR2=0x18 panic fix (complement patch 18) |
-| 23 | `23-gb-addr-config-num-se.patch` | ❌ NOT applied — regression |
+| 20 | `20-amdgpu-ttm-populate-null-guard.patch` | READ_ONCE NULL guard on TTM *populate* |
+| 21 | `21-amdgpu-gmc-flush-pasid-kiq.patch` | ❌ NOT applied — superseded by 14(e) |
+| 22 | `22-amdgpu-ttm-fno-lto.patch` | `-fno-lto` for amdgpu_ttm.o (deployed tree does NOT carry it) |
+| 23 | `23-gb-addr-config-num-se.patch` | ✅ APPLIED (0x00100044 golden; retracted upstream by GabriWar — re-test candidate) |
 | 24 | `24-gmc-v10-flush-all-vmids.patch` | **All-VMID TLB flush — fixes aliasing bug** |
+| 25 | `25-bc250-flush-tlb-by-runlist.patch` | **Runlist rebuild on unmap — the patch that made PyTorch work** |
 
 ---
 
@@ -70,7 +76,7 @@ Pinned as GRUB default. Survives reboots.
 | rocBLAS small-rank GEMM | Kernel selection bug on gfx1013 | `HSA_OVERRIDE_GFX_VERSION=10.1.0` |
 | LoRA backward without override | rocBLAS picks broken kernel variant | Use the override as shell env var |
 | SDMA engine 0 | Lost completion IRQ at boot | `bc250_skip_sdma0=1` (patch 19) |
-| GabriWar runlist patch | Regression — breaks hipfire + LoRA | Not applied (on disk for reference) |
+| SDMA0 boot fallback msg | TRAP_ENABLE written late in init (init-order artifact, not a lost IRQ) | Cosmetic; GabriWar's early-TRAP fix not in production |
 
 ---
 
@@ -88,11 +94,17 @@ and work correctly. The override must be a **shell environment variable** set
 before process start — `os.environ` inside Python does NOT work because HIP
 initialization already happened.
 
-### The runlist patch causes a regression
-GabriWar's `bc250_flush_by_runlist` approach (patch 25) was tested and reverted:
-- The chardev.c unmap ioctl hook never fires for PyTorch/hipfire workloads
-- Even with the function never called, GPU compute hangs (LoRA backward, hipfire)
-- Kept on disk for reference; not applied in production
+### The runlist patch is the fix — patch 25
+The earlier "regression" reading of `bc250_flush_by_runlist` was superseded.
+The measurement that settles it (GabriWar, 2026-08-07): 36 runs counterbalanced
+within a single boot, each stamped with its own `execute_queues_cpsch` ftrace
+count — stock 13/18 dirty, runlist 0/18 dirty (Fisher p = 3.7e-06), zero board
+errors. The mechanism: the compute TLB on gfx1013 is never invalidated (the
+PASID scan finds zero VMIDs because mmATC_VMID*_PASID_MAPPING is never written
+under HWS), and rebuilding the runlist on unmap is the only invalidation that
+works. Deployed as snap-8fe794e8 with `amdgpu.bc250_flush_by_runlist=1`
+(/etc/modprobe.d/bc250-runlist.conf) — this is what made PyTorch/hipfire/LoRA
+stable on blade 15.
 
 ### PR #8838 (native gfx1013 rocBLAS) is cosmetic
 Adding gfx1013 to rocBLAS target lists produces code objects identical to gfx1010
@@ -158,5 +170,6 @@ amdgpu.bc250_skip_sdma0=1 amdgpu.ppfeaturemask=0xfff73ef7
 
 ```
 snap-31bbf471 (19-patch, stable fallback)
-  └─ snap-a0af1eeb (19 + 24: all-VMID TLB flush)  ← PINNED
+  └─ snap-a0af1eeb (19 + 24: all-VMID TLB flush)
+       └─ snap-8fe794e8 (25-patch: runlist rebuild flush)  ← ACTIVE
 ```

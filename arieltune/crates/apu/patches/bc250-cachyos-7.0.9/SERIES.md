@@ -10,10 +10,12 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-24**. Patches `12` and `23` are NOT applied, in the
-order listed. `12` is Studebaker's Vulkan-only CU unlock, kept in-tree as an
-alternate to `16` but not built. See "Excluded" below for what was deliberately
-dropped.
+on any BC-250 ship, numbered **01-25**. Two patches are on disk but NOT applied,
+in the order listed: `12` (Studebaker's Vulkan-only CU unlock, kept as an
+alternate to `16`) and `21` (KIQ PASID-flush disable - superseded by patch
+`14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x;
+keeping both in the series would fail to apply). See "Excluded" below for what
+was deliberately dropped.
 
 
 ## Detailed patch list
@@ -39,11 +41,12 @@ dropped.
 | `17` | `17-bc250-gfx1013-fault-probe.patch` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only |
 | `18` | `18-ttm-guard-null-pages-on-unpopulate.patch` | `amdgpu_ttm.c` | **NEW** Guard NULL `ttm->pages[]` on unpopulate — survive compute faults |
 | `19` | `19-bc250-kfd-skip-sdma0.patch` | `kfd_device_queue_manager.c` | **NEW** BC-250 SDMA0 skip — restrict user queues to SDMA1 (SDMA0 completion IRQ is lost at boot) |
-| `20` | `20-amdgpu-ttm-unpopulate-null-guard.patch` | `amdgpu_ttm.c` | **NEW** READ_ONCE NULL guard on TTM *unpopulate* path — completes patch 18 crash protection |
-| `21` | `21-amdgpu-gmc-flush-pasid-kiq.patch` | `gmc_v10_0.c` | **NEW** Disable KIQ for PASID TLB flushes on gfx1013 (`flush_pasid_uses_kiq = false`) — prevents KIQ wedge |
+| `20` | `20-amdgpu-ttm-populate-null-guard.patch` | `amdgpu_ttm.c` | **NEW** READ_ONCE + `return -ENOMEM` NULL guard on the TTM *populate* path — completes patch 18 |
+| `21` | `21-amdgpu-gmc-flush-pasid-kiq.patch` | `gmc_v10_0.c` | *(on disk, NOT applied)* KIQ PASID-flush disable — superseded by patch `14(e)`, which applies the same change on gfx10.1.x |
 | `22` | `22-amdgpu-ttm-fno-lto.patch` | `Makefile` | **NEW** `CFLAGS_amdgpu_ttm.o += -fno-lto` — prevents ThinLTO from eliding NULL guards from patches 18+20 |
-| `23` | `23-gb-addr-config-num-se.patch` | `gfx_v10_0.c` | *(on disk, NOT applied)* GB_ADDR_CONFIG change (0x00100044) — causes regression, GPU instability worsens |
+| `23` | `23-gb-addr-config-num-se.patch` | `gfx_v10_0.c` | **APPLIED** GB_ADDR_CONFIG 0x00000044→0x00100044 in the gc_10_1_2 golden table — deployed form; GabriWar later retracted it upstream, but the production build carries it |
 | `24` | `24-gmc-v10-flush-all-vmids.patch` | `gmc_v10_0.c` | **NEW** TLB flush all mapped VMIDs on BC-250 — direct MMIO path, no KIQ. Fixes GPU aliasing bug. **Active on snap-a0af1eeb.** |
+| `25` | `25-bc250-flush-tlb-by-runlist.patch` | `kfd_device_queue_manager.c`, `kfd_chardev.c`, `kfd_device_queue_manager.h` | **NEW** Rebuild the runlist on unmap so the firmware really invalidates the compute TLB. **Active on snap-8fe794e8** — the patch that made PyTorch work. |
 
 ## What aputune does with them
 
@@ -167,39 +170,75 @@ installs the package, arms 40-CU via modprobe.d, rebuilds initramfs, and (with
 running `linux-cachyos-bore-7.0.9`.
 
 
-## Patches 20-24: TTM crash fixes + TLB flush (GabriWar era)
+## Patches 18-25: TTM crash fixes + TLB flush (GabriWar era)
 
 ### What they do
 
-- **TTM crash fix** (20+22): Patch 18 guarded the populate path; patches 20+22
-  complete the protection by guarding the unpopulate path and preventing ThinLTO
-  from eliding the NULL check. Together with 18, this eliminates the CR2=0x18
-  kernel panics on compute faults.
-- **KIQ bypass for PASID flush** (21): Sets `flush_pasid_uses_kiq = false` for
-  gfx1013 so PASID-based TLB flushes go through direct MMIO register writes
-  instead of the KIQ INVALIDATE_TLBS packet which is known to wedge on BC-250.
-- **GB_ADDR_CONFIG** (23): Proven ineffective — causes worse GPU instability.
-  Kept on disk for documentation but NOT applied in any build.
+- **TTM crash fix** (18/20/22): Patch 18 guards the unpopulate path; patch 20
+  guards the populate path with READ_ONCE + `return -ENOMEM`; patch 22 builds
+  `amdgpu_ttm.o` with `-fno-lto` so ThinLTO cannot elide either guard. Together
+  these eliminate the CR2=0x18 kernel panics on compute faults.
+- **KIQ bypass for PASID flush** (21, superseded): Patch `14(e)` already sets
+  `flush_pasid_uses_kiq = false` for gfx10.1.x, so patch 21 is kept on disk for
+  attribution (neoney, verified by GabriWar) but is NOT in the applied series.
+- **GB_ADDR_CONFIG** (23): Applied in the deployed build2 tree and registered in
+  the series. GabriWar later retracted the 0x00100044 value upstream (his repo
+  keeps stock 0x00000044), so treat this as a divergence to re-test — but the
+  production blade runs it and PyTorch is stable with it.
 - **All-VMID TLB flush** (24): Instead of matching PASID values (which can race
   with KFD teardown), patch 24 invalidates every currently-mapped process VMID
   through the direct MMIO path on every TLB invalidation. Also guards
   `gmc_v10_0_flush_gpu_tlb()` against BC-250 to skip the FW-register KIQ path.
   **Active on snap-a0af1eeb.** Validated with 4-worker concurrent GPU stress
   (200 iters, 0 corruptions).
+- **Runlist rebuild flush** (25): The measured fix for the aliasing bug. The
+  compute TLB on gfx1013 is never invalidated: the PASID scan finds zero VMIDs
+  (mmATC_VMID*_PASID_MAPPING is never written under HWS), and forced MMIO
+  flushes wedge the GPU. Rebuilding the runlist on unmap makes the firmware
+  invalidate for real. 36 counterbalanced runs, single boot: stock 13/18 dirty,
+  runlist 0/18 dirty (Fisher p = 3.7e-06); verified active via ftrace
+  `execute_queues_cpsch` counts (6 -> 68), zero board errors. Off by default:
+  `amdgpu.bc250_flush_by_runlist=1`.
 
 ### GPU aliasing bug
 
 The BC-250 (gfx1013) exhibits a GPU page-table aliasing pattern where different
 VMIDs can see each other's physical pages. This manifests as ILLEGAL_INSTRUCTION
 or random data corruption in multi-process GPU workloads. The root cause per
-GabriWar's analysis: the GPU reads outside its own IOMMU page table. The TLB
-invalidation path may leave stale entries across VMID boundaries. Patch 24
-flushes all mapped VMIDs on every invalidation, ensuring no stale cross-VMID
-entries survive.
+GabriWar's analysis: hipFree unmaps, hipMalloc reuses the same VA with a new
+physical address, the PTEs in memory are correct, and the GPU keeps translating
+through the previous mapping — because its compute TLB is never actually
+invalidated. Patch 24 flushes all mapped VMIDs on every invalidation (direct
+MMIO path), and patch 25 finishes the job by rebuilding the runlist, the only
+invalidation measured to work on this silicon.
 
 ### Production snapshot lineage
 
 ```
 snap-31bbf471 (19-patch, stable)
-  └─ snap-a0af1eeb (19-patch + 24: all-VMID TLB flush)  ← pinned
+  └─ snap-a0af1eeb (19-patch + 24: all-VMID TLB flush)
+       └─ snap-8fe794e8 (25-patch: runlist rebuild flush)  ← active on blade 15
 ```
+
+### Production state on blade 15 (verified 2026-08-17 against the build2 tree)
+
+The deployed 25-patch build (`snap-8fe794e8`, module `amdgpu.ko` srcversion
+`C484A6D2`) was diffed against this series applied to the pristine
+`cachyos-7.0.9-1` tarball. Every file is byte-identical except:
+
+- `gfx_v10_0.c`: the deployed tree replaces patch 16's no-RLC unlock with the
+  blade's own RLC-writing variant (CC all SAs + SPI 0x1F + RLC_PG 0x1F
+  broadcast, run before CU inventory) — same `bc250_cc_write_mode=3` semantics.
+- `gmc_v10_0.c`: the deployed tree does NOT carry patch 17 (fault probe), and
+  its `gmc_v10_0_hw_init()` keeps `flush_pasid_uses_kiq = !amdgpu_emu_mode`
+  (the 14(e)/21 hunk was rejected at patch time and never re-applied).
+- `amdgpu/Makefile`: the deployed tree does NOT carry patch 22 (`-fno-lto`).
+
+Runtime facts from the blade: `amdgpu.bc250_flush_by_runlist=1`
+(`/etc/modprobe.d/bc250-runlist.conf`), `amdgpu.bc250_skip_sdma0=1`,
+`amdgpu.bc250_cc_write_mode=3`, `modtree=build2`. No SDMA firmware swap —
+the stock cyan_skillfish2 blob is used (GabriWar's docs/29 firmware swap is
+NOT in production; patch 19 is the SDMA workaround). The two
+"Fence fallback timer expired on ring sdma0" boot messages still appear
+(GabriWar's `bc250_early_sdma_trap` fix from his SDMA instrumentation patch
+is not in production).

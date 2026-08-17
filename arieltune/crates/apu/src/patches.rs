@@ -293,25 +293,17 @@ pub const SERIES: &[Patch] = &[
     ),
     patch!(
         "20",
-        "20-amdgpu-ttm-unpopulate-null-guard.patch",
-        "Guard NULL ttm->pages[] on unpopulate — survive compute faults",
-        "amdgpu_ttm_tt_unpopulate walks ttm->pages[] and writes pages[i]->mapping without a NULL check. When a GPU command fails midway the BO can be left partially populated, and the cleanup path dereferences a NULL page (CR2=0x18). On BC-250 this turned every compute fault into a hard machine hang. With this check the process dies but the machine survives. Upstream bug. By Gabriel Duarte Guerra.",
+        "20-amdgpu-ttm-populate-null-guard.patch",
+        "READ_ONCE NULL guard on the TTM *populate* path",
+        "Completes patch 18 on the other half of the TTM lifecycle: amdgpu_ttm_tt_populate dereferences ttm->pages[i]->mapping without a NULL check. A BO whose page array has holes (partial population after an aborted GPU command) dies with a kernel panic instead of an error. Guard each entry with READ_ONCE + return -ENOMEM. This is the exact form deployed in the build2 tree on blade 15 (snap-8fe794e8).",
         "amdgpu_ttm.c",
-        Tell::Bundled
-    ),
-    patch!(
-        "21",
-        "21-amdgpu-gmc-flush-pasid-kiq.patch",
-        "Disable KIQ for PASID TLB flushes on gfx1013",
-        "Without this the KIQ fence times out, the CP ends up in an unrecoverable state and GPU reset fails to bring SDMA back. The module parameter flush_pasid_uses_kiq is set to false for BC-250, preventing KIQ-based TLB flushes that wedge the GPU. By neoney (BC-250 community), verified by GabriWar.",
-        "gmc_v10_0.c",
         Tell::Bundled
     ),
     patch!(
         "22",
         "22-amdgpu-ttm-fno-lto.patch",
         "Disable ThinLTO for amdgpu_ttm.o (defeats NULL guard elision)",
-        "ThinLTO optimizes away the NULL guard from patch 20, causing kernel panics (CR2=0x18) to return. Adding -fno-lto to amdgpu_ttm.o prevents the compiler from proving pages[i] is never NULL across the call graph. This is required because the underlying BC-250 GPU aliasing bug (GPU reads outside its own page table) produces partially-populated BOs that will trigger the NULL path.",
+        "ThinLTO can prove ttm->pages[i] is never NULL across the call graph and elide the NULL guards from patches 18 and 20, bringing back the CR2=0x18 kernel panic. Build amdgpu_ttm.o with -fno-lto so the guards survive. Note: the deployed build2 tree does not carry this flag — listed here because the guards need it to survive a ThinLTO build.",
         "Makefile",
         Tell::Bundled
     ),
@@ -322,6 +314,36 @@ pub const SERIES: &[Patch] = &[
         "The stock mmGB_ADDR_CONFIG=0x00000044 sets NUM_SHADER_ENGINES=0. The BC-250 community reports 0x00100044 (bit 20→NUM_SE=2) as required for ROCm. GB_ADDR_CONFIG controls pipe interleave and shader-engine address swizzle; a wrong SE count causes distinct GPU addresses to collide — the measured aliasing signature. Credit: BC-250 community, documented by GabriWar.",
         "gfx_v10_0.c",
         Tell::Bundled
+    ),
+    patch!(
+        "24",
+        "24-gmc-v10-flush-all-vmids.patch",
+        "Flush all mapped VMIDs on BC-250 — direct MMIO path, no KIQ",
+        "The PASID-to-VMID query in gmc_v10_0_flush_gpu_tlb_pasid() races KFD \
+         teardown and the INVALIDATE_TLBS packet wedges KIQ on this board. \
+         Instead, invalidate every currently mapped process VMID through the \
+         direct register path on every TLB invalidation, and keep the BC-250 \
+         off the KIQ branch in gmc_v10_0_flush_gpu_tlb(). Deployed form on \
+         snap-a0af1eeb and snap-8fe794e8: logs \"BC-250: %d VMID(s) flushed\". \
+         By Gabriel Duarte Guerra.",
+        "gmc_v10_0.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "25",
+        "25-bc250-flush-tlb-by-runlist.patch",
+        "Flush the compute TLB by rebuilding the runlist (fixes aliasing)",
+        "The compute TLB on gfx1013 is never invalidated: the PASID scan finds \
+         zero VMIDs (20/20) because mmATC_VMID*_PASID_MAPPING is never written \
+         under HWS, and forced MMIO flushes wedge the GPU. Rebuilding the \
+         runlist on unmap makes the firmware invalidate for real: 36 \
+         counterbalanced runs go from 13/18 dirty to 0/18 dirty \
+         (Fisher p=3.7e-06), verified active via ftrace \
+         execute_queues_cpsch counts. This is the patch that made PyTorch \
+         work on the BC-250 — deployed as snap-8fe794e8 on blade 15 with \
+         amdgpu.bc250_flush_by_runlist=1. By Gabriel Duarte Guerra.",
+        "kfd_device_queue_manager.c, kfd_chardev.c, kfd_device_queue_manager.h",
+        Tell::ModParam("bc250_flush_by_runlist")
     ),
 
 ];
