@@ -15,6 +15,7 @@
 //! 0xFF000000 MMIO window). Writes are AND-only (program bits 1->0; no erase) —
 //! the OEM-edit path appends into erased (0xFF) free space, so that's fine.
 
+use std::fs;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -145,6 +146,13 @@ pub fn build() -> io::Result<()> {
         return Err(io::Error::other(format!(
             "{script} failed — see its output above (need root, dkms, and kernel headers)."
         )));
+    }
+    // Persist autoload so the driver comes back after reboots: the DKMS install
+    // only drops the module into the module tree; nothing else writes the
+    // modules-load entry. No smi_port option is needed here — the module's
+    // built-in default (0xB0) matches the BC-250 FADT SMI_CMD.
+    if fs::write("/etc/modules-load.d/99-smiflash.conf", "smiflash\n").is_err() {
+        eprintln!("warning: could not persist /etc/modules-load.d/99-smiflash.conf (boot autoload will be missing)");
     }
     Ok(())
 }
