@@ -23,6 +23,7 @@ build)
   [ -d "$SRC/.git" ] || git clone "$UPSTREAM" "$SRC"
   git -C "$SRC" checkout "$UPSTREAM_COMMIT"
   git -C "$SRC" apply "$HERE/0001-nct6687-bc250-ec-firmware-attach.patch"
+  git -C "$SRC" apply "$HERE/0002-nct6687-silence-secondary-port-open-bus.patch"
   # The board's linux-headers package may ship a trimmed tree missing
   # non-x86 arch Kconfigs; stub them so syncconfig can generate autoconf.h.
   for i in $(seq 1 40); do
