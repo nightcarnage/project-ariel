@@ -1,6 +1,7 @@
 # arieltune-core.md — BC-250 8-Core CPU Unlock: Full Design Handoff
 
-Status: **PHASE 1 IMPLEMENTED** (last updated 2026-08-18)
+Status: **PHASE 1 IMPLEMENTED** — commit `0cfe4ef` on `main` (pushed to gitea,
+last updated 2026-08-18)
 Scope: the `aputune cores` feature, kernel patch 28, and the fleet rollout plan.
 All conclusions below come from the 2026-08-18 investigation of the community
 8-core unlock forks. Research clones live in
