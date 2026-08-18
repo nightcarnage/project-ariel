@@ -180,6 +180,17 @@ below is LIVE on blade 115 (kernel `7.0.9-1-cachyos`, pinned `snap-59cee34a`).
   - Kernel taint: out-of-tree + unsigned (nct6687) + `gpu_recovery`
     dangerous-option — all expected/by design.
 
+**Shutdown hang (halt) — root-caused and fixed**
+- `systemctl halt` froze AFTER systemd finished (journal dies at
+  `systemd-shutdown: Syncing filesystems and block devices`). Cause: the
+  USB-SSD's Realtek RTL9210 bridge (0bda:9210) was attached-but-unmounted
+  and runtime-PM-suspended; systemd-shutdown syncs all block devices,
+  mounted or not, and the wedged bridge hung the sync forever.
+- Fix deployed on blade 115:
+  `/etc/udev/rules.d/60-bc250-usb-ssd-pm.rules` pins `power/control=on` +
+  `autosuspend_delay_ms=-1` for the bridge (verified with `udevadm test`).
+  If it ever recurs, the next step is forcing usb-storage instead of UAS.
+
 ---
 
 ## 1. Decision log — what was investigated and why we chose what we chose
