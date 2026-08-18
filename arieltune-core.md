@@ -87,6 +87,14 @@ Post-boot checklist: `arieltune apu doctor --verify`, confirm
 check for duplicate snapshot id in GRUB before registering — see
 `/memories/repo/bc250-snapshot-tool-hazards.md`).
 
+**2026-08-18 reboot + registration result**: booted `[ariel-p28]`
+(`uname -r` = `7.0.9-1-cachyos`, no `modtree`); doctor green — liberation
+series 24/24 live, 40/40 CUs, GPU manual pin 1500 MHz;
+amdgpu params `cs_eight_core_map=N` (auto-detect) `bc250_cc_write_mode=3`
+`bc250_skip_sdma0=1` `bc250_flush_by_runlist=1`; running module srcversion
+`B5A99260FDE859308CE1437`. Snapshot registered as **`snap-59cee34a`**
+(parent `snap-8fe794e8`, GRUB entry added, NOT default; no duplicate ids).
+
 ---
 
 ## 1. Decision log — what was investigated and why we chose what we chose
