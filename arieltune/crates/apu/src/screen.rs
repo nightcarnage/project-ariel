@@ -2321,6 +2321,8 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         if !l.cores.is_empty() {
             // Per-core boost freq, centered UNDER the thread grid (pad within its
             // width, not the whole column) so it lines up cleanly. Header labels it.
+            // No blank spacer line: at 8 cores the column is header + 8 rows +
+            // freq = exactly the available height, and a spacer would clip it.
             let freqs = l
                 .cores
                 .iter()
@@ -2328,7 +2330,6 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
                 .collect::<Vec<_>>()
                 .join(" ");
             let lead = GRID_W.saturating_sub(freqs.chars().count()) / 2;
-            right.push(Line::from(""));
             right.push(Line::from(Span::styled(
                 format!("{}{freqs}", " ".repeat(lead)),
                 Style::default().fg(GOOD),
