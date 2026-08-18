@@ -1452,7 +1452,12 @@ fn cmd_patches(show: Option<String>) -> Result<()> {
     }
     println!();
     for r in &rep.rows {
-        println!("{} {:<5} {}", r.state.glyph(), r.id, r.title);
+        let tag = if patches::OPTIONAL.contains(&r.id) {
+            "  (optional)"
+        } else {
+            ""
+        };
+        println!("{} {:<5} {}{}", r.state.glyph(), r.id, r.title, tag);
     }
     if !rep.on_disk.is_empty() {
         println!("\non disk, not applied:");

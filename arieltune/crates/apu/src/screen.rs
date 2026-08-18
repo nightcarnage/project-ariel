@@ -1495,7 +1495,11 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                p.title.to_string(),
+                if patches::OPTIONAL.contains(&p.id) {
+                    format!("{} (optional)", p.title)
+                } else {
+                    p.title.to_string()
+                },
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ]));

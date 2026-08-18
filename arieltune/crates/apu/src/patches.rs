@@ -408,3 +408,10 @@ pub const ON_DISK: &[Patch] = &[
 pub fn count() -> usize {
     SERIES.len()
 }
+
+/// Series members whose absence does not poison the bundled-inference or the
+/// "fully patched" verdict: a kernel without them is still reported complete.
+/// Patch 17 is the diagnostic fault probe — production builds (e.g. the
+/// deployed build2 tree on blade 15) deliberately do not carry it, so its
+/// missing tell must not drag every Bundled member to `[??]`.
+pub const OPTIONAL: &[&str] = &["17"];

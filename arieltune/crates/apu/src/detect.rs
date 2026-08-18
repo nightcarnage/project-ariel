@@ -55,18 +55,24 @@ pub struct Report {
 }
 
 impl Report {
-    /// All series members live (Present or Inferred)?
+    /// All series members live (Present or Inferred)? Optional members
+    /// (patches::OPTIONAL) are excused — their absence is expected on some
+    /// production kernels.
     pub fn fully_patched(&self) -> bool {
-        self.rows
-            .iter()
-            .all(|r| matches!(r.state, State::Present | State::Inferred))
+        self.rows.iter().all(|r| {
+            patches::OPTIONAL.contains(&r.id)
+                || matches!(r.state, State::Present | State::Inferred)
+        })
     }
 
-    /// Members whose unique tell is definitively missing.
+    /// Members whose unique tell is definitively missing, excluding the
+    /// optional ones (their absence must not nag "run apu build").
     pub fn missing(&self) -> Vec<&PatchStatus> {
         self.rows
             .iter()
-            .filter(|r| r.state == State::Absent)
+            .filter(|r| {
+                r.state == State::Absent && !patches::OPTIONAL.contains(&r.id)
+            })
             .collect()
     }
 }
@@ -194,9 +200,12 @@ pub fn report() -> Report {
     //   * mixed / partial         -> Unknown. A partial series (e.g. a kernel
     //     built with only half the patches) must NOT report its undetectable
     //     members as present — "any one present" proved nothing about the rest.
+    // Optional members (patches::OPTIONAL) are left out of the jury so their
+    // deliberate absence does not hold the Bundled members hostage.
     let detectable: Vec<State> = rows
         .iter()
         .filter(|r| !matches!(r.tell, Tell::Bundled))
+        .filter(|r| !patches::OPTIONAL.contains(&r.id))
         .map(|r| r.state)
         .collect();
     let all_present = !detectable.is_empty() && detectable.iter().all(|s| *s == State::Present);

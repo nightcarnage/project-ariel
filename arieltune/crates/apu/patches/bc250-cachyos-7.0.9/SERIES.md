@@ -40,7 +40,7 @@ what was deliberately dropped.
 | `14` | `14-gmc-kiq-bypass-dead-gpu.patch` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) |
 | `15` | `15-amdgpu-gmc-kiq-bypass.patch` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) |
 | `16` | `16-cu-unlock-cc-spi-safe-no-rlc.patch` | `gfx_v10_0.c` | **NEW** BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm+HSA) |
-| `17` | `17-bc250-gfx1013-fault-probe.patch` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only |
+| `17` | `17-bc250-gfx1013-fault-probe.patch` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only. Marked *optional* in detection: kernels without it (like the deployed build2) still report fully patched. |
 | `18` | `18-ttm-guard-null-pages-on-unpopulate.patch` | `amdgpu_ttm.c` | **NEW** Guard NULL `ttm->pages[]` on unpopulate — survive compute faults |
 | `19` | `19-bc250-kfd-skip-sdma0.patch` | `kfd_device_queue_manager.c` | **NEW** BC-250 SDMA0 skip — restrict user queues to SDMA1 (SDMA0 completion IRQ is lost at boot) |
 | `20` | `20-amdgpu-ttm-populate-null-guard.patch` | `amdgpu_ttm.c` | **NEW** READ_ONCE + `return -ENOMEM` NULL guard on the TTM *populate* path — completes patch 18 |
