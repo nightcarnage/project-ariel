@@ -216,46 +216,41 @@ Details:
 
 ---
 
-## 4. TUI — the Cores panel in the CPU section
+## 4. TUI — the Core Map panel (CPU section)
 
-The APU screen keeps its four-panel layout; the **CPU panel** (currently the
-CPU-OC surface: boost, F/Vid curve, temp caps) gains a **Core Map** block,
-styled after the CU map (which uses `[space]` per-CU toggles in the GPU panel).
-The firmware layer and the OS layer are visually separated and labelled, so a
-glance shows what is firmware truth vs OS truth.
+The APU screen keeps its four-panel layout; the Core Map is its own panel
+between the CPU panel and the GPU/CU row (the GPU/CU row shrank to make room).
+It lights up together with the CPU panel when that focus is active, and uses
+only `██`/`··` glyphs (fleet-terminal-safe) with reverse video on the selected
+cell.
 
 ```
- CPU ─ Core Map                                   firmware: 0xFF · 8C/16T
- ┌──────────────────────────────────────────────────────────────┐
- │  core       0    1    2    3    4    5    6    7              │
- │  firmware   █    █    █    █    █    █    █    █    ← SMN bits│
- │  threads    ●●   ●●   ●●   ●●   ●●   ●●   ○○   ●●    ● online│
- │  health     ok   ok   ok  NEW   ok   ok   ok  NEW     ○ offline│
- └──────────────────────────────────────────────────────────────┘
- state: UNLOCKED · 16 threads · core 6 offline (14 schedulable)
- [space] toggle thread (OS, instant)   [u] unlock firmware (0xFF)
- [p] preset: stock 6C | full 8C | 2C/4T | 4C/8T    [v] verify sweep
- [i] install boot service   [a] ACPI override: installed (16)
- ⚠ cold boot reverts the firmware mask; service re-applies it
+╭ Core Map ──────────────────────────────────────────────────────────────╮
+│ UNLOCKED  mask 0xFF · 8C/16T · 0 offline                               │
+│  ╭─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────╮
+│  │  core 0 │  core 1 │  core 2 │  core 3 │  core 4 │  core 5 │  core 6 │  core 7 │
+│  │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │
+│  │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ·· │  os  ██ │
+│  ╰─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────╯
+│ keys: [space] toggle · [[]/[]] select · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify │
+╰─────────────────────────────────────────────────────────────────────────╯
 ```
 
 Key bindings and rules:
 - `[space]` on a core toggles **both threads of that physical core** at the OS
   layer (the granular, instant, proven layer). CPU 0 is un-toggleable.
-- `[u]` performs the firmware unlock (same gates as `cores apply`); the row of
-  firmware bits re-renders from a live mask read. It shows `PENDING-REBOOT`
-  with a reminder after success.
-- `[p]` cycles presets: `stock 6C` (all online), `full 8C`, `2C/4T` (offline
-  all but cores 0–1), `4C/8T`. Presets touch only the OS layer — they never
-  imply the firmware mask.
-- `[v]` runs the sweep in a progress view (per-core line, duration, pass/fail),
-  reusing the existing stress-run rendering style. Advisory only.
-- `[i]`/`[A]` mirror `cores install` / `cores acpi install`; the footer shows
-  service enabled state and ACPI coverage (`installed (16)` vs `stock (12)`).
-- Per-core `health` cells come only from the *current* run's results and the
-  live dmesg MCE count — never from a cached verdict file.
-- A `ABNORMAL` mask renders the panel red with "refusing writes — unknown mask
-  0xNN" and no mutating key active.
+- `[[]` / `[]]` move the selected cell; `[u]` performs the firmware unlock
+  (same gates as `cores apply`); the fw row re-renders from a live mask read
+  and `PENDING-REBOOT` shows with a reminder after success.
+- `[o]`/`[O]` offline/online all cores (except 0) — the preset shapes (2C/4T
+  etc.) are reached by offlining, the presets menu itself is deferred (`[p]`
+  is the global patch popup).
+- `[v]` runs the sweep in a worker (the keys line is replaced by the verdict
+  while a report exists); `[i]` installs the boot unit ("unit not installed"
+  badge clears).
+- The fw row shows the SMU mask bits (green `██` = present), the os row shows
+  live per-thread online state (`██` both, `█·` mixed, `··` none/masked).
+- `ABNORMAL` renders red with `· writes refused` and no mutating key acts.
 
 ---
 

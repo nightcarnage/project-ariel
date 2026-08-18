@@ -1449,18 +1449,20 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),  // system card + carrier sensor row
-            Constraint::Length(15), // CPU (controls + F/Vid curve | per-thread activity | core map)
-            Constraint::Min(12),    // CU routing | GPU clock
+            Constraint::Length(12), // CPU (controls + F/Vid curve | per-thread activity)
+            Constraint::Length(9),  // core map (firmware mask + per-core OS state)
+            Constraint::Min(10),    // CU routing | GPU clock
         ])
         .split(root[1]);
 
     draw_system(f, body[0], app, app.focus == Focus::Fan);
     draw_cpu(f, body[1], app, app.focus == Focus::Cpu);
+    draw_cores(f, body[2], app, app.focus == Focus::Cpu);
 
     let botrow = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(body[2]);
+        .split(body[3]);
     draw_gpu(f, botrow[0], app, app.focus == Focus::Gpu);
     draw_cu(f, botrow[1], app, app.focus == Focus::Cu);
 
@@ -2134,11 +2136,6 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     let block = panel("CPU", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    // Top rows: the three control columns; bottom strip: the core map.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(inner);
     // Three columns spread across the panel: controls | F/Vid curve | threads.
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -2148,7 +2145,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
             Constraint::Length(38),
         ])
         .flex(Flex::SpaceBetween)
-        .split(rows[0]);
+        .split(inner);
     // A column title, centered over the column's content.
     let header = |t: &str| -> Line<'static> {
         Line::from(Span::styled(
@@ -2348,95 +2345,188 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     f.render_widget(Paragraph::new(padded(left)), cols[0]);
     f.render_widget(Paragraph::new(padded(curve)), cols[1]);
     f.render_widget(Paragraph::new(padded(right)), cols[2]);
-    draw_core_map(f, rows[1], app, focused);
 }
 
-/// The 8-core CPU map strip under the CPU panel: firmware mask bits, per-core
-/// OS-layer online state, selected core, and the unlock/verify/install surface.
-/// Renders exclusively from the snapshot (draw stays fs-read-free).
-fn draw_core_map(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
-    let s = &app.snap;
-    let Some(cs) = &s.cores else {
+/// The 8-core CPU map — its own panel between the CPU panel and the GPU/CU row.
+/// Firmware mask bits and per-core OS-layer online state in a fixed 8-slot grid
+/// (the die always has 8 slots; masked ones show empty). Renders exclusively
+/// from the snapshot (draw stays fs-read-free) and uses only ██/·· glyphs
+/// (proven on the fleet terminals) plus reverse video for the selected cell.
+fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
+    let block = panel("Core Map", focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let Some(cs) = &app.snap.cores else {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " core map unavailable (need root + BC-250)",
                 Style::default().fg(DIM),
             ))),
-            area,
+            inner,
         );
         return;
     };
-    let state_style = match cs.state {
-        crate::cores::CoreState::Unlocked => Style::default().fg(GOOD),
-        crate::cores::CoreState::Locked => Style::default().fg(DIM),
-        crate::cores::CoreState::PendingReboot => Style::default().fg(WARN),
-        crate::cores::CoreState::Abnormal(_) => Style::default().fg(BAD),
+    let (state_style, note) = match cs.state {
+        crate::cores::CoreState::Unlocked => (Style::default().fg(GOOD), ""),
+        crate::cores::CoreState::Locked => (Style::default().fg(WARN), ""),
+        crate::cores::CoreState::PendingReboot => {
+            (Style::default().fg(WARN), " · warm reboot needed")
+        }
+        crate::cores::CoreState::Abnormal(_) => {
+            (Style::default().fg(BAD), " · writes refused")
+        }
     };
-    let mut line1 = vec![
+    let title = Line::from(vec![
         Span::styled(
-            " Core Map  ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{} ", cs.state.label()),
+            format!(" {} ", cs.state.label()),
             state_style.add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
-                "mask 0x{:02X} · {}C/{}T · {} off",
-                cs.mask, cs.cores, cs.threads, cs.offline
+                "mask 0x{:02X} · {}C/{}T · {} offline{}",
+                cs.mask, cs.cores, cs.threads, cs.offline, note
             ),
             Style::default().fg(DIM),
         ),
-    ];
-    if !s.cores_unit {
-        line1.push(Span::styled(" · unit not installed", Style::default().fg(WARN)));
-    }
-    // Per-core cells: firmware bit + both threads (live OS-layer state).
-    let mut line2: Vec<Span> = Vec::new();
-    for (core, cpus) in &cs.per_core {
-        let bit_on = cs.mask & (1 << core) != 0;
-        let on = |i: usize| cpus.get(i).map(|(_, on)| *on).unwrap_or(false);
-        let pair = match (on(0), on(1)) {
-            (true, true) => "●●",
-            (true, false) => "●○",
-            (false, true) => "○●",
-            (false, false) => "○○",
-        };
-        let mut style = Style::default().fg(if bit_on { GOOD } else { DIM });
-        if focused && *core as usize == app.core_sel {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        line2.push(Span::styled(
-            format!(" c{core} {}{pair} ", if bit_on { "▉" } else { "░" }),
-            style,
-        ));
-    }
-    // Legend / selected-core line (also carries the verify verdict when done).
-    let verdict = app
+        Span::styled(
+            if app.snap.cores_unit {
+                ""
+            } else {
+                " · unit not installed"
+            },
+            Style::default().fg(WARN),
+        ),
+    ]);
+
+    let keys = Line::from(Span::styled(
+        " keys: [space] toggle · [[]/[]] select · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify",
+        Style::default().fg(DIM),
+    ));
+    // The last line carries the verify verdict while a sweep report exists
+    // (the keys legend returns once it is dismissed/overwritten).
+    let last = app
         .cores_report
         .as_ref()
         .and_then(|l| l.last())
-        .cloned()
-        .unwrap_or_default();
-    let line3 = if !verdict.is_empty() {
-        Line::from(Span::styled(
-            format!(" verify: {verdict}"),
-            Style::default().fg(WARN),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled(format!(" sel c{}", app.core_sel), Style::default().fg(ACCENT)),
-            Span::styled(
-                " · [space] on/off · [[]/[]] sel · [o] all off · [O] all on · [i] install unit · [v] verify",
-                Style::default().fg(DIM),
-            ),
-        ])
+        .map(|v| Line::from(Span::styled(format!(" verify: {v}"), Style::default().fg(WARN))))
+        .unwrap_or_else(|| keys.clone());
+
+    // Per-core thread glyphs: both threads -> ██, mixed -> █·, none -> ··.
+    let thread_pair = |core: u32| -> (&'static str, Color) {
+        let cpus = cs
+            .per_core
+            .iter()
+            .find(|(c, _)| *c == core)
+            .map(|(_, v)| v.as_slice());
+        let on = |i: usize| cpus.and_then(|v| v.get(i)).map(|(_, on)| *on).unwrap_or(false);
+        match (cpus.is_some(), on(0), on(1)) {
+            (true, true, true) => ("██", GOOD),
+            (true, true, false) | (true, false, true) => ("█·", WARN),
+            _ => ("··", DIM),
+        }
     };
-    f.render_widget(
-        Paragraph::new(vec![Line::from(line1), Line::from(line2), line3]),
-        area,
-    );
+
+    let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+    let cell_parts = |core: u32, head: bool| -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let sel = focused && core as usize == app.core_sel;
+        let w = |s: &str, st: Style| -> Span<'static> {
+            let st = if sel { st.patch(selected_style) } else { st };
+            Span::styled(s.to_string(), st)
+        };
+        if head {
+            spans.push(w(
+                &format!("  core {core} "),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            let fw_on = cs.mask & (1 << core) != 0;
+            spans.push(w(
+                "  fw  ",
+                Style::default().fg(DIM),
+            ));
+            spans.push(w(
+                if fw_on { "██" } else { "··" },
+                Style::default().fg(if fw_on { GOOD } else { DIM }),
+            ));
+            spans.push(w("  ", Style::default()));
+        }
+        spans
+    };
+
+    let sep = |c: char| -> Span<'static> { Span::styled(c.to_string(), Style::default().fg(DIM)) };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if inner.width >= 92 {
+        let mut top: Vec<Span> = vec![sep(' '), sep(' '), sep('╭')];
+        let mut header: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        let mut fw: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        let mut os: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        for core in 0..8u32 {
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep('─'));
+            top.push(sep(if core == 7 { '╮' } else { '┬' }));
+            header.extend(cell_parts(core, true));
+            header.push(sep('│'));
+            fw.extend(cell_parts(core, false));
+            fw.push(sep('│'));
+            let (pair, col) = thread_pair(core);
+            let sel = focused && core as usize == app.core_sel;
+            let st = Style::default().fg(col);
+            let st = if sel { st.patch(selected_style) } else { st };
+            os.push(Span::styled("  os  ".to_string(), Style::default().fg(DIM)));
+            os.push(Span::styled(pair.to_string(), st));
+            os.push(Span::styled("  ".to_string(), Style::default()));
+            os.push(sep('│'));
+        }
+        let bottom: Vec<Span> = {
+            let mut b: Vec<Span> = vec![sep(' '), sep(' '), sep('╰')];
+            for core in 0..8u32 {
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep('─'));
+                b.push(sep(if core == 7 { '╯' } else { '┴' }));
+            }
+            b
+        };
+        lines.push(title);
+        lines.push(Line::from(top));
+        lines.push(Line::from(header));
+        lines.push(Line::from(fw));
+        lines.push(Line::from(os));
+        lines.push(Line::from(bottom));
+        lines.push(last);
+    } else {
+        // Narrow terminal: one compact row of cells.
+        let mut cells: Vec<Span> = Vec::new();
+        for core in 0..8u32 {
+            let fw_on = cs.mask & (1 << core) != 0;
+            let (pair, col) = thread_pair(core);
+            let sel = focused && core as usize == app.core_sel;
+            let st = Style::default().fg(col);
+            let st = if sel { st.patch(selected_style) } else { st };
+            cells.push(Span::styled(
+                format!(" c{core}{}{pair} ", if fw_on { "#" } else { "." }),
+                st,
+            ));
+        }
+        lines.push(title);
+        lines.push(Line::from(cells));
+        lines.push(last);
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_gpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
