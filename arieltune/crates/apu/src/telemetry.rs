@@ -335,6 +335,33 @@ fn drm_device_dir() -> Option<PathBuf> {
     None
 }
 
+/// Fail loudly when the overdrive interface is gated off. `pp_od_clk_voltage`
+/// only exists when PP_OVERDRIVE_MASK (bit 14, 0x4000) is set in
+/// `amdgpu.ppfeaturemask`; with the bit cleared every voltage write is inert.
+/// This has bitten us before (mask 0xfff73ef7 disables arieltune's own
+/// undervolt), so every voltage operation now refuses instead of silently
+/// no-oping, and the error carries the corrected mask value.
+pub fn ensure_overdrive() -> anyhow::Result<()> {
+    const PP_OVERDRIVE_MASK: u32 = 0x4000;
+    let mask_txt = fs::read_to_string("/sys/module/amdgpu/parameters/ppfeaturemask")
+        .map_err(|_| anyhow::anyhow!("amdgpu module not loaded (ppfeaturemask unreadable)"))?;
+    let mask = u32::from_str_radix(mask_txt.trim().trim_start_matches("0x"), 16)
+        .map_err(|_| anyhow::anyhow!("cannot parse amdgpu.ppfeaturemask: {mask_txt}"))?;
+    if mask & PP_OVERDRIVE_MASK == 0 {
+        anyhow::bail!(
+            "overdrive is disabled: PP_OVERDRIVE_MASK (bit 14, 0x4000) is cleared \
+             in amdgpu.ppfeaturemask (current 0x{mask:08x}), so pp_od_clk_voltage does not \
+             exist and every voltage write would be inert. Boot with \
+             amdgpu.ppfeaturemask=0x{:08x} (current | 0x4000).",
+            mask | PP_OVERDRIVE_MASK
+        );
+    }
+    if drm_device_dir().is_none() {
+        anyhow::bail!("pp_od_clk_voltage not found despite the overdrive mask — is amdgpu up?");
+    }
+    Ok(())
+}
+
 /// Live GFX rail voltage (mV) from amdgpu's hwmon `in0_input` (vddgfx) — the
 /// "voltage meter". A plain sysfs read; does NOT touch the SMU mailbox.
 pub fn vddgfx_mv() -> Option<u32> {

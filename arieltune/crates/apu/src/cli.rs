@@ -863,6 +863,9 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             // configured top clock (not the live one) so it never pins the max
             // clock low. Persist so it re-applies at boot.
             let _lock = dpm::ConfigLock::acquire();
+            // The OD interface is gated by PP_OVERDRIVE_MASK — refuse loudly
+            // instead of letting the write below be inert.
+            telemetry::ensure_overdrive()?;
             let mut cfg = dpm::PowerConfig::load_or_default();
             // Floor at the highest reachable clock: top, a manual force, OR the
             // governor high tier (writable independently of top_mhz).

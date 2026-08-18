@@ -161,8 +161,18 @@ HSA_OVERRIDE_GFX_VERSION=10.1.0
 
 Kernel cmdline (in GRUB):
 ```
-amdgpu.bc250_skip_sdma0=1 amdgpu.ppfeaturemask=0xfff73ef7
+amdgpu.bc250_skip_sdma0=1 amdgpu.ppfeaturemask=0xfff77ef7
 ```
+
+**The mask matters.** `0xfff77ef7` = `0xfff73ef7` (the old production mask) OR'd
+with `PP_OVERDRIVE_MASK` (bit 14, 0x4000). The overdrive bit gates
+`pp_od_clk_voltage` — the interface arieltune's `gpu vid`/`gpu force`
+undervolt path writes through. The old mask cleared bit 14, which silently
+removed that interface and made every voltage write inert (frequency still
+worked because it rides `ForceGfxFreq`, not overdrive). `arieltune` now
+refuses voltage operations with the corrected mask instead of no-oping:
+it reads `/sys/module/amdgpu/parameters/ppfeaturemask` and, if bit 14 is
+cleared, errors with the exact `0x…` value to boot with.
 
 ---
 

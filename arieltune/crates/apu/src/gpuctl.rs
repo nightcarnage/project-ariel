@@ -45,11 +45,19 @@ pub fn force(mhz: u32) -> Result<ForceOutcome> {
     let mut cfg = dpm::PowerConfig::load_or_default();
     let mut vid_raised = None;
     if let Some((old, floor)) = required_vid_raise(&cfg, target) {
+        // Refuse loudly if overdrive is masked off — the write below would be
+        // inert and the clock must NOT move onto an undervolt sized lower.
+        telemetry::ensure_overdrive().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot raise the persisted GPU undervolt {old} -> {floor} mV \
+                 (safe floor for {target} MHz): {e} — clock left UNCHANGED."
+            )
+        })?;
         if !telemetry::od_set_vddc(target, floor) {
             bail!(
                 "cannot raise the persisted GPU undervolt {old} -> {floor} mV (safe floor \
                  for {target} MHz): overdrive write failed — clock left UNCHANGED. \
-                 Fix overdrive (amdgpu.ppfeaturemask / root) or release the voltage first."
+                 Release the voltage first, or retry as root."
             );
         }
         vid_raised = Some((old, floor));
@@ -77,6 +85,9 @@ pub fn unforce() -> Result<dpm::AutoMode> {
     let _lock = dpm::ConfigLock::acquire();
     Smu::open()?.unforce_gfx_freq()?;
     // Restore the stock voltage curve via amdgpu overdrive (SMU-safe).
+    // Refuse loudly rather than silently leaving the forced voltage in place
+    // when the overdrive interface is masked off.
+    telemetry::ensure_overdrive()?;
     let _ = telemetry::od_reset();
     let mut cfg = dpm::PowerConfig::load_or_default();
     cfg.force_mhz = None;
