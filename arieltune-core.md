@@ -218,11 +218,13 @@ Details:
 
 ## 4. TUI — the Core Map panel (CPU section)
 
-The APU screen keeps its four-panel layout; the Core Map is its own panel
-between the CPU panel and the GPU/CU row (the GPU/CU row shrank to make room).
-It lights up together with the CPU panel when that focus is active, and uses
-only `██`/`··` glyphs (fleet-terminal-safe) with reverse video on the selected
-cell.
+The APU screen keeps its panel layout; the Core Map is its own panel between
+the CPU panel and the GPU/CU row (the GPU/CU row shrank to make room), and it
+is its **own Tab focus target** — focus order: system → CPU → Core Map → GPU →
+CU. Only the focused panel lights and takes keys. The grid cells are rendered
+by a fixed-width builder (padding computed from the styled parts), so rows can
+never drift against the border; glyphs are `██`/`··` only, with reverse video
+on the selected cell.
 
 ```
 ╭ Core Map ──────────────────────────────────────────────────────────────╮
@@ -239,9 +241,9 @@ cell.
 Key bindings and rules:
 - `[space]` on a core toggles **both threads of that physical core** at the OS
   layer (the granular, instant, proven layer). CPU 0 is un-toggleable.
-- `[[]` / `[]]` move the selected cell; `[u]` performs the firmware unlock
-  (same gates as `cores apply`); the fw row re-renders from a live mask read
-  and `PENDING-REBOOT` shows with a reminder after success.
+- `[←]` / `[→]` (and `[[]` / `[]]`) move the selected cell; `[u]` performs the
+  firmware unlock (same gates as `cores apply`); the fw row re-renders from a
+  live mask read and `PENDING-REBOOT` shows with a reminder after success.
 - `[o]`/`[O]` offline/online all cores (except 0) — the preset shapes (2C/4T
   etc.) are reached by offlining, the presets menu itself is deferred (`[p]`
   is the global patch popup).

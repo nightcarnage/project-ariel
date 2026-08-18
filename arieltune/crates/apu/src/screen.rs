@@ -74,9 +74,10 @@ enum Focus {
     Fan,
     Cu,
     Cpu,
+    Cores,
     Gpu,
 }
-const FOCUS_ORDER: [Focus; 4] = [Focus::Fan, Focus::Cpu, Focus::Gpu, Focus::Cu];
+const FOCUS_ORDER: [Focus; 5] = [Focus::Fan, Focus::Cpu, Focus::Cores, Focus::Gpu, Focus::Cu];
 
 /// The carrier fan channel that drives the main BC-250 cooler (the Pump-Fan
 /// header — pwm2/fan2 in sysfs). Verified: writing its duty moves the cooler.
@@ -837,6 +838,7 @@ fn dispatch_key(app: &mut ApuScreen, code: KeyCode) {
     match app.focus {
         Focus::Gpu => gpu_key(app, code),
         Focus::Cpu => cpu_key(app, code),
+        Focus::Cores => cores_key(app, code),
         Focus::Cu => cu_key(app, code),
         Focus::Fan => fan_key(app, code),
     }
@@ -1161,83 +1163,6 @@ fn cpu_key(app: &mut ApuScreen, code: KeyCode) {
             }
             app.cpu_live = app.oc.as_ref().map(cpu::live);
         }
-        // ---- cores map (firmware unlock + OS-layer per-core toggles) ----
-        (Edit::None, KeyCode::Char('[')) => app.core_sel = (app.core_sel + 7) % 8,
-        (Edit::None, KeyCode::Char(']')) => app.core_sel = (app.core_sel + 1) % 8,
-        (Edit::None, KeyCode::Char(' ')) => {
-            let sel = app.core_sel as u32;
-            let present = crate::cores::core_map().iter().any(|(c, _)| *c == sel);
-            if !present {
-                app.status = format!("core {sel} not present in topology");
-            } else {
-                let any_on = crate::cores::core_threads()
-                    .iter()
-                    .find(|(c, _)| *c == sel)
-                    .map(|(_, cpus)| cpus.iter().any(|(_, on)| *on))
-                    .unwrap_or(false);
-                let r = if any_on {
-                    crate::cores::offline(Some(sel))
-                } else {
-                    crate::cores::online(Some(sel))
-                };
-                app.status = match r {
-                    Ok(()) => format!("core {sel} toggled (OS layer, instant)"),
-                    Err(e) => format!("core toggle refused: {e}"),
-                };
-                app.snap = gather();
-            }
-        }
-        (Edit::None, KeyCode::Char('o')) => {
-            app.status = match crate::cores::offline(None) {
-                Ok(()) => "all cores except 0 offline (OS layer)".into(),
-                Err(e) => format!("offline failed: {e}"),
-            };
-            app.snap = gather();
-        }
-        (Edit::None, KeyCode::Char('O')) => {
-            app.status = match crate::cores::online(None) {
-                Ok(()) => "all cores online (OS layer)".into(),
-                Err(e) => format!("online failed: {e}"),
-            };
-            app.snap = gather();
-        }
-        (Edit::None, KeyCode::Char('u')) => match &app.snap.cores {
-            None => app.status = "core map unavailable (need root + BC-250)".into(),
-            Some(cs) => match cs.state {
-                crate::cores::CoreState::Locked => {
-                    app.status = match crate::cores::apply(false) {
-                        Ok(()) => "unlocked — cores appear after a WARM reboot".into(),
-                        Err(e) => format!("unlock refused: {e}"),
-                    };
-                    app.snap = gather();
-                }
-                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
-                crate::cores::CoreState::PendingReboot => {
-                    app.status = "mask set — warm reboot needed to enumerate".into()
-                }
-                crate::cores::CoreState::Abnormal(m) => {
-                    app.status = format!("refusing: abnormal mask 0x{m:02X}")
-                }
-            },
-        },
-        (Edit::None, KeyCode::Char('i')) => {
-            app.status = match crate::cores::install() {
-                Ok(()) => {
-                    app.snap = gather();
-                    "cores boot unit installed (aputune-cores.service)".into()
-                }
-                Err(e) => format!("install failed: {e}"),
-            };
-        }
-        (Edit::None, KeyCode::Char('v')) => {
-            if app.cores_verify_job.is_none() {
-                app.cores_verify_job =
-                    Some(std::thread::spawn(|| crate::cores::sweep_lines(20)));
-                app.status = "verify sweep running (20s/core, advisory)…".into();
-            } else {
-                app.status = "verify already running".into();
-            }
-        }
         // The curve field (sel 1) is a NEGATIVE undervolt shown as -N, so the
         // arrows follow the number line: Left = more undervolt (bigger magnitude),
         // Right = less. Boost/temp keep the usual Left=down / Right=up.
@@ -1309,6 +1234,92 @@ fn cpu_key(app: &mut ApuScreen, code: KeyCode) {
         (Edit::Value(_), KeyCode::Esc) => {
             app.edit = Edit::None;
             app.status = "cancelled".into();
+        }
+        _ => {}
+    }
+}
+
+/// Core Map panel keys — its own focus target (Tab reaches it between CPU and
+/// GPU). Left/Right (and [ ]) move the selected core; space toggles the OS
+/// layer; u/o/O/i/v map to the CLI verbs. Nothing here acts while another
+/// panel holds focus.
+fn cores_key(app: &mut ApuScreen, code: KeyCode) {
+    match code {
+        KeyCode::Left | KeyCode::Char('[') => app.core_sel = (app.core_sel + 7) % 8,
+        KeyCode::Right | KeyCode::Char(']') => app.core_sel = (app.core_sel + 1) % 8,
+        KeyCode::Char(' ') => {
+            let sel = app.core_sel as u32;
+            let present = crate::cores::core_map().iter().any(|(c, _)| *c == sel);
+            if !present {
+                app.status = format!("core {sel} not present in topology");
+            } else {
+                let any_on = crate::cores::core_threads()
+                    .iter()
+                    .find(|(c, _)| *c == sel)
+                    .map(|(_, cpus)| cpus.iter().any(|(_, on)| *on))
+                    .unwrap_or(false);
+                let r = if any_on {
+                    crate::cores::offline(Some(sel))
+                } else {
+                    crate::cores::online(Some(sel))
+                };
+                app.status = match r {
+                    Ok(()) => format!("core {sel} toggled (OS layer, instant)"),
+                    Err(e) => format!("core toggle refused: {e}"),
+                };
+                app.snap = gather();
+            }
+        }
+        KeyCode::Char('o') => {
+            app.status = match crate::cores::offline(None) {
+                Ok(()) => "all cores except 0 offline (OS layer)".into(),
+                Err(e) => format!("offline failed: {e}"),
+            };
+            app.snap = gather();
+        }
+        KeyCode::Char('O') => {
+            app.status = match crate::cores::online(None) {
+                Ok(()) => "all cores online (OS layer)".into(),
+                Err(e) => format!("online failed: {e}"),
+            };
+            app.snap = gather();
+        }
+        KeyCode::Char('u') => match &app.snap.cores {
+            None => app.status = "core map unavailable (need root + BC-250)".into(),
+            Some(cs) => match cs.state {
+                crate::cores::CoreState::Locked => {
+                    app.status = match crate::cores::apply(false) {
+                        Ok(()) => "unlocked — cores appear after a WARM reboot".into(),
+                        Err(e) => format!("unlock refused: {e}"),
+                    };
+                    app.snap = gather();
+                }
+                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
+                crate::cores::CoreState::PendingReboot => {
+                    app.status = "mask set — warm reboot needed to enumerate".into()
+                }
+                crate::cores::CoreState::Abnormal(m) => {
+                    app.status = format!("refusing: abnormal mask 0x{m:02X}")
+                }
+            },
+        },
+        KeyCode::Char('i') => {
+            app.status = match crate::cores::install() {
+                Ok(()) => {
+                    app.snap = gather();
+                    "cores boot unit installed (aputune-cores.service)".into()
+                }
+                Err(e) => format!("install failed: {e}"),
+            };
+        }
+        KeyCode::Char('v') => {
+            if app.cores_verify_job.is_none() {
+                app.cores_verify_job =
+                    Some(std::thread::spawn(|| crate::cores::sweep_lines(20)));
+                app.status = "verify sweep running (20s/core, advisory)…".into();
+            } else {
+                app.status = "verify already running".into();
+            }
         }
         _ => {}
     }
@@ -1457,7 +1468,7 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
 
     draw_system(f, body[0], app, app.focus == Focus::Fan);
     draw_cpu(f, body[1], app, app.focus == Focus::Cpu);
-    draw_cores(f, body[2], app, app.focus == Focus::Cpu);
+    draw_cores(f, body[2], app, app.focus == Focus::Cores);
 
     let botrow = Layout::default()
         .direction(Direction::Horizontal)
@@ -1508,9 +1519,16 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
             Focus::Cpu => &[
                 ("[↑↓]", "field"),
                 ("[enter]", "edit"),
-                ("[u]", "unlock 8C"),
-                ("[space]", "core on/off"),
                 ("[r]", "restore"),
+                ("[tab]", "panel"),
+                ("[q]", "quit"),
+            ],
+            Focus::Cores => &[
+                ("[←→]", "core"),
+                ("[space]", "toggle"),
+                ("[u]", "unlock 8C"),
+                ("[i]", "unit"),
+                ("[v]", "verify"),
                 ("[tab]", "panel"),
                 ("[q]", "quit"),
             ],
@@ -2399,7 +2417,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [space] toggle · [[]/[]] select · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists
@@ -2426,87 +2444,69 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         }
     };
 
+    // Fixed-width cell builder: every cell contributes exactly CELL_W chars
+    // (padding is computed from the styled parts), so the rows can never drift
+    // against the border row no matter how the glyph strings change.
+    const CELL_W: usize = 9;
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
-    let cell_parts = |core: u32, head: bool| -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-        let sel = focused && core as usize == app.core_sel;
-        let w = |s: &str, st: Style| -> Span<'static> {
-            let st = if sel { st.patch(selected_style) } else { st };
-            Span::styled(s.to_string(), st)
-        };
-        if head {
-            spans.push(w(
-                &format!("  core {core} "),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            let fw_on = cs.mask & (1 << core) != 0;
-            spans.push(w(
-                "  fw  ",
-                Style::default().fg(DIM),
-            ));
-            spans.push(w(
-                if fw_on { "██" } else { "··" },
-                Style::default().fg(if fw_on { GOOD } else { DIM }),
-            ));
-            spans.push(w("  ", Style::default()));
+    let push_cell = |spans: &mut Vec<Span<'static>>, parts: &[(&str, Style)], sel: bool| {
+        let mut used = 0usize;
+        for (s, st) in parts {
+            used += s.chars().count();
+            let st = if sel { st.patch(selected_style) } else { *st };
+            spans.push(Span::styled((*s).to_string(), st));
         }
-        spans
+        let pad = CELL_W.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default()));
+        }
     };
-
     let sep = |c: char| -> Span<'static> { Span::styled(c.to_string(), Style::default().fg(DIM)) };
     let mut lines: Vec<Line<'static>> = Vec::new();
     if inner.width >= 92 {
-        let mut top: Vec<Span> = vec![sep(' '), sep(' '), sep('╭')];
+        let border_row = |left: char, right: char, mid: char| -> Vec<Span<'static>> {
+            let mut b: Vec<Span> = vec![sep(' '), sep(' '), sep(left)];
+            for core in 0..8u32 {
+                b.push(Span::styled("─".repeat(CELL_W), Style::default().fg(DIM)));
+                b.push(sep(if core == 7 { right } else { mid }));
+            }
+            b
+        };
         let mut header: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
         let mut fw: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
         let mut os: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
         for core in 0..8u32 {
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep('─'));
-            top.push(sep(if core == 7 { '╮' } else { '┬' }));
-            header.extend(cell_parts(core, true));
+            let sel = focused && core as usize == app.core_sel;
+            let head_parts: [(&str, Style); 1] = [(
+                &format!("  core {core}"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )];
+            push_cell(&mut header, &head_parts, sel);
             header.push(sep('│'));
-            fw.extend(cell_parts(core, false));
+            let fw_on = cs.mask & (1 << core) != 0;
+            let fw_parts: [(&str, Style); 2] = [
+                ("  fw ", Style::default().fg(DIM)),
+                (
+                    if fw_on { "██" } else { "··" },
+                    Style::default().fg(if fw_on { GOOD } else { DIM }),
+                ),
+            ];
+            push_cell(&mut fw, &fw_parts, sel);
             fw.push(sep('│'));
             let (pair, col) = thread_pair(core);
-            let sel = focused && core as usize == app.core_sel;
-            let st = Style::default().fg(col);
-            let st = if sel { st.patch(selected_style) } else { st };
-            os.push(Span::styled("  os  ".to_string(), Style::default().fg(DIM)));
-            os.push(Span::styled(pair.to_string(), st));
-            os.push(Span::styled("  ".to_string(), Style::default()));
+            let os_parts: [(&str, Style); 2] = [
+                ("  os ", Style::default().fg(DIM)),
+                (pair, Style::default().fg(col)),
+            ];
+            push_cell(&mut os, &os_parts, sel);
             os.push(sep('│'));
         }
-        let bottom: Vec<Span> = {
-            let mut b: Vec<Span> = vec![sep(' '), sep(' '), sep('╰')];
-            for core in 0..8u32 {
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep('─'));
-                b.push(sep(if core == 7 { '╯' } else { '┴' }));
-            }
-            b
-        };
         lines.push(title);
-        lines.push(Line::from(top));
+        lines.push(Line::from(border_row('╭', '╮', '┬')));
         lines.push(Line::from(header));
         lines.push(Line::from(fw));
         lines.push(Line::from(os));
-        lines.push(Line::from(bottom));
+        lines.push(Line::from(border_row('╰', '╯', '┴')));
         lines.push(last);
     } else {
         // Narrow terminal: one compact row of cells.
