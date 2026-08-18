@@ -118,6 +118,68 @@ now has an escape hatch:
   change the SoC power/thermal envelope; 8-core ACPI SSDTs were NOT
   installed, so threads 12-15 have no C-state tables (stock stops at C00B).
 
+### 0.3 Full validation pass + OOT driver fixes (blade 115, 2026-08-18)
+
+After the forced unlock, a complete validation + cleanup pass landed. Everything
+below is LIVE on blade 115 (kernel `7.0.9-1-cachyos`, pinned `snap-59cee34a`).
+
+**8-core unlock — verified from every angle**
+- `SMN 0x115A870 = 0xFF`, state UNLOCKED, `lscpu` 16 CPUs on-line, 8C×2T.
+- New threads 12-15 compute correctly pinned via `taskset` (sum(0..99999)
+  each = 4999950000). `arieltune apu cores verify` swept all 8 cores (one
+  thread per physical core by design) twice: no failures, 0 MCE.
+- Boot unit `aputune-cores.service` installed + enabled; verified running at
+  boot (exit 0, idempotent "already unlocked"). The mask even survived a
+  `reboot/mode=cold` reset (0xFF persisted) — the board kept the unlock.
+- Pin state: `snapshot current` = `snap-59cee34a`, GRUB Default =
+  `snap-59cee34a`, one-shot none.
+
+**nct6687 sensor driver (out-of-tree, extra/nct6687.ko.zst)**
+- Config consolidated: `/etc/modprobe.d/sensors.conf` removed; single
+  `bc250-nct6687.conf` (`blacklist nct6683` + `options nct6687 force=true`).
+- Quirk fixed: the `force=1 refused: chip ID 0xffff` boot line came from the
+  SECONDARY SIO port (0x4e) open-bus fall-through, not a real refusal. New
+  repo patch `0002-nct6687-silence-secondary-port-open-bus.patch` (kmod dir)
+  makes it a silent skip. Rebuilt ON the blade with `LLVM=1`
+  (srcversion `2D4B6235D20CD0BD87ABE3A`).
+- Initramfs trap found & fixed: mkinitcpio `MODULES=(nct6687 nct6687 nct6687)`
+  embedded the OLD module and loaded it pre-root (initramfs
+  systemd-modules-load), which is why the fixed binary still showed the
+  refusal at boot. Removed from `MODULES`, rebuilt the preset initramfs, and
+  synced the snapshot initrd (`initramfs-snap-59cee34a.img` — identical copy
+  of the preset image). Boot log is now clean: probe at real root, no
+  refusal line. NOTE: swapping the initrd in place makes the snapshot
+  register-id (`md5(module)+md5(initramfs)`) stale bookkeeping-wise; the pin
+  still works (GRUB references by path). Clean fix if desired: re-register +
+  re-pin.
+
+**smiflash SMM SPI-flash driver (out-of-tree, updates/dkms/smiflash.ko.zst)**
+- It is Studebaker's (Cachenetics, initial Project Ariel commit `64d9ca8`,
+  `crates/bios/driver/`). Now built the CORRECT way: `dkms` installed on the
+  blade, module `Makefile` fixed to auto-detect a clang-built kernel via the
+  `CC_IS_CLANG` marker and pass `LLVM=1` (gcc kernels unaffected) —
+  commit `d68a980`. `dkms add/build/install` → `updates/dkms/`, AUTOINSTALL
+  survives kernel upgrades. Old loose `extra/smiflash.ko.zst` removed.
+- Loads at boot (`smi_port=0xb0` from FADT), `/proc/smiflash` live,
+  `arieltune bios driver status` = loaded [ok].
+
+**Head display autostart**
+- getty@tty1 autologin + `~/.bash_profile` tty1/non-SSH guard now launches
+  `sudo -n arieltune apu` (the APU TUI) on the framebuffer head instead of
+  nvtop. Crash-restart loop kept (restart if exit < 5 s). Backup:
+  `~/.bash_profile.bak-nvtop`.
+
+**Final boot-log review**
+- Failed systemd units: 0. MCE entries: 0. nct6687/smiflash clean.
+- Remaining known log noise (none functional):
+  - 16× `ACPI BIOS Error: Could not resolve symbol [\_PR.C000..C00F]` — the
+    stock BIOS ACPI gap; fixed by `arieltune apu cores acpi install`
+    (8-core SSDT-CST/PST override), NOT installed on this blade yet.
+  - 1× `Pm2ControlBlock zero Address` ACPI warning — cosmetic AMI BIOS bug.
+  - 2× amdgpu DC `dal_irq_service_ack/set` WARNINGs — display-core IRQ noise.
+  - Kernel taint: out-of-tree + unsigned (nct6687) + `gpu_recovery`
+    dangerous-option — all expected/by design.
+
 ---
 
 ## 1. Decision log — what was investigated and why we chose what we chose
