@@ -376,8 +376,10 @@ impl OcQ3 {
 }
 
 /// Physical core indices Linux reports present (unique topology core_id), sorted.
-/// The BC-250 has core_ids 0,1,2,4,5,6 (slots 3 & 7 fused off). Falls back to
-/// 0..6 if sysfs is unreadable.
+/// Stock BC-250s report core_ids 0,1,2,4,5,6 (slots 3 and 7 masked by the SMU
+/// core-presence mask); after the 8-core unlock they report 0..7. Derived live
+/// from sysfs so it tracks the unlock; falls back to 0..6 only when sysfs is
+/// unreadable.
 fn enabled_core_ids() -> Vec<u32> {
     let mut ids = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {

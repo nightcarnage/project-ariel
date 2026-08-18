@@ -2278,7 +2278,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         }
         curve.push(Line::from(spans));
     }
-    // ---- col 2 (right): per-thread activity (all 12) + per-core boost freq ----
+    // ---- col 2 (right): per-thread activity (all logical CPUs) + per-core boost freq ----
     let cell = |i: usize| -> Vec<Span<'static>> {
         let u = app.cpu_util.get(i).copied().unwrap_or(0);
         let col = if u >= 85 {
@@ -2304,8 +2304,9 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         format!("{}{thead}", " ".repeat(hlead)),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))];
-    // CPU0-5 left column, CPU6-11 right column (SMT sibling pairs are adjacent).
-    // Sized from live topology so the grid follows 6C and 8C unlocks.
+    // Left column = first half of logical CPUs, right = second half (SMT
+    // sibling pairs are adjacent). Sized from live topology so the grid
+    // follows the 6-core stock and the 8-core unlock.
     let total = app.cpu_util.len().min(16);
     let half = total.div_ceil(2);
     for row in 0..half {
