@@ -55,6 +55,38 @@ exploit port, DXE/BIOS flashing tooling, the full-image `bios` flash path.
 Still outstanding: the blade runtime checklist (section 8) — none of the
 hardware paths have run on a BC-250 yet.
 
+### 0.1 Full from-scratch build on blade 115 (2026-08-18, the cachenetics PR dry run)
+
+`arieltune apu build --pkgbuild /mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos
+--run` executed the complete production flow on blade 115:
+
+- **Materialize**: staged pkgbuild (PKGBUILD + cachyos-7.0.9-1.tar.gz) on the
+  USB-SSD; `makepkg -o` extract, all 28 SERIES patches applied `--fuzz=0`
+  clean on first pass (build log: `/mnt/usb-ssd/ariel-p28-build.log`).
+- **Build**: root privilege-drop to the PKGBUILD owner (kbuild `Step.uid`),
+  `CC=gcc-15`; `gfx_v10_0.o` and `gmc_v10_0.o` (the patched files) compiled
+  clean; only two pre-existing warnings from the patch-22 KFD runlist code.
+- **Packages**: `linux-cachyos-7.0.9-1-x86_64.pkg.tar.zst` (156 MB) +
+  `linux-cachyos-headers` (39 MB) in
+  `/mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos/`.
+- **Install**: `pacman -U` into the real (unbound) module tree, 40-CU
+  modprobe conf, mkinitcpio for `7.0.9-1-cachyos`, GRUB update.
+- **Verified**: `modinfo` on the installed `amdgpu.ko.zst` exposes
+  `cs_eight_core_map` plus `bc250_cc_write_mode` / `bc250_flush_by_runlist` /
+  `bc250_skip_sdma0` / `bc250_fault_probe`.
+- **GRUB**: new `[ariel-p28]` menuentry in `/etc/grub.d/40_custom` (vmlinuz +
+  initramfs from `/boot`, running cmdline minus `modtree=build2`),
+  one-shot armed via `grub-reboot ariel-p28`.
+- **Cleanups done**: stale `linux-cachyos-6.19.9.preset` (pointed at deleted
+  `/boot/vmlinuz-snap-32849855`) removed so `mkinitcpio -P` no longer errors;
+  `10_linux` left non-executable (the blade keeps its snapshot menu via
+  `40_custom`).
+
+Post-boot checklist: `arieltune apu doctor --verify`, confirm
+`cs_eight_core_map` present, then `snapshot register` (parent snap-8fe794e8,
+check for duplicate snapshot id in GRUB before registering — see
+`/memories/repo/bc250-snapshot-tool-hazards.md`).
+
 ---
 
 ## 1. Decision log — what was investigated and why we chose what we chose
