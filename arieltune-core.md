@@ -95,6 +95,29 @@ amdgpu params `cs_eight_core_map=N` (auto-detect) `bc250_cc_write_mode=3`
 `B5A99260FDE859308CE1437`. Snapshot registered as **`snap-59cee34a`**
 (parent `snap-8fe794e8`, GRUB entry added, NOT default; no duplicate ids).
 
+### 0.2 Forced 8-core unlock from an abnormal mask (blade 115, 2026-08-18)
+
+Blade 115's live core mask was **0xD7** (`enabled=[0 1 2 4 6 7] disabled=[3 5]`,
+state ABNORMAL) — stock 0x77 with bit 6 set, i.e. cores 3+5 masked but core 6
+present. The safety gate refused it by design. Per explicit approval, the gate
+now has an escape hatch:
+
+- **Code**: `OcQ3::unlock_cores_any()` in `crates/ariel-smu/src/ocq3.rs` —
+  skips the 0x77 check but keeps the same all-or-nothing q3 0x98 write and
+  the 0xFF readback verify. Wired as `arieltune apu cores apply
+  --force-abnormal` (`crates/apu/src/{cli,cores}.rs`); `boot`/unit path
+  unchanged (no force at boot, per design). `unlock_cores()` default refusal
+  intact. Tests 37/37 green.
+- **Result on blade 115**: `apply --force-abnormal --reboot` wrote and
+  verified 0xFF; warm reboot into pinned `snap-59cee34a` came back clean —
+  mask `0xFF`, all 8 cores / 16 threads visible, 0 offline, 0 MCE entries,
+  boot unit NOT installed (user: "no service"). The blade booted fine; no
+  lockout.
+- **Knowns**: warm-reboot semantics unchanged (cold boot reverts to the
+  board's own mask — likely 0xD7 again on this blade); the 2 extra cores
+  change the SoC power/thermal envelope; 8-core ACPI SSDTs were NOT
+  installed, so threads 12-15 have no C-state tables (stock stops at C00B).
+
 ---
 
 ## 1. Decision log — what was investigated and why we chose what we chose
