@@ -143,14 +143,15 @@ pub fn carrier_present() -> bool {
 }
 
 /// The prebuilt writable driver, embedded in the binary, and the exact kernel
-/// its vermagic matches. The BC-250 is x86-64-v3 but the CachyOS kernel headers
-/// ship x86-64-v4 host build tools (`fixdep` aborts with "CPU ISA level is lower
-/// than required"), so the module CANNOT be built on the board. aputune carries
-/// the prebuilt `.ko` and installs it itself. Source + patch + rebuild script:
+/// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
+/// itself on a matching kernel (fresh blades with no nct6687 installed). The
+/// board CAN also rebuild it in place (its kernel is clang-built: use LLVM=1,
+/// see `kmod/nct6687-bc250/build-and-install.sh`), but the embedded copy keeps
+/// a clean blade fully autonomous. Source + patch + rebuild script:
 /// `kmod/nct6687-bc250/` — rebuild there for a different kernel.
 const NCT6687_KO: &[u8] =
-    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos-bore.ko");
-const NCT6687_KVER: &str = "7.0.9-1-cachyos-bore";
+    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko");
+const NCT6687_KVER: &str = "7.0.9-1-cachyos";
 
 /// Running kernel release (`uname -r`).
 fn running_kver() -> String {

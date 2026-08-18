@@ -31,7 +31,11 @@ build)
     [ -z "$m" ] && break
     mkdir -p "$KBUILD/$(dirname "$m")"; : > "$KBUILD/$m"
   done
-  make -C "$KBUILD" M="$SRC" modules
+  # The board's kernel is clang-built (see include/config/CC_IS_CLANG); its
+  # flags are clang-only, so pass LLVM=1. gcc-built kernels build as before.
+  LLVM_ARG=
+  [ -e "$KBUILD/include/config/CC_IS_CLANG" ] && LLVM_ARG="LLVM=1"
+  make -C "$KBUILD" M="$SRC" $LLVM_ARG modules
   echo "built: $SRC/nct6687.ko  (copy to the board and run: $0 install nct6687.ko)"
   ;;
 install)
