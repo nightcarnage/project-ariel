@@ -274,6 +274,10 @@ pub struct ApuScreen {
     /// Cores panel: selected core in the map + the advisory verify-sweep worker
     /// (long-running, so it lives off the UI thread like the CU workers).
     core_sel: usize,
+    /// OS-layer draft: None = no pending edit (the map shows live state);
+    /// Some = per-slot desired online state, applied only with [a]. Toggling
+    /// never writes hardware until [a]; [esc] discards; [r] resets all online.
+    core_draft: Option<[bool; 8]>,
     cores_report: Option<Vec<String>>,
     cores_verify_job: Option<JoinHandle<Result<Vec<String>>>>,
 }
@@ -437,6 +441,7 @@ impl ApuScreen {
             armed_unforce: false,
             patch_popup: None,
             core_sel: 0,
+            core_draft: None,
             cores_report: None,
             cores_verify_job: None,
         }
@@ -1239,50 +1244,107 @@ fn cpu_key(app: &mut ApuScreen, code: KeyCode) {
     }
 }
 
+/// Live per-slot online flags for the draft baseline (slot = core id; a slot
+/// with no threads counts as offline).
+fn core_live_draft(app: &ApuScreen) -> [bool; 8] {
+    let mut d = [false; 8];
+    if let Some(cs) = &app.snap.cores {
+        for (core, cpus) in &cs.per_core {
+            if (*core as usize) < 8 && cpus.iter().any(|(_, on)| *on) {
+                d[*core as usize] = true;
+            }
+        }
+    }
+    d
+}
+
 /// Core Map panel keys — its own focus target (Tab reaches it between CPU and
-/// GPU). Left/Right (and [ ]) move the selected core; space toggles the OS
-/// layer; u/o/O/i/v map to the CLI verbs. Nothing here acts while another
-/// panel holds focus.
+/// GPU). Left/Right (and [ ]) move the selected core. The OS-layer toggles are
+/// DRAFT-ONLY: space/o/O edit the draft, [a] applies it, [esc] cancels, [r]
+/// resets everything online. Nothing here writes hardware except [a], [r],
+/// [u] and [i].
 fn cores_key(app: &mut ApuScreen, code: KeyCode) {
     match code {
         KeyCode::Left | KeyCode::Char('[') => app.core_sel = (app.core_sel + 7) % 8,
         KeyCode::Right | KeyCode::Char(']') => app.core_sel = (app.core_sel + 1) % 8,
         KeyCode::Char(' ') => {
-            let sel = app.core_sel as u32;
-            let present = crate::cores::core_map().iter().any(|(c, _)| *c == sel);
-            if !present {
-                app.status = format!("core {sel} not present in topology");
-            } else {
-                let any_on = crate::cores::core_threads()
-                    .iter()
-                    .find(|(c, _)| *c == sel)
-                    .map(|(_, cpus)| cpus.iter().any(|(_, on)| *on))
-                    .unwrap_or(false);
-                let r = if any_on {
-                    crate::cores::offline(Some(sel))
-                } else {
-                    crate::cores::online(Some(sel))
-                };
-                app.status = match r {
-                    Ok(()) => format!("core {sel} toggled (OS layer, instant)"),
-                    Err(e) => format!("core toggle refused: {e}"),
-                };
-                app.snap = gather();
+            let sel = app.core_sel;
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            if sel == 0 && d[0] {
+                app.status = "core 0 cannot be offlined (kernel keeps cpu0)".into();
+                return;
             }
+            d[sel] = !d[sel];
+            app.core_draft = Some(d);
+            app.status = format!("core {sel} toggled in draft — [a] apply, [esc] cancel");
         }
         KeyCode::Char('o') => {
-            app.status = match crate::cores::offline(None) {
-                Ok(()) => "all cores except 0 offline (OS layer)".into(),
-                Err(e) => format!("offline failed: {e}"),
-            };
-            app.snap = gather();
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            for (i, v) in d.iter_mut().enumerate() {
+                if i != 0 {
+                    *v = false;
+                }
+            }
+            app.core_draft = Some(d);
+            app.status = "draft: all except core 0 offline — [a] apply".into();
         }
         KeyCode::Char('O') => {
-            app.status = match crate::cores::online(None) {
-                Ok(()) => "all cores online (OS layer)".into(),
-                Err(e) => format!("online failed: {e}"),
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            for v in d.iter_mut() {
+                *v = true;
+            }
+            app.core_draft = Some(d);
+            app.status = "draft: all cores online — [a] apply".into();
+        }
+        KeyCode::Char('a') => {
+            let Some(draft) = app.core_draft.take() else {
+                app.status = "no draft to apply".into();
+                return;
             };
+            let live = core_live_draft(app);
+            let mut changed = 0u32;
+            let mut err: Option<String> = None;
+            for slot in 0..8usize {
+                if draft[slot] == live[slot] {
+                    continue;
+                }
+                let r = if draft[slot] {
+                    crate::cores::online(Some(slot as u32))
+                } else {
+                    crate::cores::offline(Some(slot as u32))
+                };
+                match r {
+                    Ok(_) => changed += 1,
+                    Err(e) => {
+                        err = Some(format!("core {slot}: {e}"));
+                        break;
+                    }
+                }
+            }
             app.snap = gather();
+            app.status = match err {
+                Some(e) => format!("apply stopped: {e}"),
+                None => format!("applied {changed} core change(s) (OS layer, instant)"),
+            };
+        }
+        KeyCode::Esc => {
+            if app.core_draft.is_some() {
+                app.core_draft = None;
+                app.status = "draft cancelled — nothing changed".into();
+            }
+        }
+        KeyCode::Char('r') => {
+            app.core_draft = None;
+            app.status = match crate::cores::online(None) {
+                Ok(()) => {
+                    app.snap = gather();
+                    "reset: all cores online (OS layer)".into()
+                }
+                Err(e) => format!("reset failed: {e}"),
+            };
         }
         KeyCode::Char('u') => match &app.snap.cores {
             None => app.status = "core map unavailable (need root + BC-250)".into(),
@@ -1526,9 +1588,9 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
             Focus::Cores => &[
                 ("[←→]", "core"),
                 ("[space]", "toggle"),
-                ("[u]", "unlock 8C"),
-                ("[i]", "unit"),
-                ("[v]", "verify"),
+                ("[a]", "apply"),
+                ("[esc]", "cancel"),
+                ("[r]", "reset"),
                 ("[tab]", "panel"),
                 ("[q]", "quit"),
             ],
@@ -2414,10 +2476,18 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
             },
             Style::default().fg(WARN),
         ),
+        Span::styled(
+            if app.core_draft.is_some() {
+                " · draft [a] apply [esc] cancel"
+            } else {
+                ""
+            },
+            Style::default().fg(WARN),
+        ),
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [←→] select · [space] toggle · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists
@@ -2493,7 +2563,29 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
             ];
             push_cell(&mut fw, &fw_parts, sel);
             fw.push(sep('│'));
-            let (pair, col) = thread_pair(core);
+            let (pair, col) = match &app.core_draft {
+                Some(d) if (core as usize) < 8 => {
+                    // Draft view: show the DESIRED state, warn when it
+                    // differs from live (pending).
+                    let live_on = cs
+                        .per_core
+                        .iter()
+                        .find(|(c, _)| *c == core)
+                        .map(|(_, v)| v.iter().any(|(_, on)| *on))
+                        .unwrap_or(false);
+                    let want = d[core as usize];
+                    let p = if want { "██" } else { "··" };
+                    let c = if want != live_on {
+                        WARN
+                    } else if want {
+                        GOOD
+                    } else {
+                        DIM
+                    };
+                    (p, c)
+                }
+                _ => thread_pair(core),
+            };
             let os_parts: [(&str, Style); 2] = [
                 ("  os ", Style::default().fg(DIM)),
                 (pair, Style::default().fg(col)),

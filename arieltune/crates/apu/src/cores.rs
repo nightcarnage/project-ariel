@@ -105,9 +105,10 @@ pub struct CoreSnapshot {
     pub per_core: Vec<(u32, Vec<(u32, bool)>)>,
 }
 
-/// Physical core id -> first online CPU number map, sorted by core id.
-pub fn core_map() -> Vec<(u32, u32)> {
-    let mut map: Vec<(u32, u32)> = Vec::new();
+/// List every cpuN directory index (0..max). The cpuN dirs exist even when the
+/// CPU is offline — offlined CPUs lose their `topology/` subtree but keep the
+/// dir and the `online` file, so this is the recovery-safe enumeration.
+pub fn cpu_dirs() -> Vec<u32> {
     let mut cpus: Vec<u32> = Vec::new();
     for e in fs::read_dir("/sys/devices/system/cpu").into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -118,15 +119,35 @@ pub fn core_map() -> Vec<(u32, u32)> {
         }
     }
     cpus.sort_unstable();
-    for cpu in cpus {
-        let core_file = format!("/sys/devices/system/cpu/cpu{cpu}/topology/core_id");
-        if let Some(core) = fs::read_to_string(&core_file)
+    cpus
+}
+
+/// Physical core (SMN mask bit) a logical CPU belongs to. Offlined CPUs lose
+/// their `topology/` subtree, so this falls back through: own core_id -> the
+/// online SMT sibling's core_id -> the x86 adjacent-SMT-pair index (cpu/2).
+/// The last resort keeps offlined cores grouped and recoverable.
+pub fn core_of(cpu: u32) -> Option<u32> {
+    let read = |c: u32| -> Option<u32> {
+        fs::read_to_string(format!("/sys/devices/system/cpu/cpu{c}/topology/core_id"))
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-        {
-            if !map.iter().any(|(c, _)| *c == core) {
-                map.push((core, cpu));
-            }
+    };
+    if let Some(c) = read(cpu) {
+        return Some(c);
+    }
+    if let Some(c) = read(cpu ^ 1) {
+        return Some(c);
+    }
+    Some(cpu / 2)
+}
+
+/// Physical core id -> first CPU number map, sorted by core id.
+pub fn core_map() -> Vec<(u32, u32)> {
+    let mut map: Vec<(u32, u32)> = Vec::new();
+    for cpu in cpu_dirs() {
+        let Some(core) = core_of(cpu) else { continue };
+        if !map.iter().any(|(c, _)| *c == core) {
+            map.push((core, cpu));
         }
     }
     map.sort_by_key(|(c, _)| *c);
@@ -212,30 +233,19 @@ fn mce_count() -> u32 {
 }
 
 /// Per-core CPU list with per-thread online flags, sorted by core id.
-/// `(core_id, [(cpu, online), ..])` — used by the TUI core map.
+/// `(core_id, [(cpu, online), ..])` — used by the TUI core map. Groups EVERY
+/// cpu dir (via [`core_of`]), so fully-offlined cores stay visible/recoverable.
 pub fn core_threads() -> Vec<(u32, Vec<(u32, bool)>)> {
     let mut cores: Vec<(u32, Vec<(u32, bool)>)> = Vec::new();
-    for (core, cpu) in core_map() {
-        let mut threads = vec![(cpu, cpu_is_online(cpu))];
-        // SMT sibling: the CPU whose core_id matches and isn't the first one.
-        for e in fs::read_dir("/sys/devices/system/cpu").into_iter().flatten().flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(n) = name.strip_prefix("cpu") else { continue };
-            let Ok(other) = n.parse::<u32>() else { continue };
-            if other == cpu {
-                continue;
-            }
-            let cf = format!("/sys/devices/system/cpu/cpu{other}/topology/core_id");
-            if fs::read_to_string(&cf)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                == Some(core)
-            {
-                threads.push((other, cpu_is_online(other)));
-            }
+    for cpu in cpu_dirs() {
+        let Some(core) = core_of(cpu) else { continue };
+        match cores.iter_mut().find(|(c, _)| *c == core) {
+            Some((_, v)) => v.push((cpu, cpu_is_online(cpu))),
+            None => cores.push((core, vec![(cpu, cpu_is_online(cpu))])),
         }
-        threads.sort_by_key(|(c, _)| *c);
-        cores.push((core, threads));
+    }
+    for (_, v) in cores.iter_mut() {
+        v.sort_by_key(|(c, _)| *c);
     }
     cores.sort_by_key(|(c, _)| *c);
     cores
@@ -384,23 +394,29 @@ pub fn uninstall() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn set_core_online(core: u32, online: bool) -> Result<u32> {
-    let map = core_map();
-    let cpus: Vec<u32> = map
+    // BOTH threads of the core, from the robust grouping (offline-safe).
+    let cpus: Vec<u32> = core_threads()
         .iter()
-        .filter(|(c, _)| *c == core)
-        .map(|(_, cpu)| *cpu)
-        .collect();
+        .find(|(c, _)| *c == core)
+        .map(|(_, v)| v.iter().map(|(cpu, _)| *cpu).collect())
+        .unwrap_or_else(|| {
+            // Fully-offline core with no readable topology: the adjacent SMT
+            // pair (x86 enumeration order) is the best available guess.
+            vec![2 * core, 2 * core + 1]
+        });
     if cpus.is_empty() {
-        bail!("core {core} is not present in the current topology");
+        bail!("core {core} has no known logical CPUs");
     }
     if !online && cpus.contains(&0) {
         bail!("refusing to offline cpu0 (core 0) — the kernel cannot offline cpu0");
     }
+    let mut touched = 0;
     for cpu in &cpus {
         let p = format!("/sys/devices/system/cpu/cpu{cpu}/online");
         if Path::new(&p).exists() {
             fs::write(&p, if online { "1" } else { "0" })
                 .with_context(|| format!("write {p}"))?;
+            touched += 1;
         }
     }
     let (threads, offline) = thread_counts();
@@ -408,7 +424,7 @@ fn set_core_online(core: u32, online: bool) -> Result<u32> {
         "core {core} {} — now {threads} threads visible, {offline} offline",
         if online { "online" } else { "offline" }
     );
-    Ok(cpus.len() as u32)
+    Ok(touched)
 }
 
 /// Offline all cores except 0, or one specific core. OS layer only.
@@ -418,26 +434,45 @@ pub fn offline(core: Option<u32>) -> Result<()> {
             set_core_online(c, false)?;
         }
         None => {
-            for (c, _) in core_map() {
-                if c != 0 {
-                    set_core_online(c, false)?;
+            // No topology needed: write 0 to every hotpluggable CPU but cpu0.
+            // This path must keep working when cores are already offline.
+            for cpu in cpu_dirs() {
+                if cpu == 0 {
+                    continue;
+                }
+                let p = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+                if Path::new(&p).exists() {
+                    fs::write(&p, "0").with_context(|| format!("write {p}"))?;
                 }
             }
+            let (threads, offline) = thread_counts();
+            println!(
+                "all cores except 0 offline — now {threads} threads visible, {offline} offline"
+            );
         }
     }
     Ok(())
 }
 
-/// Online one core or every present core. OS layer only.
+/// Online one core or every present CPU. The `None` (all) path writes 1 to
+/// every hotpluggable CPU dir with no topology dependency — the guaranteed
+/// recovery route after anything got offlined.
 pub fn online(core: Option<u32>) -> Result<()> {
     match core {
         Some(c) => {
             set_core_online(c, true)?;
         }
         None => {
-            for (c, _) in core_map() {
-                set_core_online(c, true)?;
+            for cpu in cpu_dirs() {
+                let p = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+                if Path::new(&p).exists() {
+                    fs::write(&p, "1").with_context(|| format!("write {p}"))?;
+                }
             }
+            let (threads, offline) = thread_counts();
+            println!(
+                "all cpus online — now {threads} threads visible, {offline} offline"
+            );
         }
     }
     Ok(())

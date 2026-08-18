@@ -239,11 +239,18 @@ on the selected cell.
 ```
 
 Key bindings and rules:
-- `[space]` on a core toggles **both threads of that physical core** at the OS
-  layer (the granular, instant, proven layer). CPU 0 is un-toggleable.
+- The OS-layer toggles are **draft-then-apply**: `[space]` (toggle core), `[o]`
+  (all except 0 offline) and `[O]` (all online) only edit the draft — nothing
+  touches hardware until `[a]` apply. `[esc]` discards the draft, `[r]` resets
+  (onlines every CPU immediately — the recovery route). The title shows
+  `· draft [a] apply [esc] cancel` and pending cells render yellow.
 - `[←]` / `[→]` (and `[[]` / `[]]`) move the selected cell; `[u]` performs the
   firmware unlock (same gates as `cores apply`); the fw row re-renders from a
   live mask read and `PENDING-REBOOT` shows with a reminder after success.
+- Offlined CPUs lose their `topology/` subtree on this kernel, so the map's
+  grouping falls back core_id -> online SMT sibling -> adjacent-pair index, and
+  `online` (all) writes every hotpluggable CPU dir with no topology dependency
+  — offlined cores can always be recovered.
 - `[o]`/`[O]` offline/online all cores (except 0) — the preset shapes (2C/4T
   etc.) are reached by offlining, the presets menu itself is deferred (`[p]`
   is the global patch popup).
