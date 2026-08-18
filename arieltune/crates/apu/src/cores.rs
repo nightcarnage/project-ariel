@@ -288,12 +288,22 @@ fn set_warm_reboot() {
 }
 
 /// `aputune cores apply`. Never reboots unless `warm_reboot`.
-pub fn apply(warm_reboot: bool) -> Result<()> {
+/// `force_abnormal` bypasses the 0x77 gate (experimental escape hatch).
+pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
     let before = snapshot()?;
     println!("before: mask {}", describe_mask(before.mask));
 
     let q = OcQ3::open()?;
-    match q.unlock_cores()? {
+    let outcome = if force_abnormal {
+        println!(
+            "WARNING: --force-abnormal bypasses the 0x77 gate (starting mask 0x{:02X}) — EXPERIMENTAL",
+            before.mask
+        );
+        q.unlock_cores_any()?
+    } else {
+        q.unlock_cores()?
+    };
+    match outcome {
         CoreUnlock::AlreadyUnlocked => {
             println!("already unlocked, nothing to do");
         }

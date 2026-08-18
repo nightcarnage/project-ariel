@@ -1350,7 +1350,7 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
             None => app.status = "core map unavailable (need root + BC-250)".into(),
             Some(cs) => match cs.state {
                 crate::cores::CoreState::Locked => {
-                    app.status = match crate::cores::apply(false) {
+                    app.status = match crate::cores::apply(false, false) {
                         Ok(()) => "unlocked — cores appear after a WARM reboot".into(),
                         Err(e) => format!("unlock refused: {e}"),
                     };

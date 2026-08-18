@@ -256,6 +256,27 @@ impl OcQ3 {
                 "refusing: unexpected core mask 0x{before:02X} (expected 0x{CORE_MASK_STOCK:02X})"
             );
         }
+        self.unlock_write()
+    }
+
+    /// Forced unlock: identical to [`OcQ3::unlock_cores`] but skips the 0x77
+    /// gate for boards already running an abnormal mask (e.g. 0xD7).
+    ///
+    /// EXPERIMENTAL — use only on a board whose mask you have deliberately
+    /// decided to repair. The write is still the all-or-nothing q3 0x98
+    /// backdoor (firmware always stores 0xFF) and the result is still
+    /// readback-verified. A warm reboot re-enumerates; a cold boot reverts.
+    pub fn unlock_cores_any(&self) -> Result<CoreUnlock> {
+        let before = self.core_mask()?;
+        if before == CORE_MASK_FULL {
+            return Ok(CoreUnlock::AlreadyUnlocked);
+        }
+        self.unlock_write()
+    }
+
+    /// Shared write path: send the 0x98 backdoor and verify the mask reads
+    /// 0xFF afterwards.
+    fn unlock_write(&self) -> Result<CoreUnlock> {
         let (st, _a) = self.send(q3::WRITE_SMN, CORE_MASK_REG, 0)?;
         if st != SMU_OK {
             bail!("q3 msg 0x98: status 0x{st:02x} — mask unchanged, nothing broken");

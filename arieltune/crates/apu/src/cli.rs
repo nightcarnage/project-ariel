@@ -397,6 +397,9 @@ pub enum CoreCmd {
         /// Warm-reboot immediately after a successful unlock (mask survives warm resets).
         #[arg(long)]
         reboot: bool,
+        /// Bypass the 0x77 gate: unlock even from an abnormal mask (e.g. 0xD7). EXPERIMENTAL.
+        #[arg(long)]
+        force_abnormal: bool,
     },
     /// Idempotent boot-time path for aputune-cores.service. Never reboots; exit 0 on refusal. Root.
     Boot,
@@ -450,7 +453,10 @@ pub enum AcpiCmd {
 fn cmd_cores(action: CoreCmd) -> Result<()> {
     match action {
         CoreCmd::Status => crate::cores::status(),
-        CoreCmd::Apply { reboot } => crate::cores::apply(reboot),
+        CoreCmd::Apply {
+            reboot,
+            force_abnormal,
+        } => crate::cores::apply(reboot, force_abnormal),
         CoreCmd::Boot => crate::cores::boot(),
         CoreCmd::Install => crate::cores::install(),
         CoreCmd::Uninstall => crate::cores::uninstall(),
