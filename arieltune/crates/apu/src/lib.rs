@@ -25,6 +25,7 @@
 //! `arieltune-gpu.service` daemon is the ONLY SMU clock writer.
 
 mod cpu;
+mod cores;
 mod cu;
 mod curoute;
 mod cutest;

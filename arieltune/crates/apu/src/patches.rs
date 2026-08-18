@@ -345,6 +345,23 @@ pub const SERIES: &[Patch] = &[
         "kfd_device_queue_manager.c, kfd_chardev.c, kfd_device_queue_manager.h",
         Tell::ModParam("bc250_flush_by_runlist")
     ),
+    patch!(
+        "28",
+        "28-bc250-8core-telemetry.patch",
+        "8-core hybrid SMU metrics layout (fixes GPU clock reporting)",
+        "After the 8-core CPU unlock the firmware redistributes the per-core \
+         arrays inside the fixed 116-byte metrics table and GfxclkFrequency \
+         loses its slot (offset 0x44 is now C0Residency[6]) — pp_dpm_sclk, \
+         OD_SCLK, gpu_metrics and hwmon all report garbage. Auto-detects the \
+         8-core topology (or amdgpu.cs_eight_core_map=1 to force) and \
+         reinterprets the table with the empirically mapped hybrid layout, \
+         querying gfxclk direct from the SMU (QueryGfxclk, serialized under \
+         msg_ctl.lock) with a table fallback. Safe on 6-core blades: \
+         auto-detect keeps the stock layout. Ported from GabriWar's \
+         0001-bc250-8core-telemetry (core-count helper by FilippoR).",
+        "cyan_skillfish_ppt.c, smu11_driver_if_cyan_skillfish.h",
+        Tell::ModParam("cs_eight_core_map")
+    ),
 
 ];
 

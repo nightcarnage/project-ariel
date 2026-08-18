@@ -7,6 +7,13 @@
 //!   * fence_info ring sequence deltas — the activity signal (clock-independent)
 //!   * hwmon junction temperature — the thermal signal
 //!   * amdgpu_pm_info SoC watts — sanity / thermal-budget input (best-effort)
+//!
+//! ONE exception, TUI/CLI-only: [`gfxclk_mhz`] may fall through to the direct
+//! SMU QueryGfxclk read via the patch-11 debugfs node, which is serialized
+//! under amdgpu's own msg_ctl.lock (the same race-free surface `smu send_raw`
+//! uses). The daemon's control loop never calls it — its signals stay
+//! mailbox-free — and the fallback only fires when pp_dpm_sclk reports the
+//! 8-core metrics-table garbage.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -574,6 +581,44 @@ pub fn current_sclk_mhz() -> Option<u32> {
         }
     }
     None
+}
+
+/// The lowest plausible GFX clock on this silicon (the low DPM state is 350).
+/// Values below it are the 8-core metrics-table garbage (C0Residency read as a
+/// clock) or a broken read — treat them as absent.
+pub const MIN_PLAUSIBLE_SCLK_MHZ: u32 = 350;
+
+/// Direct SMU QueryGfxclk (MHz) from the patch-11 telemetry node. Serialized
+/// under amdgpu's msg_ctl.lock, so it is race-free and — unlike every
+/// metrics-table path — immune to the 8-core hybrid layout.
+fn smu_gfxclk_mhz() -> Option<u32> {
+    let s = ariel_smu::smu::Smu::open().ok()?;
+    let txt = s.telemetry()?;
+    for line in txt.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("GfxClk:") else {
+            continue;
+        };
+        return rest.split_whitespace().next()?.parse().ok();
+    }
+    None
+}
+
+/// Current GFX clock (MHz), hardened for the 8-core CPU unlock:
+///
+/// * pp_dpm_sclk when it parses AND is plausible (>= 350 MHz) — plain sysfs,
+///   no MP1 mailbox traffic. Correct on 6-core and on 8-core WITH patch 28.
+/// * otherwise the direct SMU QueryGfxclk read (mailbox, serialized) — the
+///   only truthful source when the firmware redistributed the metrics table.
+///
+/// The SMU query is only reached in the pathological case, so the per-second
+/// gather loop stays mailbox-free on healthy systems.
+pub fn gfxclk_mhz() -> Option<u32> {
+    if let Some(sys) = current_sclk_mhz() {
+        if sys >= MIN_PLAUSIBLE_SCLK_MHZ {
+            return Some(sys);
+        }
+    }
+    smu_gfxclk_mhz()
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-27**. Four patches are on disk but NOT applied,
+on any BC-250 ship, numbered **01-28**. Four patches are on disk but NOT applied,
 in the order listed: `12` (Studebaker's Vulkan-only CU unlock, kept as an
 alternate to `16`), `21` (KIQ PASID-flush disable - superseded by patch
 `14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x),
@@ -18,6 +18,11 @@ alternate to `16`), `21` (KIQ PASID-flush disable - superseded by patch
 for the SDMA validation round, then patch `19` retires). All four are tracked
 in the `aputune` TUI under "on disk, not applied". See "Excluded" below for
 what was deliberately dropped.
+
+Patch `28` is the 8-core CPU-unlock telemetry fix (see `arieltune-core.md`).
+GabriWar's companion `0002-bc250-rocm-vm-flush.patch` was reviewed and is
+**deliberately not staged**: applied patch `14(e)` already forces
+`flush_pasid_uses_kiq = false` for gfx10.1.x on the exact line `0002` touches.
 
 
 ## Detailed patch list
@@ -51,6 +56,7 @@ what was deliberately dropped.
 | `25` | `25-bc250-flush-tlb-by-runlist.patch` | `kfd_device_queue_manager.c`, `kfd_chardev.c`, `kfd_device_queue_manager.h` | **NEW** Rebuild the runlist on unmap so the firmware really invalidates the compute TLB. **Active on snap-8fe794e8** — the patch that made PyTorch work. |
 | `26` | `26-bc250-sdma-firmware-override.patch` | `amdgpu_sdma.c` | *(on disk, NOT applied)* SDMA firmware override — the cyan_skillfish2 blob never drives user queues (GabriWar docs/28+29); navi10/navi12 blobs work. Gated by `amdgpu.bc250_sdma_fw=<base>`. Validation path to retiring patch 19. |
 | `27` | `27-bc250-early-sdma-trap.patch` | `sdma_v5_0.c` | *(on disk, NOT applied)* Write SDMA TRAP_ENABLE in gfx_resume — removes the two 500 ms "Fence fallback" stalls at boot. Companion to patch 26. |
+| `28` | `28-bc250-8core-telemetry.patch` | `cyan_skillfish_ppt.c`, `smu11_driver_if_cyan_skillfish.h` | **APPLIED** 8-core hybrid SMU metrics layout. After the 8-core CPU unlock the firmware redistributes the 116-byte metrics table and `GfxclkFrequency` loses its 0x44 slot (`C0Residency[6]` now) — this reinterprets the table with the empirically mapped hybrid layout and queries gfxclk direct from the SMU (`QueryGfxclk`) with a table fallback. Auto-detects via topology; `amdgpu.cs_eight_core_map=1` forces. Safe on 6-core blades. Ported from GabriWar `0001-bc250-8core-telemetry`. |
 
 ## What aputune does with them
 

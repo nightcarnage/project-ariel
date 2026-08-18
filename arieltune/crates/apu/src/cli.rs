@@ -71,6 +71,15 @@ pub enum Cmd {
         #[command(subcommand)]
         action: CpuCmd,
     },
+    /// 8-core CPU unlock (SMU q3 msg 0x98) + live per-core offline control + verify sweep + ACPI fix.
+    ///
+    /// The firmware unlock is all-or-nothing 0x77→0xFF and takes effect at the next WARM reboot; a cold
+    /// boot reverts it and the boot unit re-applies it. Granular core counts are done at the OS layer
+    /// (offline/online, instant). Refuses abnormal masks. See `arieltune-core.md`.
+    Cores {
+        #[command(subcommand)]
+        action: CoreCmd,
+    },
     /// Build the liberation series into the system (patched kernel + arm 40-CU). Preview unless --run.
     ///
     /// Rebuilds the kernel package and needs a REBOOT to take effect. Needs root. Preview by default;
@@ -376,6 +385,86 @@ pub enum CpuCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum CoreCmd {
+    /// Firmware mask, state, visible cores/threads, offlined threads, MCE count, boot-unit state. Read-only.
+    Status,
+    /// Unlock all 8 cores now (SMU q3 msg 0x98, all-or-nothing 0x77→0xFF). Refuses abnormal masks. Root.
+    ///
+    /// The new cores appear after a WARM reboot. A cold boot reverts the mask; the boot unit re-applies
+    /// it. Default: no reboot. See `arieltune-core.md`.
+    Apply {
+        /// Warm-reboot immediately after a successful unlock (mask survives warm resets).
+        #[arg(long)]
+        reboot: bool,
+    },
+    /// Idempotent boot-time path for aputune-cores.service. Never reboots; exit 0 on refusal. Root.
+    Boot,
+    /// Install the boot re-apply unit (aputune-cores.service) and enable it. Root.
+    Install,
+    /// Remove the boot unit. Cores stay unlocked until the next cold boot. Root.
+    Uninstall,
+    /// Advisory per-core health sweep: stress-ng --verify pinned per physical core + MCE grep. Root.
+    ///
+    /// The report is for records only — it NEVER gates anything (fleet images are cloned across
+    /// blades, so persisted verdicts are untrustworthy). Run it when you want to know.
+    Verify {
+        /// Seconds per core (default 20).
+        #[arg(default_value_t = 20)]
+        seconds: u64,
+    },
+    /// 8-core ACPI SSDT-CST/PST initcpio override. status read-only; install/revert need root.
+    ///
+    /// The stock tables stop at C00B (12 threads); after unlock, threads 12-15 get no C-states.
+    /// The 8-core tables cover C00-C00F (over-coverage is harmless for any mask).
+    Acpi {
+        #[command(subcommand)]
+        action: AcpiCmd,
+    },
+    /// Offline a physical core's threads at the OS layer (live, instant, reversible). Root.
+    ///
+    /// This is the granular control layer: any core count is reached by unlock + offlining,
+    /// never by firmware masks. Omit CORE to offline every core except 0.
+    Offline {
+        /// Physical core id (0-7); omit for all except 0.
+        core: Option<u32>,
+    },
+    /// Online a physical core's threads at the OS layer (live, instant). Root.
+    Online {
+        /// Physical core id (0-7); omit for all.
+        core: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AcpiCmd {
+    /// Threads, cpus without idle states, installed CST coverage. Read-only.
+    Status,
+    /// Download + stage the 8-core tables, add the acpi_override hook, rebuild initramfs. Root.
+    Install,
+    /// Restore backed-up tables (or remove the override) and rebuild initramfs. Root.
+    Revert,
+}
+
+/// Dispatch for `arieltune apu cores`.
+fn cmd_cores(action: CoreCmd) -> Result<()> {
+    match action {
+        CoreCmd::Status => crate::cores::status(),
+        CoreCmd::Apply { reboot } => crate::cores::apply(reboot),
+        CoreCmd::Boot => crate::cores::boot(),
+        CoreCmd::Install => crate::cores::install(),
+        CoreCmd::Uninstall => crate::cores::uninstall(),
+        CoreCmd::Verify { seconds } => crate::cores::verify(seconds),
+        CoreCmd::Acpi { action } => match action {
+            AcpiCmd::Status => crate::cores::acpi_status(),
+            AcpiCmd::Install => crate::cores::acpi_install(),
+            AcpiCmd::Revert => crate::cores::acpi_revert(),
+        },
+        CoreCmd::Offline { core } => crate::cores::offline(core),
+        CoreCmd::Online { core } => crate::cores::online(core),
+    }
+}
+
 /// Run one `arieltune apu` subcommand. The suite bin owns SIGPIPE, `Cli::parse`,
 /// and the bare-`arieltune apu` launch-to-tab; a subcommand WITH args lands here.
 /// There is no `Tui` / `None` arm: the interactive dashboard is the suite shell's
@@ -387,6 +476,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         Cmd::Cu { action } => cmd_cu(action),
         Cmd::Gpu { action } => cmd_gpu(action),
         Cmd::Cpu { action } => cmd_cpu(action),
+        Cmd::Cores { action } => cmd_cores(action),
         Cmd::Build {
             pkgbuild,
             target,
@@ -769,7 +859,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
                             .and_then(|(_, r)| r.split_whitespace().next().map(String::from))
                     })
                 })
-                .or_else(|| telemetry::current_sclk_mhz().map(|m| m.to_string()));
+                .or_else(|| telemetry::gfxclk_mhz().map(|m| m.to_string()));
             match cur {
                 Some(c) => println!("  current GfxClk:    {c} MHz"),
                 None => println!("  current GfxClk:    unknown"),

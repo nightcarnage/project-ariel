@@ -115,6 +115,13 @@ struct Snapshot {
     /// OD_RANGE VDDC (min, max) mV — scales the vdd gauge without a per-frame
     /// sysfs read.
     od_range: (u32, u32),
+    /// 8-core CPU unlock state (firmware mask + visible cores). PCI-config SMN
+    /// reads only (independent aperture; no MP1 mailbox traffic), so a once-per
+    /// second gather is safe even while the GPU governor runs.
+    cores: Option<crate::cores::CoreSnapshot>,
+    /// Whether aputune-cores.service is installed (gathered once per second so
+    /// draw() stays fs-read-free).
+    cores_unit: bool,
 }
 
 /// Cheap data — sysfs/debugfs/DRM ioctl (+ one systemctl is-active), refreshed
@@ -138,7 +145,7 @@ fn gather() -> Snapshot {
         fully: rep.fully_patched(),
         present,
         total: patches::count(),
-        gfxclk: telemetry::current_sclk_mhz(),
+        gfxclk: telemetry::gfxclk_mhz(),
         temp: telemetry::junction_temp_c(),
         top_set: cfg.top_mhz,
         force_mhz: cfg.force_mhz,
@@ -154,6 +161,8 @@ fn gather() -> Snapshot {
         od_vddc: od.map(|(_, v)| v),
         od_sclk: od.map(|(s, _)| s),
         od_range: telemetry::od_vddc_range().unwrap_or((700, 1129)),
+        cores: crate::cores::snapshot().ok(),
+        cores_unit: std::path::Path::new(crate::cores::UNIT_PATH).exists(),
     }
 }
 
@@ -261,6 +270,11 @@ pub struct ApuScreen {
     /// The [p] liberation patch-detail popup; `None` = closed. While open it
     /// owns all keys (modal).
     patch_popup: Option<PatchPopup>,
+    /// Cores panel: selected core in the map + the advisory verify-sweep worker
+    /// (long-running, so it lives off the UI thread like the CU workers).
+    core_sel: usize,
+    cores_report: Option<Vec<String>>,
+    cores_verify_job: Option<JoinHandle<Result<Vec<String>>>>,
 }
 
 /// SoC package power (W) from the amdgpu hwmon, if exposed. Filtered to the
@@ -421,6 +435,9 @@ impl ApuScreen {
             fan_target: None,
             armed_unforce: false,
             patch_popup: None,
+            core_sel: 0,
+            cores_report: None,
+            cores_verify_job: None,
         }
     }
 
@@ -469,6 +486,24 @@ impl ApuScreen {
     fn tick_refresh(&mut self) {
         // M5: collect any finished GPU worker first (non-blocking).
         self.poll_cu_jobs();
+        // Collect the finished cores verify worker (non-blocking).
+        if let Some(job) = self.cores_verify_job.take() {
+            if job.is_finished() {
+                match job.join() {
+                    Ok(Ok(lines)) => {
+                        let verdict = lines.last().cloned().unwrap_or_default();
+                        self.cores_report = Some(lines);
+                        self.status = format!("cores verify done — {verdict}");
+                    }
+                    Ok(Err(e)) => {
+                        self.status = format!("cores verify failed: {e}");
+                    }
+                    Err(_) => self.status = "cores verify worker panicked".into(),
+                }
+            } else {
+                self.cores_verify_job = Some(job); // still running
+            }
+        }
         // Spawn an action armed on a PREVIOUS tick (status already shown) onto a
         // WORKER thread, so the multi-second KAT/bench never freezes the UI. Only
         // one GPU worker at a time (they share the process-wide compute lock).
@@ -1126,6 +1161,83 @@ fn cpu_key(app: &mut ApuScreen, code: KeyCode) {
             }
             app.cpu_live = app.oc.as_ref().map(cpu::live);
         }
+        // ---- cores map (firmware unlock + OS-layer per-core toggles) ----
+        (Edit::None, KeyCode::Char('[')) => app.core_sel = (app.core_sel + 7) % 8,
+        (Edit::None, KeyCode::Char(']')) => app.core_sel = (app.core_sel + 1) % 8,
+        (Edit::None, KeyCode::Char(' ')) => {
+            let sel = app.core_sel as u32;
+            let present = crate::cores::core_map().iter().any(|(c, _)| *c == sel);
+            if !present {
+                app.status = format!("core {sel} not present in topology");
+            } else {
+                let any_on = crate::cores::core_threads()
+                    .iter()
+                    .find(|(c, _)| *c == sel)
+                    .map(|(_, cpus)| cpus.iter().any(|(_, on)| *on))
+                    .unwrap_or(false);
+                let r = if any_on {
+                    crate::cores::offline(Some(sel))
+                } else {
+                    crate::cores::online(Some(sel))
+                };
+                app.status = match r {
+                    Ok(()) => format!("core {sel} toggled (OS layer, instant)"),
+                    Err(e) => format!("core toggle refused: {e}"),
+                };
+                app.snap = gather();
+            }
+        }
+        (Edit::None, KeyCode::Char('o')) => {
+            app.status = match crate::cores::offline(None) {
+                Ok(()) => "all cores except 0 offline (OS layer)".into(),
+                Err(e) => format!("offline failed: {e}"),
+            };
+            app.snap = gather();
+        }
+        (Edit::None, KeyCode::Char('O')) => {
+            app.status = match crate::cores::online(None) {
+                Ok(()) => "all cores online (OS layer)".into(),
+                Err(e) => format!("online failed: {e}"),
+            };
+            app.snap = gather();
+        }
+        (Edit::None, KeyCode::Char('u')) => match &app.snap.cores {
+            None => app.status = "core map unavailable (need root + BC-250)".into(),
+            Some(cs) => match cs.state {
+                crate::cores::CoreState::Locked => {
+                    app.status = match crate::cores::apply(false) {
+                        Ok(()) => "unlocked — cores appear after a WARM reboot".into(),
+                        Err(e) => format!("unlock refused: {e}"),
+                    };
+                    app.snap = gather();
+                }
+                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
+                crate::cores::CoreState::PendingReboot => {
+                    app.status = "mask set — warm reboot needed to enumerate".into()
+                }
+                crate::cores::CoreState::Abnormal(m) => {
+                    app.status = format!("refusing: abnormal mask 0x{m:02X}")
+                }
+            },
+        },
+        (Edit::None, KeyCode::Char('i')) => {
+            app.status = match crate::cores::install() {
+                Ok(()) => {
+                    app.snap = gather();
+                    "cores boot unit installed (aputune-cores.service)".into()
+                }
+                Err(e) => format!("install failed: {e}"),
+            };
+        }
+        (Edit::None, KeyCode::Char('v')) => {
+            if app.cores_verify_job.is_none() {
+                app.cores_verify_job =
+                    Some(std::thread::spawn(|| crate::cores::sweep_lines(20)));
+                app.status = "verify sweep running (20s/core, advisory)…".into();
+            } else {
+                app.status = "verify already running".into();
+            }
+        }
         // The curve field (sel 1) is a NEGATIVE undervolt shown as -N, so the
         // arrows follow the number line: Left = more undervolt (bigger magnitude),
         // Right = less. Boost/temp keep the usual Left=down / Right=up.
@@ -1337,7 +1449,7 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),  // system card + carrier sensor row
-            Constraint::Length(12), // CPU (controls + F/Vid curve | per-thread activity)
+            Constraint::Length(15), // CPU (controls + F/Vid curve | per-thread activity | core map)
             Constraint::Min(12),    // CU routing | GPU clock
         ])
         .split(root[1]);
@@ -1394,6 +1506,8 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
             Focus::Cpu => &[
                 ("[↑↓]", "field"),
                 ("[enter]", "edit"),
+                ("[u]", "unlock 8C"),
+                ("[space]", "core on/off"),
                 ("[r]", "restore"),
                 ("[tab]", "panel"),
                 ("[q]", "quit"),
@@ -2020,6 +2134,11 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     let block = panel("CPU", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    // Top rows: the three control columns; bottom strip: the core map.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(inner);
     // Three columns spread across the panel: controls | F/Vid curve | threads.
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -2029,7 +2148,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
             Constraint::Length(38),
         ])
         .flex(Flex::SpaceBetween)
-        .split(inner);
+        .split(rows[0]);
     // A column title, centered over the column's content.
     let header = |t: &str| -> Line<'static> {
         Line::from(Span::styled(
@@ -2186,10 +2305,15 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))];
     // CPU0-5 left column, CPU6-11 right column (SMT sibling pairs are adjacent).
-    for row in 0..6usize {
+    // Sized from live topology so the grid follows 6C and 8C unlocks.
+    let total = app.cpu_util.len().min(16);
+    let half = total.div_ceil(2);
+    for row in 0..half {
         let mut spans = cell(row);
         spans.push(Span::raw("  "));
-        spans.extend(cell(row + 6));
+        if row + half < total {
+            spans.extend(cell(row + half));
+        }
         right.push(Line::from(spans));
     }
     if let Some(l) = &app.cpu_live {
@@ -2222,6 +2346,95 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     f.render_widget(Paragraph::new(padded(left)), cols[0]);
     f.render_widget(Paragraph::new(padded(curve)), cols[1]);
     f.render_widget(Paragraph::new(padded(right)), cols[2]);
+    draw_core_map(f, rows[1], app, focused);
+}
+
+/// The 8-core CPU map strip under the CPU panel: firmware mask bits, per-core
+/// OS-layer online state, selected core, and the unlock/verify/install surface.
+/// Renders exclusively from the snapshot (draw stays fs-read-free).
+fn draw_core_map(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
+    let s = &app.snap;
+    let Some(cs) = &s.cores else {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " core map unavailable (need root + BC-250)",
+                Style::default().fg(DIM),
+            ))),
+            area,
+        );
+        return;
+    };
+    let state_style = match cs.state {
+        crate::cores::CoreState::Unlocked => Style::default().fg(GOOD),
+        crate::cores::CoreState::Locked => Style::default().fg(DIM),
+        crate::cores::CoreState::PendingReboot => Style::default().fg(WARN),
+        crate::cores::CoreState::Abnormal(_) => Style::default().fg(BAD),
+    };
+    let mut line1 = vec![
+        Span::styled(
+            " Core Map  ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} ", cs.state.label()),
+            state_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "mask 0x{:02X} · {}C/{}T · {} off",
+                cs.mask, cs.cores, cs.threads, cs.offline
+            ),
+            Style::default().fg(DIM),
+        ),
+    ];
+    if !s.cores_unit {
+        line1.push(Span::styled(" · unit not installed", Style::default().fg(WARN)));
+    }
+    // Per-core cells: firmware bit + both threads (live OS-layer state).
+    let mut line2: Vec<Span> = Vec::new();
+    for (core, cpus) in &cs.per_core {
+        let bit_on = cs.mask & (1 << core) != 0;
+        let on = |i: usize| cpus.get(i).map(|(_, on)| *on).unwrap_or(false);
+        let pair = match (on(0), on(1)) {
+            (true, true) => "●●",
+            (true, false) => "●○",
+            (false, true) => "○●",
+            (false, false) => "○○",
+        };
+        let mut style = Style::default().fg(if bit_on { GOOD } else { DIM });
+        if focused && *core as usize == app.core_sel {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        line2.push(Span::styled(
+            format!(" c{core} {}{pair} ", if bit_on { "▉" } else { "░" }),
+            style,
+        ));
+    }
+    // Legend / selected-core line (also carries the verify verdict when done).
+    let verdict = app
+        .cores_report
+        .as_ref()
+        .and_then(|l| l.last())
+        .cloned()
+        .unwrap_or_default();
+    let line3 = if !verdict.is_empty() {
+        Line::from(Span::styled(
+            format!(" verify: {verdict}"),
+            Style::default().fg(WARN),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(format!(" sel c{}", app.core_sel), Style::default().fg(ACCENT)),
+            Span::styled(
+                " · [space] on/off · [[]/[]] sel · [o] all off · [O] all on · [i] install unit · [v] verify",
+                Style::default().fg(DIM),
+            ),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(vec![Line::from(line1), Line::from(line2), line3]),
+        area,
+    );
 }
 
 fn draw_gpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
