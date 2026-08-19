@@ -22,9 +22,12 @@ notices:
    Basis of the SDMA firmware documentation (patches 26/27 lineage).
 
 4. Fabian (git.sudx.de/Fabian, private; local mirror nightcarnage/bc-250-rocm)
-   PENDING PERMISSION (as of 2026-08-18): patches 13/14/15 are C refactors of
-   Fabian's patch1/2/3 Python patchers. Shipping them requires his explicit
-   grant; the grant (date + wording) will be recorded here when received.
+   Patches 13/14/15 are C refactors of Fabian's patch1/2/3 Python patchers.
+   Permission GRANTED 2026-08-19 via Discord DM. In reply to: "...are you
+   good with me shipping them under that license [GPL-2.0 or compatible]?
+   You can just reply 'yes, ship my GFXOFF + KIQ-bypass patches as GPL-2.0
+   with attribution'...", Fabian replied: "Yea I'm fine with that".
+   Attribution: Fabian (credit retained in SERIES.md rows 13/14/15).
 
 5. Fred78290/nct6687d (https://github.com/Fred78290/nct6687d)
    GPL-2.0 — Frederic Boltz. Base of the nct6687 kernel driver subtree.
