@@ -1402,7 +1402,12 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
                 crate::cores::CoreState::PendingReboot => {
                     app.status = "mask already 0xFF — warm reboot needed to enumerate".into()
                 }
-                crate::cores::CoreState::Locked | crate::cores::CoreState::Abnormal(_) => {
+                crate::cores::CoreState::Locked => {
+                    // The safe [u] unlock exists for the known stock mask; the
+                    // forced hatch is only for boards the safe path refuses.
+                    app.status = "mask is stock 0x77 — use [u] for the safe unlock".into()
+                }
+                crate::cores::CoreState::Abnormal(_) => {
                     app.core_force_confirm = true;
                     app.status =
                         "forced unlock armed — confirm [y] to write 0xFF, [esc] to cancel"

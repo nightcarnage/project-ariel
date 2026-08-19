@@ -14,8 +14,6 @@ so the hardware and software must agree.
 Credit: BC-250 community, documented by GabriWar.
 
 diff --git a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
-index aaaaaaa..bbbbbbb 100644
-diff --git a/cachyos-7.0.9-1/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/patchgen/gfx23.c
 index 1893cee..785f5ca 100644
 --- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
 +++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c

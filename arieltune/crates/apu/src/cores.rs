@@ -201,8 +201,8 @@ pub fn snapshot() -> Result<CoreSnapshot> {
 }
 
 fn describe_mask(mask: u8) -> String {
-    let on: Vec<u8> = (0..8).filter(|i| mask & (1 << i) != 0).collect();
-    let off: Vec<u8> = (0..8).filter(|i| mask & (1 << i) == 0).collect();
+    let on: Vec<u8> = (0..8).filter(|i| mask & (1 << *i) != 0).collect();
+    let off: Vec<u8> = (0..8).filter(|i| mask & (1 << *i) == 0).collect();
     format!(
         "0x{mask:02X}  enabled=[{}] disabled=[{}]",
         on.iter()

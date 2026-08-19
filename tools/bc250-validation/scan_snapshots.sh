@@ -1,5 +1,6 @@
 #!/bin/bash
 # Report, for each snapshot initramfs, whether the embedded amdgpu.ko has the TLB param.
+shopt -s nullglob
 cd /var/tmp || exit 1
 rm -rf snapscan && mkdir snapscan && cd snapscan || exit 1
 

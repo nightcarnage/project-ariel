@@ -477,7 +477,10 @@ fn post_extract_plan(
         argv: vec!["sh".into(), "-c".into(), install_sh],
         cwd: pkgbuild.clone(),
         env: vec![],
-        uid,
+        // The uid drop covers only the makepkg/patch steps (makepkg refuses
+        // root); install/arm stays root — pacman/mkinitcpio/reboot are sudo
+        // calls that must not run through the dropped, non-interactive uid.
+        uid: None,
     });
 
     Ok(steps)
@@ -671,15 +674,18 @@ mod tests {
 
     #[test]
     fn doctor_json_parsing() {
+        let n = patches::count();
         let d = parse_doctor_json(
-            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":15,\
-             \"total\":15,\"fully\":true}\n",
+            &format!(
+                "{{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":{n},\
+                 \"total\":{n},\"fully\":true}}\n"
+            ),
         )
         .unwrap();
         assert!(d.is_bc250);
         assert_eq!(d.kernel, "6.12.4-aputune");
-        assert_eq!(d.present, 15);
-        assert_eq!(d.total, 15);
+        assert_eq!(d.present, n);
+        assert_eq!(d.total, n);
         assert!(d.fully);
         assert!(parse_doctor_json("not json").is_err());
         assert!(parse_doctor_json("").is_err());

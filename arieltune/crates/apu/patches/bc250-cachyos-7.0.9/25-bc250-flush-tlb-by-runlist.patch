@@ -88,6 +88,7 @@ By Gabriel Duarte Guerra (GabriWar).
 + * Ask for that cycle on unmap so the stale entry never survives.
 + *
 + * Takes dqm_lock. Never call from kfd_flush_tlb() -- deadlock.
++ */
 +
 +/* See the long comment above bc250_flush_by_runlist. */
 +int kfd_bc250_flush_by_runlist(struct kfd_node *dev)

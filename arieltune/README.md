@@ -11,12 +11,12 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
 
 <table>
   <tr>
-    <td align="center"><b>WIKI</b><br><img src="docs/screenshots/wiki.png" width="430"></td>
-    <td align="center"><b>BIOS</b><br><img src="docs/screenshots/bios.png" width="430"></td>
+    <td align="center"><b>WIKI</b><br><img src="docs/screenshots/wiki.png" width="430" alt="WIKI tab screenshot"></td>
+    <td align="center"><b>BIOS</b><br><img src="docs/screenshots/bios.png" width="430" alt="BIOS tab screenshot"></td>
   </tr>
   <tr>
-    <td align="center"><b>APU</b><br><img src="docs/screenshots/apu.png" width="430"></td>
-    <td align="center"><b>MEM</b><br><img src="docs/screenshots/mem.png" width="430"></td>
+    <td align="center"><b>APU</b><br><img src="docs/screenshots/apu.png" width="430" alt="APU tab screenshot"></td>
+    <td align="center"><b>MEM</b><br><img src="docs/screenshots/mem.png" width="430" alt="MEM tab screenshot"></td>
   </tr>
 </table>
 

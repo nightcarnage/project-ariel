@@ -83,11 +83,12 @@ pub fn force(mhz: u32) -> Result<ForceOutcome> {
 /// PRESERVED auto mode (governor/autosleep/released stays whatever it was).
 pub fn unforce() -> Result<dpm::AutoMode> {
     let _lock = dpm::ConfigLock::acquire();
+    // Gate FIRST so the transition is all-or-nothing: if overdrive is masked
+    // off, returning early must not have touched live state or the persisted
+    // force config (otherwise the GPU unit would re-apply the pin on reboot).
+    telemetry::ensure_overdrive()?;
     Smu::open()?.unforce_gfx_freq()?;
     // Restore the stock voltage curve via amdgpu overdrive (SMU-safe).
-    // Refuse loudly rather than silently leaving the forced voltage in place
-    // when the overdrive interface is masked off.
-    telemetry::ensure_overdrive()?;
     let _ = telemetry::od_reset();
     let mut cfg = dpm::PowerConfig::load_or_default();
     cfg.force_mhz = None;

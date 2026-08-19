@@ -165,7 +165,8 @@ fn running_kver() -> String {
 /// if it isn't already resolvable by modprobe. Returns true if the module is
 /// available to load afterwards. When the running kernel doesn't match the
 /// prebuilt vermagic we return false rather than force-load a mismatched module
-/// (there's no way to rebuild on the board). Best-effort; needs root.
+/// (rebuild for the new kernel via `kmod/nct6687-bc250/build-and-install.sh`,
+/// which auto-passes LLVM=1 on clang-built kernels). Best-effort; needs root.
 fn install_writable_module() -> bool {
     let kver = running_kver();
     let dst = PathBuf::from(format!("/lib/modules/{kver}/updates/nct6687.ko"));
@@ -347,8 +348,9 @@ fn drm_device_dir() -> Option<PathBuf> {
 /// only exists when PP_OVERDRIVE_MASK (bit 14, 0x4000) is set in
 /// `amdgpu.ppfeaturemask`; with the bit cleared every voltage write is inert.
 /// This has bitten us before (mask 0xfff73ef7 disables arieltune's own
-/// undervolt), so every voltage operation now refuses instead of silently
-/// no-oping, and the error carries the corrected mask value.
+/// undervolt). This is a PREFLIGHT: mutating helpers that need a hard failure
+/// (with the corrected-mask hint) call it BEFORE touching live state, so the
+/// operation is all-or-nothing.
 pub fn ensure_overdrive() -> anyhow::Result<()> {
     const PP_OVERDRIVE_MASK: u32 = 0x4000;
     let mask_txt = fs::read_to_string("/sys/module/amdgpu/parameters/ppfeaturemask")

@@ -1,4 +1,7 @@
-import json, urllib.request, time, subprocess
+import json, os, urllib.request, time, subprocess
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VALIDATOR = os.path.join(HERE, "validate_img.py")
 
 prompt = "a colorful wooden spinning top toy, dark background, product photography"
 
@@ -30,5 +33,8 @@ for i in range(4):
     submit(i, 42)
     out = subprocess.run(["bash", "-c", "ls -t /opt/ComfyUI/output/seq_" + str(i).zfill(2) + "*.png | head -1"],
                          capture_output=True, text=True).stdout.strip()
-    r = subprocess.run(["python3", "/var/tmp/validate_img.py", out], capture_output=True, text=True)
+    if not out:
+        print("run", i, "-> no output image found")
+        continue
+    r = subprocess.run(["python3", VALIDATOR, out], capture_output=True, text=True)
     print("run", i, "->", r.stdout.strip().replace("\n", " | "))
