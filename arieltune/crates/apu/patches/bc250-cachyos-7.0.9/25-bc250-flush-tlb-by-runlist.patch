@@ -70,7 +70,7 @@ By Gabriel Duarte Guerra (GabriWar).
  static int execute_queues_cpsch(struct device_queue_manager *dqm,
  				enum kfd_unmap_queues_filter filter,
  				uint32_t filter_param,
-@@ -2126,6 +2148,52 @@
+@@ -2126,6 +2148,51 @@
  }
  
  /* dqm->lock mutex has to be locked before calling this function */
