@@ -129,7 +129,7 @@ Adding gfx1013 to rocBLAS target lists produces code objects identical to gfx101
 
 ```bash
 # Build from USB SSD source
-cd /mnt/usb-ssd/cachyos-7.0.9
+cd /mnt/build-ssd/cachyos-7.0.9
 sudo make M=drivers/gpu/drm/amd/amdgpu modules LLVM=1 -j$(nproc)
 sudo strip --strip-debug drivers/gpu/drm/amd/amdgpu/amdgpu.ko
 sudo zstd -T0 -19 --rm drivers/gpu/drm/amd/amdgpu/amdgpu.ko -o /tmp/amdgpu.ko.zst
@@ -137,7 +137,7 @@ sudo cp /tmp/amdgpu.ko.zst /lib/modules/7.0.9/kernel/drivers/gpu/drm/amd/amdgpu/
 sudo mkinitcpio -p linux-cachyos
 
 # Register snapshot
-sudo /srv/data/bc-250-snapshotter/snapshot register \
+sudo <data-mount>/bc-250-snapshotter/snapshot register \
   --module /lib/modules/7.0.9/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst \
   --initramfs /boot/initramfs-linux-cachyos.img \
   --vmlinuz /boot/vmlinuz-linux-cachyos-7.0.9 \
@@ -145,7 +145,7 @@ sudo /srv/data/bc-250-snapshotter/snapshot register \
   --parent snap-a0af1eeb
 
 # Pin and reboot
-sudo /srv/data/bc-250-snapshotter/snapshot pin snap-XXXXXXXX
+sudo <data-mount>/bc-250-snapshotter/snapshot pin snap-XXXXXXXX
 sudo reboot -f
 ```
 

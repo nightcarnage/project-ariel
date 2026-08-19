@@ -3,8 +3,8 @@
 **Date:** 2026-08-05
 **Hardware:** AMD BC-250 blade — Cyan Skillfish APU, gfx1013, GC IP 10.1.3, 16 GB unified GDDR6
 **Kernel:** `linux-cachyos-bore-7.0.9` (hard pin — see [Kernel pin](#kernel-pin))
-**Production repo:** `http://192.168.40.16:3000/nightcarnage/bc-250-rocm` (Fabian/Dani)
-**GabiWar repo:** `http://192.168.40.16:3000/nightcarnage/bc250-rocm-gabriwar` (Gabriel Duarte Guerra)
+**Production repo:** bc-250-rocm on the internal Gitea (Fabian/Dani)
+**GabiWar repo:** bc250-rocm-gabriwar on the internal Gitea (Gabriel Duarte Guerra)
 **Ariel patch series:** `arieltune/crates/apu/patches/bc250-cachyos-7.0.9`
 
 ---
@@ -87,7 +87,7 @@ with a different consumer. **[V]**
 ### 2. `addr` never reaches hardware
 
 Every use of `addr` in that function, from
-`/mnt/nvme_storage/iommu/artifacts/v73/host-snapshot-snap-8201b059/source/gmc_v10_0.c`:
+`<internal-storage>/iommu/artifacts/v73/host-snapshot-snap-8201b059/source/gmc_v10_0.c`:
 
 | Call | Purpose |
 |---|---|

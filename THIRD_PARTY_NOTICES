@@ -21,7 +21,7 @@ notices:
    contributors.
    Basis of the SDMA firmware documentation (patches 26/27 lineage).
 
-4. Fabian (git.sudx.de/Fabian, private; local mirror nightcarnage/bc-250-rocm)
+4. Fabian (git.sudx.de/Fabian, private; local mirror (internal Gitea))
    Patches 13/14/15 are C refactors of Fabian's patch1/2/3 Python patchers.
    Permission GRANTED 2026-08-19 via Discord DM. In reply to: "...are you
    good with me shipping them under that license [GPL-2.0 or compatible]?

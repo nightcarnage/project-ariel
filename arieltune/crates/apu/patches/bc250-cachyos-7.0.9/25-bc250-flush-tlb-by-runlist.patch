@@ -22,7 +22,7 @@ Safety: takes dqm_lock, so kfd_flush_tlb() must not call it. Only call site is
 the unmap ioctl in kfd_chardev.c (p->mutex held, dqm_lock free).
 
 Deployed form: this file reproduces, byte for byte, the build2 tree shipped on
-blade 15 (192.168.15.115, snapshot snap-8fe794e8, "25-patch (GabriWar): fix
+blade 15 (a fleet blade, snapshot snap-8fe794e8, "25-patch (GabriWar): fix
 aliasing — flush TLB via runlist rebuild", module amdgpu.ko srcversion
 C484A6D2). Differences from GabriWar's upstream
 bc250-rocm-gabriwar/patches/bc250-flush-tlb-by-runlist.patch (cec746e):

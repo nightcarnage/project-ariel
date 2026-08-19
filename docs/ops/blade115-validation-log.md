@@ -6,18 +6,18 @@ appended as the fleet work continues.
 
 ## 1. Full from-scratch build on blade 115 (2026-08-18, the cachenetics PR dry run)
 
-`arieltune apu build --pkgbuild /mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos
+`arieltune apu build --pkgbuild /mnt/build-ssd/ariel-p28-pkgbuild/linux-cachyos
 --run` executed the complete production flow on blade 115:
 
 - **Materialize**: staged pkgbuild (PKGBUILD + cachyos-7.0.9-1.tar.gz) on the
   USB-SSD; `makepkg -o` extract, all 28 SERIES patches applied `--fuzz=0`
-  clean on first pass (build log: `/mnt/usb-ssd/ariel-p28-build.log`).
+  clean on first pass (build log: `/mnt/build-ssd/ariel-p28-build.log`).
 - **Build**: root privilege-drop to the PKGBUILD owner (kbuild `Step.uid`),
   `CC=gcc-15`; `gfx_v10_0.o` and `gmc_v10_0.o` (the patched files) compiled
   clean; only two pre-existing warnings from the patch-22 KFD runlist code.
 - **Packages**: `linux-cachyos-7.0.9-1-x86_64.pkg.tar.zst` (156 MB) +
   `linux-cachyos-headers` (39 MB) in
-  `/mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos/`.
+  `/mnt/build-ssd/ariel-p28-pkgbuild/linux-cachyos/`.
 - **Install**: `pacman -U` into the real (unbound) module tree, 40-CU
   modprobe conf, mkinitcpio for `7.0.9-1-cachyos`, GRUB update.
 - **Verified**: `modinfo` on the installed `amdgpu.ko.zst` exposes
@@ -143,7 +143,7 @@ PENDING his grant for patches 13/14/15). Fork commit `4d92e17`.
 
 - tty1 head autostart: nvtop → `sudo -n arieltune apu` (see above).
 - `bc250-fan-control.service` crash-loops while the blade sits on the
-  192.168.15.x net (script detects blade numbers only on 192.168.40.x);
+  the lab net (script detects blade numbers only on the cluster net);
   self-resolves on the hive net — left alone.
 - `systemctl halt` confusion (2026-08-18): halt leaves the machine powered on
   by design; `poweroff`/`shutdown` cut power. Not a bug.
