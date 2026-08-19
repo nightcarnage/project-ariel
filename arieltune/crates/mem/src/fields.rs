@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Field encyclopedia — a plain-language description of every `MemConf` timing,
 //! plus which direction is faster, how much it's worth, and how risky it is.
 //!

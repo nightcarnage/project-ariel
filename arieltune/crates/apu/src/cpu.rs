@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! CPU overclock / undervolt — the reverse-engineered OC model, on the queue-3 OC mailbox
 //! ([`ocq3`]).
 //!

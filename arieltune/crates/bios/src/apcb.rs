@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! APCB (AGESA PSP Customization Block) parse + checksum-preserving edit.
 //!
 //! On the BC-250 the `$BHD` entry type 0x60 at SPI flash `0xAB1000` is an APCB

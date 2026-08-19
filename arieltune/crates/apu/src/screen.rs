@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Interactive control-center TUI — one screen, styled to match memtune/biostune.
 //!
 //! A single dashboard with FOUR panels: the system card (fan control), CPU

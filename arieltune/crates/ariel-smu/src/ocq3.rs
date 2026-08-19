@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! ocq3 — the BC-250 SMU **queue-3 OC mailbox** (CPU overclock / undervolt).
 //!
 //! This is the message surface the BC-250 CPU-OC path drives: max CPU boost clock, the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Saved timing profiles for the TUI picker.
 //!
 //! The `p` overlay lets you pick a known-good config and reboot into it in two

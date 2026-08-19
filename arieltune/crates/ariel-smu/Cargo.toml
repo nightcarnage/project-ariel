@@ -3,7 +3,7 @@ name = "ariel-smu"
 description = "Silicon-generic SMU mailboxes for the Ariel APU: the kernel-serialized queue-0 GPU mailbox (smu) and the queue-3 CPU-OC mailbox (ocq3)"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1"

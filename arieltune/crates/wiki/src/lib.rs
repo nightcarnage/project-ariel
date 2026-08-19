@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! WIKI tab -- the ASRock BC-250 OEM System Manual, browse + CLI.
 //!
 //! Ported from the standalone `wikitune`: `screen` is the interactive two-pane

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Tuning profiles — a named bundle of CU / GPU / CPU knobs, draft-then-apply.
 //!
 //! A profile captures the operator-settable surface (40-CU arming, GPU clock

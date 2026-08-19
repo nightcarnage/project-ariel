@@ -2,7 +2,7 @@
 name = "arieltune-tui-kit"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-2.0-only"
 description = "Shared TUI chrome for the arieltune suite: the Screen trait, Outcome, theme, and common widgets."
 
 [dependencies]

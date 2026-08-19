@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! BIOS tab -- the BC-250 AMD CBS + OEM Setup surface, browse + edit + CLI.
 //!
 //! Ported from the standalone `biostune`: `screen` is the interactive

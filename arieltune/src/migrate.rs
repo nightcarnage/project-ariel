@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! `arieltune migrate` -- move a box that was running the four standalone tools
 //! onto the unified suite, SAFELY.
 //!

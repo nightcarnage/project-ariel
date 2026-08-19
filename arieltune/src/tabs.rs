@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Tab set. Each real screen is live now: WIKI (M1), BIOS (M3), APU (M5), MEM
 //! (M4). `StubScreen` is retained only as a hermetic Screen double for the shell
 //! routing tests (`crate::shell` tests construct it), so it is `dead_code` in a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! APU tab -- the BC-250 APU liberation + CPU/GPU/CU tuner, browse + edit + KAT + CLI.
 //!
 //! Ported from the standalone `aputune`: `screen` is the interactive four-panel

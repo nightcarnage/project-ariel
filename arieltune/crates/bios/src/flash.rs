@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The SPI-flash medium (analog of memtune's `cmos.rs`).
 //!
 //! biostune reads/writes the 16 MiB BIOS image. On the board that's the live

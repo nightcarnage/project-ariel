@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The MEM CLI: the non-TUI surface of the BC-250 GDDR6 memory-timing tuner.
 //!
 //! Ported verbatim from memtune's `main.rs` (minus the process entrypoint and the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! bc250-board — the one place BC-250 board detection lives.
 //!
 //! This crate merges the three old per-tool board checks into a single

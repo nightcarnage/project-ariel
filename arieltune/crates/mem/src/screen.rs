@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Interactive MEM tab — a single Tune view:
 //!   * a live measured bandwidth/random/latency readout (animated while benching),
 //!   * an editable timings table (stock/live/draft/range columns), and

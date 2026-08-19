@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Effect verification — does a BIOS field actually *do* anything?
 //!
 //! The BC-250 trap: most AmdSetup values are decorative (AGESA reads the APCB

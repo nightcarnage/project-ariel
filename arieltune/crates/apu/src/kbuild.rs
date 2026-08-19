@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Build the liberation series into the system.
 //!
 //! aputune carries the amdgpu liberation patch series as data; this module reconstructs

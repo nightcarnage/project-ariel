@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Suite config. For M0 this only carries the default landing tab; later milestones
 //! extend it. Read from `/var/lib/arieltune/config.toml` when present (best-effort;
 //! a missing or malformed file falls back to defaults, never an error to the user).

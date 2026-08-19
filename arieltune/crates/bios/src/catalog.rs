@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The BIOS settings catalogue — the logical view's data model.
 //!
 //! Generated from the BC-250 IFR varmaps by `tools/gen_catalog.py` and embedded

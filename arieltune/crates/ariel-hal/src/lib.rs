@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! ariel-hal — silicon-generic low-level access for the Ariel APU.
 //!
 //! Ariel is the AMD Cyan Skillfish APU (PCI 1002:13fe) at the heart of the

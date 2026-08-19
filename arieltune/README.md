@@ -72,4 +72,7 @@ CU routing. See [`docs/bc250-cu-map.md`](docs/bc250-cu-map.md).
 
 ## License
 
-Apache-2.0 for the userspace suite. Kernel-derived subtrees (`crates/apu/patches`, `crates/apu/kmod/nct6687-bc250`, `crates/bios/driver`) remain GPL-2.0. See `LICENSE`.
+GPL-2.0-only for the whole suite, matching upstream cachenetics/project-ariel.
+Kernel-derived subtrees (`crates/apu/patches`, `crates/apu/kmod/nct6687-bc250`,
+`crates/bios/driver`) remain GPL-2.0 — the same license. See `LICENSE` and
+`THIRD_PARTY_NOTICES`.

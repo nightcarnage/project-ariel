@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The authored ASRock BC-250 OEM System Manual, embedded and parsed into a
 //! chapter → section tree for the TUI. This is the human-authored, live-verified
 //! manual (assembled from the per-chapter files) and the single source of truth

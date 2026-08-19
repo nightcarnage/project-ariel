@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! cores — the BC-250 8-core CPU unlock + live per-core offline control.
 //!
 //! Two deliberately separated layers (see arieltune-core.md):

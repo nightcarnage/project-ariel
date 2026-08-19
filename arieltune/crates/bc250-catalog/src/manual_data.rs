@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Structured projection of the authored OEM manual for machine consumption.
 //!
 //! This is the **agent-facing** view of the exact same embedded manual the TUI

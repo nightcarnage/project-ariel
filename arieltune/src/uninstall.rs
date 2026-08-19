@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! `arieltune uninstall [--purge] [--revert-hw]` -- one command that replaces the
 //! four standalone teardowns. Dry-run by default; `--apply` actuates.
 //!

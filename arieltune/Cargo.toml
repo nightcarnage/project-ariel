@@ -3,7 +3,7 @@ name = "arieltune"
 version = "0.1.0"
 edition = "2021"
 description = "Unified BC-250 tuning suite: one tabbed TUI (WIKI | BIOS | APU | MEM) merging wikitune/biostune/aputune/memtune. Ariel = the AMD APU silicon codename."
-license = "Apache-2.0"
+license = "GPL-2.0-only"
 repository = "https://github.com/cachenetics/project-ariel"
 readme = "README.md"
 

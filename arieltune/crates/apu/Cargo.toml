@@ -2,7 +2,7 @@
 name = "apu"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-2.0-only"
 description = "APU tab: BC-250 APU liberation + CPU/GPU/CU tuner (browse + edit + KAT + CLI). Was aputune."
 
 [dependencies]

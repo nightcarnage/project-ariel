@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Interactive browser + editor for the BIOS settings catalogue — the BIOS tab.
 //!
 //! Layout: a left nav tree (compartments -> categories) and, on the right, a

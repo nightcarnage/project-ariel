@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! GPU power control — app-driven setpoints.
 //!
 //! BC-250's firmware exposes no usable GPU-load signal: released, the clock sits

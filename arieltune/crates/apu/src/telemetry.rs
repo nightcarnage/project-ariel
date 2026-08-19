@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Sysfs-only telemetry for the DPM control loop.
 //!
 //! The daemon must NOT read the SMU — that contends with amdgpu's own metric

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Shared GPU power state-machine transitions — THE one implementation of the
 //! force / unforce paths, used by the CLI (`gpu force|unforce`), the TUI, and
 //! `profile apply`, so no caller can bypass the safety ordering:

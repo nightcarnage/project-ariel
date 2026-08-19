@@ -1,0 +1,33 @@
+THIRD PARTY NOTICES
+===================
+
+This project is **GPL-2.0-only**, matching upstream cachenetics/project-ariel.
+The following third-party components are incorporated and retain their own
+notices:
+
+1. GabriWar/bc250-core-cu-unlock (https://github.com/GabriWar/bc250-core-cu-unlock)
+   MIT License — Copyright (c) 2026 GabriWar (Gabriel Duarte Guerra).
+   Basis of the SMU q3 0x98 core-presence-mask unlock primitive and of the
+   8-core telemetry port (patch 28).
+
+2. GabriWar/bc250-rocm-working (https://github.com/GabriWar/bc250-rocm-working)
+   MIT License — Copyright (c) 2026 gabriwar.
+   Basis of the ROCm experimental kernel patches (17-27 era: TTM guards,
+   SDMA steer/trap, TLB flush hardening).
+
+3. GabriWar/amd-bc250-docs (https://github.com/GabriWar/amd-bc250-docs)
+   Dual license: documentation CC BY-SA 4.0 (attribution + share-alike
+   retained for adapted docs), code MIT — Copyright (c) 2026 elektricM and
+   contributors.
+   Basis of the SDMA firmware documentation (patches 26/27 lineage).
+
+4. Fabian (git.sudx.de/Fabian, private; local mirror nightcarnage/bc-250-rocm)
+   PENDING PERMISSION (as of 2026-08-18): patches 13/14/15 are C refactors of
+   Fabian's patch1/2/3 Python patchers. Shipping them requires his explicit
+   grant; the grant (date + wording) will be recorded here when received.
+
+5. Fred78290/nct6687d (https://github.com/Fred78290/nct6687d)
+   GPL-2.0 — Frederic Boltz. Base of the nct6687 kernel driver subtree.
+
+The MIT and CC BY-SA 4.0 components above remain under their own terms within
+this GPL-2.0-only project; their notices are retained here per their licenses.

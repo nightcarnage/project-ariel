@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Live GPU/memory telemetry from the amdgpu `gpu_metrics` sysfs blob.
 //!
 //! The BC-250 exposes an APU metrics table (`gpu_metrics_v2_2`). We read the few

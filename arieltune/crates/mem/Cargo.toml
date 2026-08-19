@@ -2,7 +2,7 @@
 name = "mem"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-2.0-only"
 description = "MEM tab: BC-250 GDDR6 memory-timing tuner (browse + edit + bench + CLI)."
 
 [dependencies]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! arieltune -- unified BC-250 tuning suite.
 //!
 //! Bare `arieltune` launches the tabbed TUI at the default tab (WIKI, or the

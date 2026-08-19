@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! "SMM-dirty" marker — prevents the NVRAM-store collision class.
 //!
 //! Why this exists (learned from a live test): biostune's OEM writes

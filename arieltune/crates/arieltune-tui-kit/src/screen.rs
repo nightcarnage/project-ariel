@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 use crossterm::event::KeyEvent;
 use ratatui::{layout::Rect, Frame};
 use std::time::Duration;

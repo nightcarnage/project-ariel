@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Memory bandwidth + latency benchmark.
 //!
 //! A **Vulkan compute** bench (RADV is the BC-250's most reliable GPU backend).

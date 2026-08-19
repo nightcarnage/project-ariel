@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The WIKI CLI: projects the embedded manual into clean structured records for
 //! agents (chapters / list / get / search / safety / export / doctor). Ported
 //! verbatim from wikitune's `main.rs` (minus the process entrypoint and the `Tui`

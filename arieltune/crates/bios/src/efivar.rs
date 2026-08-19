@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Read current BIOS-setting values from the live EFI variables.
 //!
 //! The values biostune displays come from the firmware's runtime varstores under

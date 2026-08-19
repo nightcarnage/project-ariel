@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Compute-unit topology: read the live CU bitmap and render the harvest map.
 //!
 //! We talk to amdgpu directly via the DRM `AMDGPU_INFO` ioctl (query

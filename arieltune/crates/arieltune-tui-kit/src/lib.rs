@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Shared TUI chrome for the arieltune suite.
 //!
 //! Provides the [`Screen`] trait every tab implements, the [`Outcome`] a key handler

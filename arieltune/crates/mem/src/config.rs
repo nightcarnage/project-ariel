@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! BC-250 GDDR6 memory-timing config layout, ported faithfully from the
 //! reference `memcfg.py` (ASRock bc250_memcfg + RobinMemTiming lineage).
 //!

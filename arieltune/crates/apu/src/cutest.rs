@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! CU health-test — a known-answer Vulkan compute test (KAT) run at safe
 //! routing granularities, to find a defective CU on a liberated BC-250.
 //!

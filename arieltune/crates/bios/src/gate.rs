@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Write preflight — the single choke point every write goes through before it
 //! touches the board. Composes two independent checks:
 //!

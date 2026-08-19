@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Make TUI/CLI settings survive reboots via systemd oneshots that re-apply the
 //! saved config at boot. aputune already runs as root (SMU/SMN access), so it
 //! writes the unit files and drives systemctl directly.

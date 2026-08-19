@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Deterministic CPU torture for stability detection.
 //!
 //! The unit of work is a *fixed* compute block with a reproducible checksum: at

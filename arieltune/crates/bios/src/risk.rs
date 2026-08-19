@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Per-setting risk classification — the "will this brick a stranger's board?" gate.
 //!
 //! arieltune ships to people who did not do the reverse-engineering and cannot

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! SMM SPI-flash medium — the no-rig OEM write path.
 //!
 //! Drives the `smiflash` kernel module (`/proc/smiflash`), which fires AMI's

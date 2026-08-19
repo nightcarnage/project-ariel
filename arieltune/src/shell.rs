@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The tab shell: owns the terminal, the panic-restore hook, the single event loop,
 //! the tab bar, and the global status line. It delegates draw + key handling to the
 //! active [`Screen`] and enforces the collision-safe global key set.

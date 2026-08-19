@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! OEM `Setup` editing via SMM — the no-rig, no-variable-lock write path.
 //!
 //! The OEM `Setup` variable is boot-service-only (the OS can't `SetVariable` it)

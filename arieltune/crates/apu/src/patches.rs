@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The BC-250 liberation kernel-patch series, embedded into the binary.
 //!
 //! aputune *owns* the silicon-liberation surface: the curated CachyOS amdgpu
@@ -12,9 +12,10 @@
 //! Pin to `linux-cachyos-bore-7.0.9`. Newer kernels (7.0.11+) regress the BC-250
 //! SDMA path — do not build the series against them until that is resolved.
 //!
-//! The patches themselves are GPL-2.0 (kernel diffs); arieltune (Apache-2.0) carries
-//! them as separate aggregated assets the way a package manager carries the patches
-//! it applies — they are not linked into the binary.
+//! The patches themselves are GPL-2.0 (kernel diffs) — the same license as this
+//! project (GPL-2.0-only, matching upstream cachenetics/project-ariel).
+//! arieltune carries them as build assets applied by the kernel-build path — they
+//! are not linked into the binary.
 
 /// How to prove, at runtime, that a given patch is live on the booted kernel.
 #[derive(Clone, Copy, Debug)]

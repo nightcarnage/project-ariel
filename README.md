@@ -46,6 +46,8 @@ own risk, on hardware you own.
 
 ## Licensing
 
-Userspace is **Apache-2.0**; kernel-derived parts (the amdgpu liberation patch series and
-kernel modules, under `arieltune/`) are **GPL-2.0**, because they inherit the Linux kernel's
-license. See `LICENSE` and the per-subtree NOTICE files under `arieltune/crates/`.
+The whole project is **GPL-2.0-only**, matching upstream cachenetics/project-ariel.
+Kernel-derived parts (the amdgpu liberation patch series and kernel modules, under
+`arieltune/`) inherit the Linux kernel's GPL-2.0 — the same license, no conflict.
+Third-party attribution: see `THIRD_PARTY_NOTICES` and the per-subtree NOTICE files
+under `arieltune/crates/`.

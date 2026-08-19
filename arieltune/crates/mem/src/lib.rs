@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! MEM tab -- the BC-250 GDDR6 memory-timing tuner, browse + edit + bench + CLI.
 //!
 //! Ported from the standalone `memtune`: `screen` is the interactive Tune view

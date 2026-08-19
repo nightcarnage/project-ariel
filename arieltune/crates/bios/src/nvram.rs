@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Recover current BIOS-setting values from the SPI flash's AMI NVAR store.
 //!
 //! The OEM `Setup` UEFI variable is boot-service-only, so Linux can't read it

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! The authored ASRock BC-250 (Cyan Skillfish / Oberon APU) OEM System Manual.
 //!
 //! This crate owns one artifact: the human-authored, live-verified OEM manual

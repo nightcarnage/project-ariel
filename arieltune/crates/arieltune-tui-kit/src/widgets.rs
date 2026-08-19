@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Small shared widgets. Deliberately thin -- the panes own their own layouts; these
 //! just enforce the header-color-only rule at the chrome boundary.
 

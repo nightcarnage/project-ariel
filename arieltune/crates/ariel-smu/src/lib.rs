@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! ariel-smu — the Ariel APU's SMU mailboxes.
 //!
 //! Two independent mailbox surfaces, deliberately kept apart:

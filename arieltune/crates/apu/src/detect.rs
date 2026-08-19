@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Runtime patch-state detection.
 //!
 //! For each member of [`patches::SERIES`] we probe the booted kernel for that

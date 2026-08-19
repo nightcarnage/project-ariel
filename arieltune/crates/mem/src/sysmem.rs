@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! System-RAM integrity test — a built-in CPU memory check, the complement to
 //! the GPU bench's buffer check.
 //!

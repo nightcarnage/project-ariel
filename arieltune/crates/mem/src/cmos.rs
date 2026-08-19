@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Extended-CMOS access via the legacy I/O ports.
 //!
 //! The BC-250 stores its `MemConf_t` at extended-CMOS offset 0x90, reached

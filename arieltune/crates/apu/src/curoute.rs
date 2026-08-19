@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Live CU/WGP routing via UMR — a faithful port of bc250-cu-live-manager's
 //! proven register sequence:
 //!

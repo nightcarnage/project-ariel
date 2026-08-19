@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //! Plain-English descriptions for BIOS settings, written for a general audience
 //! (think: curious person with no firmware background) — almost a mini learning
 //! moment per setting, including the deep debug knobs.
