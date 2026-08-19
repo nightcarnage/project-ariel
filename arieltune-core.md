@@ -1,188 +1,33 @@
-# arieltune-core.md — BC-250 8-Core CPU Unlock: Full Design Handoff
+# arieltune-core.md — BC-250 8-Core CPU Unlock: Design Handoff
 
-Status: **PHASE 1 IMPLEMENTED** — commit `0cfe4ef` on `main` (pushed to gitea,
-last updated 2026-08-18)
-Scope: the `aputune cores` feature, kernel patch 28, and the fleet rollout plan.
-All conclusions below come from the 2026-08-18 investigation of the community
-8-core unlock forks. Research clones live in
-`/mnt/nvme_storage/data/bc-250-8core-research/` (outside the repo).
+Status: **LIVE AND VERIFIED** — blade 115 runs 8C/16T (mask 0xFF, forced from
+an abnormal 0xD7), 0 MCE, two clean per-core stress sweeps, boot unit enabled.
+Full validation + ops log: `docs/ops/blade115-validation-log.md` (internal
+record, not part of upstream PRs).
 
-## 0. Implementation status (what actually landed)
+Scope: the `aputune cores` feature, kernel patch 28, and the fleet rollout
+plan. All conclusions below come from the 2026-08-18 investigation of the
+community 8-core unlock forks, plus the live validation on blade 115.
 
-Implemented and verified:
+## 0. At a glance
 
-- **Kernel patch 28** — ported to the 01–27-patched 7.0.9 tree, generated with
-  clean `a/b` headers, verified `patch -p1 --fuzz=0` over a fresh pristine tree
-  byte-identical to the port source. Registered in `patches.rs` SERIES
-  (tell `ModParam("cs_eight_core_map")`) + SERIES.md. Divergence from
-  GabriWar's original: uses the already-mapped `SMU_MSG_QueryGfxclk` (0x0F)
-  instead of his msgid-0 `GetGfxclkFrequency` — no message-map change, and
-  `QueryGfxclk` is battle-tested on our blades via patch 05.
-- **`ariel-smu`** — `q3::WRITE_SMN = 0x98`, `OcQ3::core_mask()` and
-  `OcQ3::unlock_cores()` (refuses non-`0x77`, verifies `0xFF` readback,
-  `CoreUnlock` outcome). Compile-checked; hardware path untested until the
-  dev-blade checklist runs.
-- **`apu cores` CLI** — `status`, `apply [--reboot]`, `boot`, `install`,
-  `uninstall`, `verify [seconds]`, `acpi {status,install,revert}`,
-  `offline/online [core]`. Root-gated by the existing `require_root`.
-- **TUI core map** — a 3-line strip at the bottom of the CPU panel: firmware
-  mask bits, per-core OS online state, `[u]` unlock, `[space]` per-core toggle,
-  `[[]/[]]` core select, `[o]`/`[O]` all off/on, `[i]` install unit, `[v]`
-  verify (worker thread). CPU panel grew 12→15 lines; the thread grid now
-  sizes from live topology (12 or 16 threads).
-- **Telemetry hardening** — `telemetry::gfxclk_mhz()`: `pp_dpm_sclk` when
-  plausible (>= 350 MHz), else the direct SMU `QueryGfxclk` read via the
-  patch-11 node (serialized under msg_ctl.lock). NOTE the precedence deviation
-  from section 6/7: sysfs-first keeps the per-second gather loop mailbox-free
-  on healthy systems; the SMU query only fires in the 8-core-garbage case.
-- **Boot unit** — `aputune-cores.service` reference copy +
-  `cores install` writer. Never reboots, idempotent, refusal exits 0.
-- **Tests** — 36/36 `apu` tests pass (incl. new state-machine + mask-describe
-  tests); full workspace release build clean.
-
-Deviations from the original design (and why):
-
-1. **TUI presets (`2C/4T` etc.) deferred.** `[p]` is the global patches popup
-   and cannot be reused in the CPU panel. `[o]` (all off) + `[space]` per-core
-   reaches every preset shape; a preset menu can come later on a free key.
-2. **`gfxclk_mhz` precedence** swapped (sysfs-first, SMU fallback) — see above.
-3. **ACPI install fetches the two tables at runtime** (curl, mendesrr repo)
-   rather than embedding AML blobs; a failed fetch fails the verb.
-
-Not implemented (roadmap, section 10): arbitrary firmware masks, q2 `0x23`
-exploit port, DXE/BIOS flashing tooling, the full-image `bios` flash path.
-
-Still outstanding: the blade runtime checklist (section 8) — none of the
-hardware paths have run on a BC-250 yet.
-
-### 0.1 Full from-scratch build on blade 115 (2026-08-18, the cachenetics PR dry run)
-
-`arieltune apu build --pkgbuild /mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos
---run` executed the complete production flow on blade 115:
-
-- **Materialize**: staged pkgbuild (PKGBUILD + cachyos-7.0.9-1.tar.gz) on the
-  USB-SSD; `makepkg -o` extract, all 28 SERIES patches applied `--fuzz=0`
-  clean on first pass (build log: `/mnt/usb-ssd/ariel-p28-build.log`).
-- **Build**: root privilege-drop to the PKGBUILD owner (kbuild `Step.uid`),
-  `CC=gcc-15`; `gfx_v10_0.o` and `gmc_v10_0.o` (the patched files) compiled
-  clean; only two pre-existing warnings from the patch-22 KFD runlist code.
-- **Packages**: `linux-cachyos-7.0.9-1-x86_64.pkg.tar.zst` (156 MB) +
-  `linux-cachyos-headers` (39 MB) in
-  `/mnt/usb-ssd/ariel-p28-pkgbuild/linux-cachyos/`.
-- **Install**: `pacman -U` into the real (unbound) module tree, 40-CU
-  modprobe conf, mkinitcpio for `7.0.9-1-cachyos`, GRUB update.
-- **Verified**: `modinfo` on the installed `amdgpu.ko.zst` exposes
-  `cs_eight_core_map` plus `bc250_cc_write_mode` / `bc250_flush_by_runlist` /
-  `bc250_skip_sdma0` / `bc250_fault_probe`.
-- **GRUB**: new `[ariel-p28]` menuentry in `/etc/grub.d/40_custom` (vmlinuz +
-  initramfs from `/boot`, running cmdline minus `modtree=build2`),
-  one-shot armed via `grub-reboot ariel-p28`.
-- **Cleanups done**: stale `linux-cachyos-6.19.9.preset` (pointed at deleted
-  `/boot/vmlinuz-snap-32849855`) removed so `mkinitcpio -P` no longer errors;
-  `10_linux` left non-executable (the blade keeps its snapshot menu via
-  `40_custom`).
-
-Post-boot checklist: `arieltune apu doctor --verify`, confirm
-`cs_eight_core_map` present, then `snapshot register` (parent snap-8fe794e8,
-check for duplicate snapshot id in GRUB before registering — see
-`/memories/repo/bc250-snapshot-tool-hazards.md`).
-
-**2026-08-18 reboot + registration result**: booted `[ariel-p28]`
-(`uname -r` = `7.0.9-1-cachyos`, no `modtree`); doctor green — liberation
-series 24/24 live, 40/40 CUs, GPU manual pin 1500 MHz;
-amdgpu params `cs_eight_core_map=N` (auto-detect) `bc250_cc_write_mode=3`
-`bc250_skip_sdma0=1` `bc250_flush_by_runlist=1`; running module srcversion
-`B5A99260FDE859308CE1437`. Snapshot registered as **`snap-59cee34a`**
-(parent `snap-8fe794e8`, GRUB entry added, NOT default; no duplicate ids).
-
-### 0.2 Forced 8-core unlock from an abnormal mask (blade 115, 2026-08-18)
-
-Blade 115's live core mask was **0xD7** (`enabled=[0 1 2 4 6 7] disabled=[3 5]`,
-state ABNORMAL) — stock 0x77 with bit 6 set, i.e. cores 3+5 masked but core 6
-present. The safety gate refused it by design. Per explicit approval, the gate
-now has an escape hatch:
-
-- **Code**: `OcQ3::unlock_cores_any()` in `crates/ariel-smu/src/ocq3.rs` —
-  skips the 0x77 check but keeps the same all-or-nothing q3 0x98 write and
-  the 0xFF readback verify. Wired as `arieltune apu cores apply
-  --force-abnormal` (`crates/apu/src/{cli,cores}.rs`) and as the TUI Cores
-  panel `[F] force-unlock` key (warning popup + `[y]`/`[esc]` confirm, no
-  auto-reboot — `crates/apu/src/screen.rs`). `boot`/unit path unchanged (no
-  force at boot, per design). `unlock_cores()` default refusal intact.
-  Tests 37/37 green.
-- **Result on blade 115**: `apply --force-abnormal --reboot` wrote and
-  verified 0xFF; warm reboot into pinned `snap-59cee34a` came back clean —
-  mask `0xFF`, all 8 cores / 16 threads visible, 0 offline, 0 MCE entries,
-  boot unit NOT installed (user: "no service"). The blade booted fine; no
-  lockout.
-- **Knowns**: warm-reboot semantics unchanged (cold boot reverts to the
-  board's own mask — likely 0xD7 again on this blade); the 2 extra cores
-  change the SoC power/thermal envelope; 8-core ACPI SSDTs were NOT
-  installed, so threads 12-15 have no C-state tables (stock stops at C00B).
-
-### 0.3 Full validation pass + OOT driver fixes (blade 115, 2026-08-18)
-
-After the forced unlock, a complete validation + cleanup pass landed. Everything
-below is LIVE on blade 115 (kernel `7.0.9-1-cachyos`, pinned `snap-59cee34a`).
-
-**8-core unlock — verified from every angle**
-- `SMN 0x115A870 = 0xFF`, state UNLOCKED, `lscpu` 16 CPUs on-line, 8C×2T.
-- New threads 12-15 compute correctly pinned via `taskset` (sum(0..99999)
-  each = 4999950000). `arieltune apu cores verify` swept all 8 cores (one
-  thread per physical core by design) twice: no failures, 0 MCE.
-- Boot unit `aputune-cores.service` installed + enabled; verified running at
-  boot (exit 0, idempotent "already unlocked"). The mask even survived a
-  `reboot/mode=cold` reset (0xFF persisted) — the board kept the unlock.
-- Pin state: `snapshot current` = `snap-59cee34a`, GRUB Default =
-  `snap-59cee34a`, one-shot none.
-
-**nct6687 sensor driver (out-of-tree, extra/nct6687.ko.zst)**
-- Config consolidated: `/etc/modprobe.d/sensors.conf` removed; single
-  `bc250-nct6687.conf` (`blacklist nct6683` + `options nct6687 force=true`).
-- Quirk fixed: the `force=1 refused: chip ID 0xffff` boot line came from the
-  SECONDARY SIO port (0x4e) open-bus fall-through, not a real refusal. New
-  repo patch `0002-nct6687-silence-secondary-port-open-bus.patch` (kmod dir)
-  makes it a silent skip. Rebuilt ON the blade with `LLVM=1`
-  (srcversion `2D4B6235D20CD0BD87ABE3A`).
-- Initramfs trap found & fixed: mkinitcpio `MODULES=(nct6687 nct6687 nct6687)`
-  embedded the OLD module and loaded it pre-root (initramfs
-  systemd-modules-load), which is why the fixed binary still showed the
-  refusal at boot. Removed from `MODULES`, rebuilt the preset initramfs, and
-  synced the snapshot initrd (`initramfs-snap-59cee34a.img` — identical copy
-  of the preset image). Boot log is now clean: probe at real root, no
-  refusal line. NOTE: swapping the initrd in place makes the snapshot
-  register-id (`md5(module)+md5(initramfs)`) stale bookkeeping-wise; the pin
-  still works (GRUB references by path). Clean fix if desired: re-register +
-  re-pin.
-
-**smiflash SMM SPI-flash driver (out-of-tree, updates/dkms/smiflash.ko.zst)**
-- It is Studebaker's (Cachenetics, initial Project Ariel commit `64d9ca8`,
-  `crates/bios/driver/`). Now built the CORRECT way: `dkms` installed on the
-  blade, module `Makefile` fixed to auto-detect a clang-built kernel via the
-  `CC_IS_CLANG` marker and pass `LLVM=1` (gcc kernels unaffected) —
-  commit `d68a980`. `dkms add/build/install` → `updates/dkms/`, AUTOINSTALL
-  survives kernel upgrades. Old loose `extra/smiflash.ko.zst` removed.
-- Loads at boot (`smi_port=0xb0` from FADT), `/proc/smiflash` live,
-  `arieltune bios driver status` = loaded [ok].
-
-**Head display autostart**
-- getty@tty1 autologin + `~/.bash_profile` tty1/non-SSH guard now launches
-  `sudo -n arieltune apu` (the APU TUI) on the framebuffer head instead of
-  nvtop. Crash-restart loop kept (restart if exit < 5 s). Backup:
-  `~/.bash_profile.bak-nvtop`.
-
-**Final boot-log review**
-- Failed systemd units: 0. MCE entries: 0. nct6687/smiflash clean.
-- Remaining known log noise (none functional):
-  - 16× `ACPI BIOS Error: Could not resolve symbol [\_PR.C000..C00F]` — the
-    stock BIOS ACPI gap; fixed by `arieltune apu cores acpi install`
-    (8-core SSDT-CST/PST override), NOT installed on this blade yet.
-  - 1× `Pm2ControlBlock zero Address` ACPI warning — cosmetic AMI BIOS bug.
-  - 2× amdgpu DC `dal_irq_service_ack/set` WARNINGs — display-core IRQ noise.
-  - Kernel taint: out-of-tree + unsigned (nct6687) + `gpu_recovery`
-    dangerous-option — all expected/by design.
-
----
+- **The primitive, once:** core-presence mask SMN `0x5A870` (SMU space
+  `0x115A870`). Stock `0x77` = 6C/12T (cores 3 and 7 masked), `0xFF` = 8C/16T.
+  Only writable through the SMU **queue-3 msg `0x98`**, which does a raw
+  SMN-window write of a hardcoded `0xFF` to the address in arg0 —
+  all-or-nothing, no value argument, no address validation.
+- **Semantics:** a warm reboot re-enumerates the topology and preserves the
+  mask; a cold boot (power removed) reverts it. Nothing is written to flash.
+- **Surface:** `arieltune apu cores …` CLI verbs + a TUI Core Map panel +
+  `aputune-cores.service` boot unit + kernel patch 28 (8-core telemetry).
+- **Safety invariants:** no automatic reboots, ever · refuse unknown masks on
+  every *safe* path · post-write readback verification · advisory-only `verify`
+  (cloned-image lineage makes persisted verdicts untrustworthy).
+- **Escape hatch (deliberate, explicit):** boards with an abnormal live mask
+  (we met 0xD7 on blade 115) are refused by every safe path, but
+  `cores apply --force-abnormal` (CLI) and `[F]` in the Core Map panel (TUI,
+  warning popup + confirm) force the same 0x98 write. No force path exists at
+  boot (the unit never forces).
 
 ## 1. Decision log — what was investigated and why we chose what we chose
 
@@ -221,15 +66,21 @@ below is LIVE on blade 115 (kernel `7.0.9-1-cachyos`, pinned `snap-59cee34a`).
    mask; `/var` state wasn't durable early enough; `systemctl reboot` can't run
    before D-Bus). Our unit applies the mask and stops; cores appear on the next
    *operator-chosen* reboot.
-3. **Refuse abnormal masks.** `cores apply`/`boot` only proceed when the live
-   mask reads `0x77` (or already `0xFF`). Anything else = refuse. Same rule as
-   GabriWar, rw-r-r, and the DXE driver ("avoid lockout on abnormal masks").
+3. **Refuse abnormal masks — with one explicit escape hatch.** `cores apply`/
+   `boot` proceed only when the live mask reads `0x77` (or already `0xFF`).
+   Anything else is refused, same rule as GabriWar, rw-r-r, and the DXE driver
+   ("avoid lockout on abnormal masks"). Because blade 115 shipped with a
+   genuine abnormal mask (0xD7 — stock 0x77 with bit 6 set), the refusal is
+   bypassable **only** through `apply --force-abnormal` or the TUI `[F]`
+   confirmation popup: the same 0x98 write, the same 0xFF readback, an
+   explicit warning, and never any auto-reboot. `boot` (the unit path) has no
+   force.
 4. **No verdict cache / no hardware identity.** The fleet clones OS images
    across blades, so any persisted "this blade passed verification" state is
    untrustworthy lineage. The only trusted checks are live reads of the current
    hardware. `cores verify` is therefore an **on-demand advisory tool**, never a
    gate. `cores apply` gates only on live facts: BC-250 silicon present, live
-   mask == `0x77`, post-write live mask == `0xFF`.
+   mask == `0x77` (or forced), post-write live mask == `0xFF`.
 5. **Granularity = live OS offlining, not firmware masks.** Firmware-level
    arbitrary masks exist but require the q2 `0x23` exploit (SMU code-exec class,
    BIOS-3-validated offsets) — see the roadmap (section 10). Every practical
@@ -281,13 +132,16 @@ LOCKED ────────────────────────�
 PENDING-REBOOT ── warm reboot ──▶ UNLOCKED ──────┘
  0xFF mask, 12 threads          0xFF mask, 16 threads
    │
-   └─ any mask ∉ {0x77, 0xFF} ⇒ ABNORMAL (all writes refuse)
+   └─ any mask ∉ {0x77, 0xFF} ⇒ ABNORMAL (safe writes refuse;
+      only the explicit force hatch writes)
 ```
 
 - `LOCKED`: mask `0x77`, 12 visible threads.
 - `PENDING-REBOOT`: mask `0xFF`, still 12 visible threads → "warm reboot needed".
 - `UNLOCKED`: mask `0xFF`, 16 visible threads.
-- `ABNORMAL`: any other mask → status explains; every mutating verb refuses.
+- `ABNORMAL`: any other mask → status explains; every *safe* mutating verb
+  refuses. The force hatch (`--force-abnormal` / TUI `[F]`) is the only writer
+  and always asks first.
 
 Hard gates on every mutating verb, all live reads:
 1. `ariel_apu_present()` — PCI `1002:13fe` present (it really is a BC-250).
@@ -307,14 +161,14 @@ Soft output (advisory, never blocking):
 ## 3. CLI surface
 
 ```
-aputune cores status                      # mask, state, visible cores, MCE count
-aputune cores apply [--reboot]            # unlock now (mask 0x77→0xFF)
-aputune cores boot                        # idempotent boot path for the unit
-aputune cores install                     # install /usr/local/bin + systemd unit, enable
-aputune cores uninstall                   # remove unit + binary
-aputune cores verify [seconds_per_core]   # on-demand stress-ng --verify sweep (advisory)
-aputune cores acpi {status|install|revert} # 8-core SSDT-CST/PST initcpio override
-aputune cores offline {core|all} [..]     # live OS-layer per-core toggle (instant)
+aputune cores status                        # mask, state, visible cores, MCE count
+aputune cores apply [--reboot] [--force-abnormal]  # unlock now; force bypasses the 0x77 gate
+aputune cores boot                          # idempotent boot path for the unit (never forces)
+aputune cores install                       # install /usr/local/bin + systemd unit, enable
+aputune cores uninstall                     # remove unit + binary
+aputune cores verify [seconds_per_core]     # on-demand stress-ng --verify sweep (advisory)
+aputune cores acpi {status|install|revert}  # 8-core SSDT-CST/PST initcpio override
+aputune cores offline {core|all} [..]       # live OS-layer per-core toggle (instant)
 aputune cores online  {core|all} [..]
 ```
 
@@ -325,7 +179,10 @@ ABNORMAL`.
 Details:
 - `apply`: sets `/sys/kernel/reboot/mode` to `warm` only with `--reboot`, then
   `systemctl reboot`. Default: no reboot, print the PENDING-REBOOT reminder.
-- `boot`: same write path, never reboots, exit 0 on already-unlocked and on
+  `--force-abnormal` skips the 0x77 gate (prints the starting mask + an
+  EXPERIMENTAL warning first); the write and readback are identical to the safe
+  path.
+- `boot`: same safe write path, never reboots, exit 0 on already-unlocked and on
   refused (unknown mask) with a journal note — designed to be safe in a unit.
 - `verify`: per-core `stress-ng --cpu 1 --cpu-method all --verify` sweep pinned
   to one thread per physical core, then an all-core sustained run, then a dmesg
@@ -361,7 +218,7 @@ on the selected cell.
 │  │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │  fw  ██ │
 │  │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ██ │  os  ·· │  os  ██ │
 │  ╰─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────╯
-│ keys: [space] toggle · [[]/[]] select · [o]/[O] all off/on · [u] unlock · [i] unit · [v] verify │
+│ keys: [space] toggle · [[]/[]] select · [o]/[O] all off/on · [u] unlock · [F] force-unlock · [i] unit · [v] verify │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -374,6 +231,10 @@ Key bindings and rules:
 - `[←]` / `[→]` (and `[[]` / `[]]`) move the selected cell; `[u]` performs the
   firmware unlock (same gates as `cores apply`); the fw row re-renders from a
   live mask read and `PENDING-REBOOT` shows with a reminder after success.
+- `[F]` is the **forced** unlock for abnormal masks: a modal warning popup
+  shows the current mask, states that the 0x98 write is all-or-nothing (0xFF),
+  and lists warm-reboot/cold-revert semantics; `[y]` writes, `[esc]` cancels.
+  The popup owns every key until answered, and the TUI still never reboots.
 - Offlined CPUs lose their `topology/` subtree on this kernel, so the map's
   grouping falls back core_id -> online SMT sibling -> adjacent-pair index, and
   `online` (all) writes every hotpluggable CPU dir with no topology dependency
@@ -386,7 +247,8 @@ Key bindings and rules:
   badge clears).
 - The fw row shows the SMU mask bits (green `██` = present), the os row shows
   live per-thread online state (`██` both, `█·` mixed, `··` none/masked).
-- `ABNORMAL` renders red with `· writes refused` and no mutating key acts.
+- `ABNORMAL` renders red with `· writes refused` on every safe key; `[F]`
+  remains the only writer.
 
 ---
 
@@ -414,7 +276,8 @@ Rules that MUST survive any edit:
 - The unit **never reboots** (bootloop lesson, section 1.3).
 - `boot` is idempotent: `0xFF` → exit 0 silently; `0x77` → apply and exit 0;
   anything else → journal the refusal, exit 0 (not a service failure, no
-  restart storm).
+  restart storm). **The unit has no force path**, so a board with an abnormal
+  mask is only re-unlocked by an operator running `apply --force-abnormal`.
 - Cold-boot UX: after a cold boot the mask is re-set within seconds; the cores
   appear on the next reboot. `status` makes this legible ("mask set, cores
   pending next reboot").
@@ -469,18 +332,18 @@ byte-match the port source for the touched files.
 | File | Change |
 |---|---|
 | `arieltune-core.md` | this document |
-| `crates/ariel-smu/src/ocq3.rs` | add `q3::WRITE_SMN = 0x98`; public typed `unlock_cores()` on `OcQ3` (mask read/guard/write/verify); unit tests |
-| `crates/apu/src/cores.rs` | new: state machine, status/apply/boot, presets, offlining, verify, acpi, unit install |
-| `crates/apu/src/cli.rs` | `Cmd::Cores { action: CoreCmd }` + dispatch |
+| `crates/ariel-smu/src/ocq3.rs` | add `q3::WRITE_SMN = 0x98`; public typed `unlock_cores()` + `unlock_cores_any()` on `OcQ3` (mask read/guard/write/verify); unit tests |
+| `crates/apu/src/cores.rs` | new: state machine, status/apply/boot (safe + forced), presets, offlining, verify, acpi, unit install |
+| `crates/apu/src/cli.rs` | `Cmd::Cores { action: CoreCmd }` + dispatch; `apply` gains `--force-abnormal` |
 | `crates/apu/src/lib.rs` | `mod cores;` |
-| `crates/apu/src/screen.rs` | Cores panel in the CPU section (section 4) |
+| `crates/apu/src/screen.rs` | Core Map panel + `[F]` force-confirm popup (section 4) |
 | `crates/apu/src/cpu.rs` | read-only awareness: 8-core-safe core iteration (topology-derived, no hardcoded 6) |
 | `crates/apu/src/telemetry.rs` | `gfxclk_mhz()`: prefer direct SMU query, fall back to `pp_dpm_sclk` with a <350 MHz sanity floor; use in TUI/status |
 | `crates/apu/patches/bc250-cachyos-7.0.9/28-bc250-8core-telemetry.patch` | new (section 6) |
 | `crates/apu/patches/bc250-cachyos-7.0.9/SERIES.md` | rows for 28 + 0002-redundancy note |
 | `crates/apu/src/patches.rs` | SERIES entry 28 |
 | `crates/apu/systemd/…` | reference copy of `aputune-cores.service` |
-| tests | `apu` unit tests: state machine, unlock guard paths, offline parse; full `cargo test -p apu` green |
+| tests | `apu` unit tests: state machine, unlock guard paths (safe + forced), offline parse; full `cargo test -p apu` green (37/37) |
 
 Not implemented now (roadmap, section 10): arbitrary firmware masks, q2 `0x23`
 exploit port, DXE/BIOS flashing tooling, full-image `bios` flash path.
@@ -501,6 +364,12 @@ On a P3 dev blade, after building and installing:
 8. Cold power-cycle → boots 6C, unit re-applies mask, status shows
    PENDING-REBOOT; next reboot → 16 threads.
 9. Governor behaves normally (fence-driven) through all of this.
+
+Status on blade 115 (2026-08-18): items 1–6 and 9 executed and passed (from an
+abnormal 0xD7 start via the force hatch); item 7 (ACPI override) intentionally
+not installed; item 8 confirmed in part — the mask survived even a
+`reboot/mode=cold` reset on this board. See
+`docs/ops/blade115-validation-log.md`.
 
 ---
 
