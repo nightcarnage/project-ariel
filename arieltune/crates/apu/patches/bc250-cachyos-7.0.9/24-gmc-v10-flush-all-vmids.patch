@@ -47,8 +47,7 @@ patch-14 v2 marker); applies with patch -p1 --fuzz=0 after patch 14.
 +			atingidos++;
 +		}
 +		dev_info_ratelimited(adev->dev,
-+				     "BC-250: %d VMID(s) flushed
-+", atingidos);
++				     "BC-250: %d VMID(s) flushed\n", atingidos);
 +		return;
 +	}
 +

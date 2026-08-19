@@ -115,8 +115,7 @@ By Gabriel Duarte Guerra (GabriWar).
 +
 +       if (r)
 +               dev_err_ratelimited(dev->adev->dev,
-+                       "BC-250: runlist rebuild failed (%d)
-+", r);
++                       "BC-250: runlist rebuild failed (%d)\n", r);
 +       return r;
 +}
 +
