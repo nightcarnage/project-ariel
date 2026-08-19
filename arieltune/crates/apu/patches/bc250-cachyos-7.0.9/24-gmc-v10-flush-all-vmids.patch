@@ -14,37 +14,41 @@ patch-14 v2 marker); applies with patch -p1 --fuzz=0 after patch 14.
 
 ---
 --- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
 +++ b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
-@@ -303,7 +303,8 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+@@ -303,7 +303,8 @@
  			goto use_mmio;
  	}
  	/* ===== BC-250 v2 PATCH END ===== */
 -	if (adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
-+        if (adev->pdev->device != 0x13fe &&
-+            adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
++	if (adev->pdev->device != 0x13fe &&
++	    adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
  	    (amdgpu_sriov_runtime(adev) || !amdgpu_sriov_vf(adev))) {
  		amdgpu_gmc_fw_reg_write_reg_wait(adev, req, ack, inv_req,
  						 1 << vmid, GET_INST(GC, 0));
-@@ -420,6 +421,24 @@ static void gmc_v10_0_flush_gpu_tlb_pasid(struct amdgpu_device *adev,
+@@ -420,6 +421,28 @@
  	uint16_t queried;
  	int vmid, i;
  
-+	/* BC-250: PASID-to-VMID query races KFD teardown and the INVALIDATE_TLBS
-+	 * packet wedges KIQ. Instead, invalidate every currently mapped process
-+	 * VMID through the direct register path.
++	/*
++	 * BC-250/gfx1013: the PASID-to-VMID query races KFD teardown and the
++	 * INVALIDATE_TLBS packet wedges KIQ on this board. Instead, invalidate
++	 * every currently mapped process VMID through the direct register path.
 +	 */
 +	if (adev->pdev->device == 0x13fe) {
 +		int atingidos = 0;
++
 +		for (vmid = 1; vmid < AMDGPU_NUM_VMID; vmid++) {
 +			if (!gmc_v10_0_get_atc_vmid_pasid_mapping_info(
-+				    adev, vmid, &queried))
++			    adev, vmid, &queried))
 +				continue;
 +			gmc_v10_0_flush_gpu_tlb(adev, vmid,
 +						AMDGPU_GFXHUB(0), flush_type);
 +			atingidos++;
 +		}
 +		dev_info_ratelimited(adev->dev,
-+				     "BC-250: %d VMID(s) flushed\n", atingidos);
++				     "BC-250: %d VMID(s) flushed
++", atingidos);
 +		return;
 +	}
 +

@@ -65,12 +65,12 @@ By Gabriel Duarte Guerra (GabriWar).
 +static int bc250_flush_by_runlist;
 +module_param(bc250_flush_by_runlist, int, 0644);
 +MODULE_PARM_DESC(bc250_flush_by_runlist,
-+	"BC-250: flush compute TLB by rebuilding the runlist on unmap (0=off, 1=on)");
++       "BC-250: flush compute TLB by rebuilding the runlist on unmap (0=off, 1=on)");
 +
  static int execute_queues_cpsch(struct device_queue_manager *dqm,
  				enum kfd_unmap_queues_filter filter,
  				uint32_t filter_param,
-@@ -2485,6 +2507,50 @@ static int reset_queues_cpsch(struct device_queue_manager *dqm, uint16_t pasid)
+@@ -2126,6 +2148,52 @@
  }
  
  /* dqm->lock mutex has to be locked before calling this function */
@@ -93,50 +93,51 @@ By Gabriel Duarte Guerra (GabriWar).
 +/* See the long comment above bc250_flush_by_runlist. */
 +int kfd_bc250_flush_by_runlist(struct kfd_node *dev)
 +{
-+	struct device_queue_manager *dqm;
-+	int r;
++       struct device_queue_manager *dqm;
++       int r;
 +
-+	if (!bc250_flush_by_runlist || !dev || !dev->adev || !dev->adev->pdev)
-+		return 0;
-+	if (dev->adev->pdev->device != BC250_PCI_DEVICE_ID)
-+		return 0;
++       if (!bc250_flush_by_runlist || !dev || !dev->adev || !dev->adev->pdev)
++               return 0;
++       if (dev->adev->pdev->device != BC250_PCI_DEVICE_ID)
++               return 0;
 +
-+	dqm = dev->dqm;
-+	/* Only meaningful under hardware scheduling: the firmware
-+	 * reassigns VMIDs when rebuilding the runlist.
-+	 */
-+	if (!dqm || dqm->sched_policy == KFD_SCHED_POLICY_NO_HWS)
-+		return 0;
++       dqm = dev->dqm;
++       /* Only meaningful under hardware scheduling: the firmware
++        * reassigns VMIDs when rebuilding the runlist.
++        */
++       if (!dqm || dqm->sched_policy == KFD_SCHED_POLICY_NO_HWS)
++               return 0;
 +
-+	dqm_lock(dqm);
-+	r = execute_queues_cpsch(dqm, KFD_UNMAP_QUEUES_FILTER_DYNAMIC_QUEUES, 0,
-+				 USE_DEFAULT_GRACE_PERIOD);
-+	dqm_unlock(dqm);
++       dqm_lock(dqm);
++       r = execute_queues_cpsch(dqm, KFD_UNMAP_QUEUES_FILTER_DYNAMIC_QUEUES, 0,
++                                USE_DEFAULT_GRACE_PERIOD);
++       dqm_unlock(dqm);
 +
-+	if (r)
-+		dev_err_ratelimited(dev->adev->dev,
-+			"BC-250: runlist rebuild failed (%d)\n", r);
-+	return r;
++       if (r)
++               dev_err_ratelimited(dev->adev->dev,
++                       "BC-250: runlist rebuild failed (%d)
++", r);
++       return r;
 +}
 +
- static int execute_queues_cpsch(struct device_queue_manager *dqm,
- 				enum kfd_unmap_queues_filter filter,
- 				uint32_t filter_param,
+ static int map_queues_cpsch(struct device_queue_manager *dqm)
+ {
+ 	struct device *dev = dqm->dev->adev->dev;
 --- a/drivers/gpu/drm/amd/amdkfd/kfd_chardev.c
 +++ b/drivers/gpu/drm/amd/amdkfd/kfd_chardev.c
-@@ -1458,6 +1458,9 @@ static int kfd_ioctl_unmap_memory_from_gpu(struct file *filep,
+@@ -1458,6 +1458,9 @@
  			kfd_flush_tlb(peer_pdd);
  
  		/* Remove dma mapping after tlb flush to avoid IO_PAGE_FAULT */
-+			/* BC-250: rebuild runlist to flush stale TLB entries */
-+			kfd_bc250_flush_by_runlist(peer_pdd->dev);
++                       /* BC-250: rebuild runlist to flush stale TLB entries */
++                       kfd_bc250_flush_by_runlist(peer_pdd->dev);
 +
  		err = amdgpu_amdkfd_gpuvm_dmaunmap_mem(mem, peer_pdd->drm_priv);
  		if (err)
  			goto sync_memory_failed;
 --- a/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.h
 +++ b/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.h
-@@ -372,3 +372,10 @@ static inline void update_dqm_wait_times(struct device_queue_manager *dqm)
+@@ -372,3 +372,9 @@
  
  
  #endif /* KFD_DEVICE_QUEUE_MANAGER_H_ */
@@ -146,4 +147,3 @@ By Gabriel Duarte Guerra (GabriWar).
 + * Takes dqm_lock -- never call while already holding it.
 + */
 +int kfd_bc250_flush_by_runlist(struct kfd_node *dev);
-+
