@@ -137,8 +137,8 @@ ASRock BC-250 Carrier Board
 │   └── ISL99360 — smart power stages · inputs: PCIe 8-pin + Molex 8-pin
 │
 ├── SPI Flash
-│   ├── Winbond W25Q128JV — 16 MB (BIOS, PSP, SMU, ABL, APCB)
-│   └── Macronix MX25L4006E — 512 KB (Super I/O firmware)
+│   ├── BIOS_A1: 16 MB SPI (BIOS, PSP, SMU, ABL, APCB) - typ. Winbond W25Q128JV
+│   └── SIO1_R: 512 KB SPI (Super I/O firmware) - typ. Macronix MX25L4006E
 │
 └── Debug Headers
     ├── J2 — JTAG / HDT+ (20-pin, unpopulated)
@@ -402,7 +402,7 @@ board takes both a PCIe 8-pin and a Molex 8-pin input.
 ┌─ SUPER I/O ──────────────────────────────────────────────────────────────────────────┐
 │  Controller        Nuvoton NCT6686D — over LPC                                       │
 │  Functions         temps, voltage ADCs, fan PWM, watchdog                            │
-│  Firmware          own 512 KB flash — Macronix MX25L4006E                            │
+│  Firmware          own 512 KB SPI (SIO1_R) - typ. Macronix MX25L4006E                │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
                                             See: Chapter 1 → Storage, Network, Super I/O
@@ -414,7 +414,7 @@ board takes both a PCIe 8-pin and a Molex 8-pin input.
 ── FIRMWARE & CONFIGURATION ────────────────────────────────── SPI flash · boot chain ──
 
 ┌─ FIRMWARE STORE ─────────────────────────────────────────────────────────────────────┐
-│  SPI flash         Winbond W25Q128JV — 16 MB                                         │
+│  SPI flash         BIOS_A1 - 16 MB SPI (typ. Winbond W25Q128JV)                      │
 │  Contents          UEFI · PSP directory · SMU · ABL · APCB                           │
 │  BIOS              P3.00                                                             │
 │  VBIOS             113-AMDRBN-003                                                    │
@@ -468,8 +468,8 @@ not a standard platform.
 │  Super I/O        Nuvoton NCT6686D — EC-mode strapped                   HWM + UART2  │
 │  Storage          M.2 2280 — NVMe over FCH PCIe Gen2 x2                              │
 │  Network          Realtek RTL8111H Gigabit Ethernet                           r8169  │
-│  BIOS flash       Winbond W25Q128JV — 16 MiB SPI                                     │
-│  SIO flash        Macronix MX25L4006E — 512 KiB (NCT6686D firmware)          SIO1_R  │
+│  BIOS flash       BIOS_A1 - 16 MiB SPI (typ. Winbond W25Q128JV)                      │
+│  SIO flash        SIO1_R - 512 KiB SPI (NCT6686D fw; typ. Macronix MX25L4006E)       │
 │  Board mgmt       libAsrCore v1.70.0 — needs a detection shim on this board          │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -694,7 +694,7 @@ A Nuvoton NCT6686D hardware-monitor part, board-strapped into EC (Embedded
 Controller) mode at power-on — which permanently locks the traditional SuperIO
 index/data config path.  The hardware monitor and UART2 work; the watchdog / GPIO /
 PWM logical devices are gated behind the HWM page protocol and unreachable.  The
-chip runs its own firmware from a dedicated 512 KiB Macronix flash.
+chip runs its own firmware from a dedicated 512 KiB SPI flash (SIO1_R; typically Macronix).
 
 ┌─ SUPER I/O ──────────────────────────────────────────────────────────────────────────┐
 │  Part             Nuvoton NCT6686D                 chip ID 0xD441 · rev 0xBC · UIO1  │
@@ -703,7 +703,7 @@ chip runs its own firmware from a dedicated 512 KiB Macronix flash.
 │  SIO config       ports 0x2E / 0x2F — chip ID at reg 0x20/0x21                       │
 │                   LDN config regs locked — read 0xFF in EC mode                      │
 │  UART2            base 0x2F8 · IRQ 3                             ttyS1 · 115200 8N1  │
-│  SIO firmware     Macronix MX25L4006E — 512 KiB                              SIO1_R  │
+│  SIO firmware     SIO1_R - 512 KiB SPI (typ. Macronix MX25L4006E)                    │
 │  Access           root / CAP_SYS_RAWIO (raw I/O port access)                         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -762,10 +762,11 @@ LDN 0x0B, enables the HWM block (reg 0x30: set bit 0, clear bit 1), then per sen
 writes 0x0A20=0xFF, 0x0A20=0x01 (page 1), the offset to 0x0A21, and reads 0x0A22;
 it exits with outb(0x2E,0xAA).
 
-┌─ CAUTION — SIO FIRMWARE ROM ─────────────────────────────────────────────────────────┐
-│  Never flash the NCT6686D firmware ROM (the 512 KiB Macronix MX25L4006E, SIO1_R)     │
-│  — flashing it bricks the Super I/O permanently.  This chip is distinct from the     │
-│  16 MiB BIOS flash.                                                                  │
+┌─ CAUTION - SIO FIRMWARE ROM (do not flash) ──────────────────────────────────────────┐
+│  Never flash the 512 KiB Super I/O ROM in socket SIO1_R (it feeds the NCT6686D) -    │
+│  doing so bricks the Super I/O permanently.  It is distinct from the 16 MiB BIOS     │
+│  flash, and its brand VARIES: it may be a Macronix MX25L4006E or a Winbond.  Identify│
+│  it by the 512 KiB size and the SIO1_R silkscreen, never by manufacturer.            │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 Upstream Linux does not directly support the NCT6686D; the in-kernel nct6683 driver
@@ -938,27 +939,56 @@ The address is therefore board-specific.
 ## SPI Flash
 
 ```
-── SPI FLASH ───────────────────────────────────────────────── W25Q128JV + MX25L4006E ──
+── SPI FLASH ──────────────────────────────────────── BIOS_A1 16 MiB + SIO1_R 512 KiB ──
 
-Two SPI flash devices.  The 16 MiB Winbond holds the entire platform firmware image
-(UEFI/BIOS, PSP directory, SMU, ABL, APCB); the 512 KiB Macronix is the NCT6686D
+Two SPI flash devices.  The 16 MiB part holds the entire platform firmware image
+(UEFI/BIOS, PSP directory, SMU, ABL, APCB); the 512 KiB part is the NCT6686D
 Super I/O's private firmware and is electrically separate.
 
+IDENTIFY BY DESIGNATOR + CAPACITY, NOT BRAND.  AsRock second-sources both sockets, so
+the brand on each chip varies between board builds (see the WARNING below).  BIOS_A1 =
+the 16 MiB (128 Mbit) chip; SIO1_R = the 512 KiB (4 Mbit) chip.  flashrom (the flashing
+tool) reports the true capacity on probe - a 16384 kB detect is the BIOS flash whatever
+name it prints, a 512 kB detect is the SIO flash.  Never decide which chip is the BIOS
+by whether it is the Winbond or the Macronix one.
+
 ┌─ FLASH DEVICES ──────────────────────────────────────────────────────────────────────┐
-│  BIOS flash       Winbond W25Q128JV — 16 MiB          UEFI · PSP · SMU · ABL · APCB  │
-│  SIO flash        Macronix MX25L4006E — 512 KiB                NCT6686D fw · SIO1_R  │
-│  Programming      J4004 header (BIOS flash) — external          board off / standby  │
+│  BIOS flash   BIOS_A1 · 16 MiB (128 Mbit)   UEFI·PSP·SMU·ABL·APCB   photo W25Q128JV* │
+│  SIO flash    SIO1_R  · 512 KiB (4 Mbit)    NCT6686D firmware       photo MX25L4006E*│
+│  Programming  J4004 header -> the BIOS_A1 chip only   external, board off / standby  │
+│  * brand varies by build (second-sourced); go by designator + size, never the brand  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ WARNING - CHIP BRANDS MAY BE SWAPPED vs THIS MANUAL ────────────────────────────────┐
+│  Some boards have BIOS_A1 populated by a Macronix (e.g. the 16 MiB MX25L12872F) and  │
+│  SIO1_R by a Winbond - the OPPOSITE brand mix from the photos here.  This is normal  │
+│  second-sourcing; nothing is in the wrong socket.  The role follows the silkscreen   │
+│  DESIGNATOR + CAPACITY, never the logo:                                              │
+│    BIOS_A1 / 16 MiB  (flashrom probes 16384 kB) = the BIOS    - safe to reflash.     │
+│    SIO1_R  / 512 KiB (flashrom probes 512 kB)   = the SIO ROM - NEVER flash.         │
+│  So if you see a Macronix where the manual shows a Winbond, do NOT conclude the      │
+│  Winbond is "the BIOS" and flash it - check capacity first, or you brick the SIO.    │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 The BIOS flash is reachable for external programming only through J4004 (see Debug
-& Recovery Headers).  During boot the SoC reads the flash over a separate internal
-SPI bus in single-IO mode (opcode 0x03, 4 bytes per transaction); J4004 carries
-only the flash MISO output on that bus and cannot sniff or interpose on live
-PSP-to-flash traffic.  The full firmware region map is in Chapter 3.
+& Recovery Headers).  During boot the SoC reads it in single-IO mode (opcode 0x03,
+4 bytes per transaction) over the SAME single SPI port J4004 taps; with a tap firmware
+J4004 can therefore observe live PSP-to-flash traffic (see the Debug chapter).  The
+full firmware region map is in Chapter 3.
 
-┌─ CAUTION — SIO FLASH ────────────────────────────────────────────────────────────────┐
-│  Never flash the Macronix MX25L4006E (the Super I/O ROM) — it bricks the             │
-│  NCT6686D permanently, and it is distinct from the 16 MiB BIOS flash.                │
+A USB / EFI (or DOS / in-band) BIOS updater can only ever reach the 16 MiB BIOS_A1
+chip.  Every such tool - flashrom -p internal, an AMI AFU utility, an ".efi"
+updater on a FAT32 stick - writes through the FCH SPI100 controller, which is
+hardwired to the BIOS_A1 footprint.  The 512 KiB SIO flash lives on the LPC bus
+behind the NCT6686D; no SPI-master signal reaches it, so no in-band flasher can
+touch it (confirmed LPC-only - see TPMS1 below).  If a board stops POSTing after a
+USB / EFI flash, the updater bricked the BIOS image on the 16 MiB chip, NOT the SIO
+part - recover by external SPI reflash of BIOS_A1 (below), not a CMOS pull.
+
+┌─ CAUTION - DO NOT FLASH THE SIO CHIP ────────────────────────────────────────────────┐
+│  Never write the 512 KiB Super I/O ROM (socket SIO1_R, feeds the NCT6686D) - a BIOS  │
+│  image on it bricks the Super I/O permanently.  Choose the chip by SIZE, not brand:  │
+│  the SIO part is the 512 KiB one whether it is a Macronix MX25L4006E or a Winbond.   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
    See: Debug & Recovery Headers — this chapter — Ch 3 · Security & Trust (firmware map)
@@ -970,7 +1000,7 @@ PSP-to-flash traffic.  The full firmware region map is in Chapter 3.
 ── DEBUG & RECOVERY ─────────────────────────────────────────────── headers · jumpers ──
 
 The carrier exposes four headers and two jumpers for debug and recovery.  The most
-important is J4004, the SPI programming header — the only known recovery path from
+important is J4004, the SPI programming header - the only known recovery path from
 a PSP brick.
 
 ┌─ HEADERS & JUMPERS ──────────────────────────────────────────────────────────────────┐
@@ -979,72 +1009,143 @@ a PSP brick.
 │  I2C_HEADER1   PMBus / I2C to VRM       SMBus-routed          read-only telemetry    │
 │  I2C_HEADER2   DDC / board identity     SMBus Bus 2           board ID · clock gen   │
 │  TPMS1         LPC / TPM                18-pin 2×9 · 2.0 mm   pin 13 keyed           │
-│  AUTO_PWRON1   jumper — 2-pin           CLRCMOS1              jumper — 2-pin         │
+│  AUTO_PWRON1   jumper - 2-pin           CLRCMOS1              jumper - 2-pin         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-J4004 breaks out the Winbond W25Q128JV (16 MiB) BIOS flash.  The pin assignment is
-a CUSTOM ASROCK LAYOUT, not the conventional 8-pin programmer pinout — verified by
+J4004 breaks out the 16 MiB BIOS flash (BIOS_A1; typ. Winbond W25Q128JV).  The pin assignment is
+a CUSTOM ASROCK LAYOUT, not the conventional 8-pin programmer pinout - verified by
 continuity to the SO-8 package.  A white triangle marks pin 1.
 
       top row    5   6   7   8
-      bot row    1   2   3  [4]          [4] = unpopulated pad — no through-hole pin
+      bot row    1   2   3  [4]          [4] = unpopulated pad - no through-hole pin
                  ^
                  white triangle = pin 1
 
-┌─ J4004 PINOUT — CUSTOM ASROCK LAYOUT ────────────────────────────────────────────────┐
+┌─ J4004 PINOUT - CUSTOM ASROCK LAYOUT ────────────────────────────────────────────────┐
 │  Pin        Flash SO-8   Signal      Notes                                           │
-│  1 (tri)    8            VCC 3.3 V   keyed pin — a reversed cable shorts VCC ↔ GND   │
-│  2          1            CS#         chip select — active low                        │
+│  1 (tri)    8            VCC 3.3 V   keyed pin - a reversed cable shorts VCC ↔ GND   │
+│  2          1            CS#         chip select - active low                        │
 │  3          2            MISO        data from flash                                 │
-│  4          —            —           unpopulated pad (no through-hole pin)           │
+│  4          -            -           unpopulated pad (no through-hole pin)           │
 │  5          4            GND         ground                                          │
 │  6          6            CLK         SPI clock                                       │
 │  7          5            MOSI        data to flash                                   │
-│  8          —            strap       DNP resistor, ~10k to GND — do not connect      │
+│  8          -            strap       do-not-populate pad, ~10k to GND - leave open   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-WP# (SO-8 pin 3) and HOLD# (SO-8 pin 7) are NOT broken out — both are tied high via
+WP# (SO-8 pin 3) and HOLD# (SO-8 pin 7) are NOT broken out - both are tied high via
 on-board 10k pull-ups, so the flash is permanently out of write-protect / hold and
 an external programmer cannot exercise hardware write-protect through J4004.  The
-silkscreen shows both BIOS_A1 and BIOS_S_A1 on the single footprint — a
+silkscreen shows both BIOS_A1 and BIOS_S_A1 on the single footprint - a
 BOM-flexibility marking (two qualified part numbers for one socket), not a
 dual-chip layout.  Only shared power rails cross to TPMS1 (J4004 pin 1 ↔ TPMS1
 pin 15 = 3.3 V; J4004 pin 5 ↔ TPMS1 pin 12 = GND); no SPI signals bridge to TPMS1.
 
-Supported programmers: CH341A USB · Raspberry Pi 3 + flashrom · Raspberry Pi Pico 2
-running serprog (flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M).
-
-PSP-brick recovery — when a board fails POST (no display, no UART), external SPI
+PSP-brick recovery - when a board fails POST (no display, no UART), external SPI
 reflash is the only known recovery; once the PSP rejects the SPI image, in-band
-reflash is impossible:
+reflash is impossible.  The programmer we document is a Raspberry Pi Pico 2 (RP2350)
+running pico-serprog (the libreboot serprog firmware): 3.3 V-native, no level shifter
+for this 3.3 V flash, and no external power needed for the target.
 
-┌─ PSP-BRICK RECOVERY PROCEDURE ───────────────────────────────────────────────────────┐
-│  1  Confirm 12 V present at the board input.                                         │
-│  2  Power the board OFF.                                                             │
-│  3  Connect the programmer to J4004 — power the programmer from its own USB.         │
-│  4  Sanity read:        flashrom -p ch341a_spi -r dump.bin                           │
-│  5  Write known-good:   flashrom -p ch341a_spi -w known-good.bin                     │
-│  6  Disconnect the programmer and cold-boot.                                         │
+Wire five lines - the four SPI signals plus a common ground - and DO NOT connect
+J4004 pin 1 (VCC).  The flash is powered by the board's own 3.3 V rail, so the Pico
+drives logic only.  Leaving VCC unconnected also means a mis-oriented connector can
+no longer short VCC ↔ GND, and it is what lets the same rig flash a live board.
+
+┌─ PICO 2 → J4004 WIRING (pico-serprog GPIO map) ──────────────────────────────────────┐
+│  Pico 2         Signal    J4004 pin    Flash SO-8                                    │
+│  GP2  (phys 4)  CLK        6            6                                            │
+│  GP3  (phys 5)  MOSI       7            5                                            │
+│  GP4  (phys 6)  MISO       3            2                                            │
+│  GP5  (phys 7)  CS#        2            1                                            │
+│  GND  (phys 3)  GND        5            4                                            │
+│  ---            VCC        1            LEAVE UNCONNECTED (board powers the flash)   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-flashrom auto-detects the 16 MiB flash.  J4004 is PROGRAMMING-ONLY: during boot it
-carries the flash chip's MISO output but the SoC's MOSI commands are absent (the
-SoC reaches the flash over a separate internal SPI bus).  Serprog works because it
-drives the flash directly while the board is off / standby; J4004 cannot sniff or
-interpose on the live PSP-to-flash bus (a SOIC-8 clip on the chip's own pins is
-needed for that).  Recovery / backup with the board off is unaffected.
+Power state.  Because the Pico never sources VCC, there is no rail contention, so any
+of these work:
 
-┌─ CAUTION — WRONG-CHIP FLASH ─────────────────────────────────────────────────────────┐
-│  Never flash the secondary Macronix MX25L4006E (the Super I/O ROM) — it bricks       │
-│  the NCT6686D permanently.  Recovery from a bad NVRAM / config is a CMOS battery     │
-│  pull (CLRCMOS1), not a reflash.                                                     │
+  * PSU ON, board OFF (S5 standby) - the recommended default.  The 3.3VSB rail powers
+    the flash while the FCH SPI master is held in reset, so the Pico owns the bus
+    cleanly.  You do NOT need the board fully unplugged, and you do NOT supply 3.3 V
+    from the Pico.
+  * PSU ON, board BOOTED - also works.  Post-boot the FCH has shadowed the BIOS into
+    DRAM and leaves the ROM bus idle, so the Pico can drive it without a power-cycle.
+    Use this when cold-cycling is awkward; board-off is the more deterministic path.
+
+┌─ PICO 2 REFLASH PROCEDURE ───────────────────────────────────────────────────────────┐
+│  1  Flash pico-serprog.uf2 to the Pico 2 once (hold BOOTSEL, drag-drop the .uf2);    │
+│     it re-enumerates as a USB CDC serial port at /dev/ttyACM0.                       │
+│  2  Wire the five lines above.  Leave J4004 pin 1 (VCC) unconnected.                 │
+│  3  Leave the PSU on.  Board OFF (default) or booted - either is fine.               │
+│  4  Read twice and diff - the two dumps MUST match before you trust the backup:      │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump1.bin                │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump2.bin                │
+│        cmp dump1.bin dump2.bin                                                       │
+│  5  Write the known-good image:                                                      │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -w known-good.bin           │
+│  6  Disconnect the Pico and cold-boot.  If probe or verify fails, lower the clock    │
+│     (spispeed=4M) and retry - a marginal jumper wire shows up as a flaky probe.      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+flashrom auto-detects a Winbond W25Q128JV cleanly, but OFTEN MIS-IDs the Macronix
+MX25L12872F BIOS variant - on a Macronix-populated board force the part with -c (see
+"reflashed a good image and still no POST" below); do not rely on auto-detect.  The
+flash has a SINGLE SPI port - there is no "separate internal bus."  External access
+works because the Pico drives that one bus while the FCH master is either tri-stated
+(board off) or idle (booted).  The same electrical fact means J4004 CAN observe live
+PSP-to-flash traffic - passive sniffing just needs a tap firmware instead of serprog
+(see the recon pico2-spi-tap tooling), not a different header.
+
+┌─ CAUTION - PROGRAMMER VCC (CH341A undervolt / 5 V hazard) ───────────────────────────┐
+│  A stock CH341A drives VCC and the SPI lines at ~5 V and can damage a 3.3 V flash    │
+│  chip; even a "3.3 V-modded" unit sags to ~3.0-3.1 V under load on long clip leads,  │
+│  so an erase / write lays down marginal cells that verify at the programmer's own    │
+│  slow read yet fail the PSP's cold read - repeated low-V writes degrade the chip.    │
+│  Feed the chip a clean 3.3 V (bench PSU on the VCC pin, programmer VCC left off),    │
+│  keep leads short, lower spispeed, and verify at a DIFFERENT (slower) speed than you │
+│  wrote - a marginal cell can pass at one clock and fail at another.  Better still,   │
+│  use the Pico 2 serprog rig above - 3.3 V-native, no 5 V hazard.                     │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ SYMPTOM - CH341A 5 V OVER-VOLT BAD FLASH (dead 3.3 V mod / wrong jumper) ───────────┐
+│  A CH341A whose 3.3 V-mod regulator has FAILED - or a black-clip "3.3 V" unit left on│
+│  its 5 V jumper - drives VCC and the SPI lines at ~5 V while reporting nothing wrong:│
+│  the write completes and the tool's own verify PASSES, because the die still latches │
+│  data at 5 V.  The over-voltage lays down marginal / damaged cells, so the image the │
+│  PSP cold-reads back at 3.3 V is corrupt even though the programmer called it good.  │
+│  This is a BAD FLASH the tool will not admit to.                                     │
+│                                                                                      │
+│  Fingerprint on the next boot (this exact set = corrupt SPI image, not a dead board):│
+│    * bootloader red-LED DOUBLE-FLASH still runs   - earliest PSP stage executes      │
+│    * NIC powers up but its link LED STEADY-BLINKS  - PSP bootloops, no lease         │
+│    * NO display, NO USB keyboard enumerate         - x86 cores never leave reset     │
+│  The double-flash proves the PSP is alive: the board is stuck on a corrupt image -   │
+│  the same PSP-bootloop family as "no POST after a good reflash" below, but root-     │
+│  caused to the programmer over-volting the die, not to bad source bytes or a marginal│
+│  board rail.                                                                         │
+│                                                                                      │
+│  Fix: MEASURE the programmer's VCC pin BEFORE trusting any write - a DMM on the clip │
+│  MUST read 3.25-3.45 V; ~5 V means the 3.3 V mod is dead, do NOT flash with it.      │
+│  Rewrite the correct FULL 16 MiB image with a 3.3 V-native rig (the Pico 2 serprog   │
+│  above, or a bench 3.3 V on the VCC pin with the programmer's own VCC left off).  A  │
+│  die that was over-volted repeatedly may be degraded past reliable rewrite - if it   │
+│  will not take a clean image, socket a blank SPI128 and flash that (the isolation    │
+│  test below).                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ CAUTION - WRONG-CHIP FLASH ─────────────────────────────────────────────────────────┐
+│  Never flash the 512 KiB Super I/O ROM (socket SIO1_R) - it bricks the NCT6686D      │
+│  permanently.  It is the 512 KiB chip whatever brand it wears (Macronix OR Winbond), │
+│  NOT necessarily the Macronix - on some boards the Macronix is the 16 MiB BIOS.      │
+│  Recovery from a bad NVRAM / config is a CMOS battery pull (CLRCMOS1), not a reflash.│
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 TPMS1 exposes the full LPC bus (LAD[3:0], LCLK, LFRAME#, LRESET#), SMBus, and
-power — the same LPC bus as the NCT6686D.  Confirmed LPC-only: no SPI signals
+power - the same LPC bus as the NCT6686D.  Confirmed LPC-only: no SPI signals
 bridge to the BIOS flash.
 
-┌─ TPMS1 PINOUT — 18-PIN · 2×9 · 2.0 mm ───────────────────────────────────────────────┐
+┌─ TPMS1 PINOUT - 18-PIN · 2×9 · 2.0 mm ───────────────────────────────────────────────┐
 │  pin  1  PCICLK                pin  2  GND                                           │
 │  pin  3  FRAME                 pin  4  SMB_CLK_MAIN                                  │
 │  pin  5  PCIRST#               pin  6  SMB_DATA_MAIN                                 │
@@ -1061,7 +1162,7 @@ halt / resume / single-step, register and memory access, breakpoints, and trace.
 It requires a 1.27 mm header soldered onto the pads.  TEST18 / TEST19 / DBRDY0 are
 left floating.
 
-┌─ J2 PINOUT — JTAG / HDT+ · 20-PIN · 1.27 mm · UNPOPULATED ───────────────────────────┐
+┌─ J2 PINOUT - JTAG / HDT+ · 20-PIN · 1.27 mm · UNPOPULATED ───────────────────────────┐
 │  pin  1  VDDIO                 pin  2  TCK                                           │
 │  pin  3  GND                   pin  4  TMS                                           │
 │  pin  5  GND                   pin  6  TDI                                           │
@@ -1081,10 +1182,84 @@ left floating.
 │                pins 2-3   clear CMOS / NVRAM to UEFI defaults                        │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-     See: SMBus / I2C topology — this chapter — Ch 3 · Security & Trust (PSP boot flash)
+── REFLASHED A GOOD IMAGE AND STILL NO POST ─────────────────────────── PSP boot loop ──
+
+A board that will not POST even after an external reflash with a "verified" image is a
+different failure from a plain bad flash, and the fix is not "flash it again."  Read
+the signs first - they say WHERE the board is stuck:
+
+  * an RGB / mouse LED lights but no keyboard enumerates and there is no display
+    -> USB has +5 V VBUS (the LED is just power) but there is NO USB host controller:
+    the x86 cores never left reset.  On this SoC the PSP boots first and releases the
+    x86 cores; if x86 never starts, the PSP never got there.
+  * a STEADY ~1 s blink on the NIC link LED, or a red<->green LED cycling on a regular
+    cadence, with no DHCP lease -> that cadence is a RESET-LOOP HEARTBEAT: the PSP is
+    bootlooping and resetting the board about once a second.
+
+Net: x86 is held in reset and the PSP is looping on the SPI image.  Two root causes
+produce exactly this, and they are separated by MEASUREMENT, not by flashing again.
+
+  A. THE FLASH CONTENT IS NOT ACTUALLY GOOD (tool-verify lies).  A programmer's
+     "verify OK" only means the bytes read back match the bytes IT SENT - never that
+     the chip matches a working board.  Two ways that bites, both worse on the 16 MiB
+     Macronix MX25L12872F (JEDEC C2 20 18) because it is uncommon and often mis-ID'd:
+       - wrong chip profile -> wrong erase / program / addressing -> the top of the
+         chip (reset vector, $PSP directory @ 0x8E0000, NVRAM) is mangled while verify
+         passes against the tool's own wrong address map.  Force the exact part with
+         flashrom -c (a Macronix BIOS reports JEDEC c2 20 18); never auto-detect it.
+       - partial image -> a BIOS-volume-only file leaves the PSP / APCB / EFI-NVRAM
+         regions as the corrupted post-poke state.  A full image is EXACTLY
+         16,777,216 bytes and carries the $PSP magic near 0x8E0000.
+       - programmer over-volt -> a CH341A whose 3.3 V mod has died (or a "3.3 V" unit
+         left on its 5 V jumper) writes at ~5 V and lays down marginal cells that pass
+         the tool's own verify but fail the PSP's cold read.  Measure the programmer VCC
+         pin (must be 3.25-3.45 V) before you trust ANY write - see the "CH341A 5 V
+         over-volt bad flash" symptom box under Debug & Recovery Headers.
+     PROVE it: read the chip back (flashrom -r mine.bin), get a KNOWN-GOOD full 16 MiB
+     dump from a working board, and compare the two files (sha256sum mine.bin good.bin -
+     the hashes must match, or cmp mine.bin good.bin).  Compare to the good board's dump,
+     NOT to your own source file.  You need that reference BEFORE you start: dump it from
+     a working BC-250 (flashrom -r) or use a verified community full-chip dump - a stock
+     AMI / USB BIOS file is BIOS-volume-only, NOT a full 16 MiB image (see the partial-
+     image trap above).
+
+  B. THE BOARD'S OWN 3.3 V RAIL IS MARGINAL (reads clean on the bench, browns out in
+     circuit).  The SPI flash, the NCT6686D, the NIC PHY and the PSP's early I/O all
+     run off the board 3.3 V / 3.3VSB rail.  On a CH341A the chip runs off the
+     programmer's clean regulated 3.3 V, so it reads / writes / verifies perfectly; in
+     the board it runs off the derived rail.  If that rail sags, is noisy, or
+     collapses, the PSP's cold read of the flash fails and the board resets - and a
+     rail that browns out and recovers on a ~1 s cycle IS the heartbeat on the NIC /
+     LED.  A verify-clean chip that will not boot in-circuit is the textbook signature
+     of a board-power fault, not a flash-content fault.
+     MEASURE it (board powered, in the boot loop - NOT on the programmer):
+       - 3.3 V at J4004 pin 1 -> GND (pin 5), or 3V / 3.3VSB at TPMS1 pin 9 / pin 15
+         -> GND (pin 12 / 17 / 18).  Expect a steady ~3.3 V.
+       - a DMM reading low (~3.0 V) or twitching, or a scope showing sag / ripple /
+         collapse synchronized to the ~1 s cadence, confirms a rail fault (bad 3.3 V
+         buck, damaged cap, or a downstream short) - no amount of reflashing fixes it.
+
+Only after BOTH are cleared - bytes proven against a good reference AND the 3.3 V rail
+proven steady under load - is the fault deeper (off-flash PSP-NV or board damage).
+The fastest single test that splits A from B / hardware: write the good full image to
+a DIFFERENT or blank SPI128 chip and socket it.  POSTs -> your chip / tooling was the
+problem; still dead -> the fault is off-chip (rail or board), chase hardware.
+
+┌─ TRIAGE - NO POST AFTER A "GOOD" REFLASH ────────────────────────────────────────────┐
+│  1  Confirm the loop     x86 in reset (no USB enum, no display) + ~1 s NIC/LED       │
+│                          heartbeat = PSP bootloop, not an OS / display fault         │
+│  2  Trust bytes not tool read back, sha256 / cmp vs a known-good FULL 16 MiB dump    │
+│  3  Force the chip ID    flashrom -c the exact MX25L12872F; never auto-detect it     │
+│  4  Check image size     exactly 16,777,216 bytes; $PSP magic near 0x8E0000          │
+│  5  Measure 3.3 V rail   J4004 pin1->GND / TPMS1 pin9->GND, board ON in the loop;    │
+│                          steady 3.3 V?  sag / ripple on the ~1 s cadence = rail bad  │
+│  6  Isolation test       good image on a blank chip -> POST = chip/tool, dead = HW   │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+     See: SMBus / I2C topology - this chapter - Ch 3 · Security & Trust (PSP boot flash)
 ```
 
-## ASRock Carrier Library — libAsrCore
+## ASRock Carrier Library - libAsrCore
 
 ```
 ── libAsrCore ──────────────────────────────────────────── v1.70.0 · board management ──
@@ -1249,7 +1424,18 @@ from commodity interfaces; there is no remote power control.
 │  Hard hang (unreachable)      physical power cycle — smart plug or manual            │
 │  PSP brick (won't POST)       SPI reflash via J4004                                  │
 │                               CH341A / RPi 3 / Pico 2 serprog                        │
+│  No POST after USB/EFI flash  same - reflash the 16 MiB BIOS_A1 via J4004; the       │
+│                               in-band updater only wrote the BIOS chip, not the SIO  │
 └──────────────────────────────────────────────────────────────────────────────────────┘
+
+A "no POST after a USB / EFI BIOS updater" is the most common self-inflicted brick,
+and it is a PSP-brick by another name: the EFI flasher wrote a bad or interrupted
+image to the 16 MiB BIOS_A1 chip, the PSP now rejects it, and in-band reflash is
+gone.  It did NOT flash the Super I/O.  Recover exactly like any PSP brick - external
+SPI reflash of BIOS_A1 with a known-good 16 MiB dump.  Identify BIOS_A1 by capacity,
+not brand (see SPI Flash): if flashrom probes it as a 16384 kB part it is the right
+chip whether it prints Winbond or Macronix.  A CMOS battery pull (CLRCMOS1) clears
+NVRAM / config only and will NOT fix a bad BIOS image.
 
               See: FCH TCO watchdog · Super I/O · Debug & Recovery — this chapter — Ch 4
 ```
@@ -1296,13 +1482,13 @@ version 127.127.63 (all bits set) marks an unused or harvested slot.
 
                         AMD Oberon APU (Family 17h Model 47h)
  ┌───────────────┬────────────────┬───────────────┬─────────────────────┐
- │ COMPUTE / DMA │    MEMORY      │  INTERCONNECT │  POWER / CLK / THERM │
- │ GC  SDMA0/1   │ UMC×2  MMHUB   │ DF  NBIF IOHC │ MP1/SMU  SMUIO       │
- │               │ ATHUB SYSHUB   │ PCIE  PCS     │ THM  FUSE  CLKA/CLKB │
- │               │ HDP  L2IMU     │               │ OSSSYS/IH            │
+ │ COMPUTE / DMA │     MEMORY     │  INTERCONNECT │ POWER / CLK / THERM │
+ │ GC  SDMA0/1   │ UMC×2  MMHUB   │ DF  NBIF IOHC │ MP1/SMU  SMUIO      │
+ │               │ ATHUB SYSHUB   │ PCIE  PCS     │ THM  FUSE  CLKA/CLKB│
+ │               │ HDP  L2IMU     │               │ OSSSYS/IH           │
  ├───────────────┴────────────────┼───────────────┴─────────────────────┤
- │ SECURITY: MP0 / PSP (Cortex-A5)│ MEDIA/DISPLAY/IO: VCN(dead) DMU DIO  │
- │                                │ DAZ  ACP  USB×2  CCP  DBGU  DFX      │
+ │ SECURITY: MP0 / PSP (Cortex-A5)│ MEDIA/DISPLAY/IO: VCN(dead) DMU DIO │
+ │                                │ DAZ  ACP  USB×2  CCP  DBGU  DFX     │
  └────────────────────────────────┴─────────────────────────────────────┘
 
 Full enumeration — hw_id / IP version / instances / status:
@@ -1636,14 +1822,14 @@ Five mailbox queues, each a command/response/argument triple on SMN. Access via 
 indirect (PCI cfg 0xB8/0xBC on 0000:00:00.0) or BAR5 MMIO. The mailbox sits at the MP1
 base (0x16000 dwords = 0x58000 bytes from BAR5); BAR5 is physical 0xFE800000, 512 KiB.
 
-  x86 host                         MP1 / Xtensa LX SMU
+  x86 host                             MP1 / Xtensa LX SMU
  ┌─────────┐   write ARG (C2PMSG_82)   ┌────────────────────────┐
  │ driver  │ ────────────────────────► │ arg register           │
- │  or     │   write MSG (C2PMSG_66)   │  ↓ doorbell             │
+ │ or      │   write MSG (C2PMSG_66)   │  ↓ doorbell            │
  │ SMN/BAR5│ ────────────────────────► │ msg_dispatch (0x0DBC)  │
  │ window  │                           │  ↓ index fn-ptr table  │
- │         │   poll RSP (C2PMSG_90)     │  ↓ check capability    │
- │         │ ◄──────────────────────── │ handler → DPM/SMUIO/    │
+ │         │    poll RSP (C2PMSG_90)   │  ↓ check capability    │
+ │         │ ◄──────────────────────── │ handler → DPM/SMUIO/   │
  └─────────┘                           │           SVI2/PGFSM   │
                                        └────────────────────────┘
 
@@ -2627,8 +2813,8 @@ CP microcode jump-table sizes: MEC = 66,752 entries; ME/PFP/CE = 65,536. The VBI
 at boot from PSP-provided data and exposes it via the ACPI VFCT table; its hash is byte-
 identical across all factory BIOS versions.
 
-SPI flash layout — two SPI NOR chips: BIOS = Winbond W25Q128JVSQ (16 MiB, designator
-BIOS_A1, quad-capable); Super I/O = Macronix MX25L4006E (512 KiB, designator SIO1_R,
+SPI flash layout — two SPI NOR chips: BIOS = BIOS_A1 (16 MiB, quad-capable; typ.
+Winbond W25Q128JVSQ); Super I/O = SIO1_R (512 KiB; typ. Macronix MX25L4006E),
 feeds the NCT6686D — do not flash, no recovery). External programming via the populated
 2.54 mm J4004 SPI header.
 
@@ -3709,11 +3895,11 @@ HMAC-SHA-256 with a hardware-derived key).
 ```
 ── SPI FLASH · WRITE-PROTECT ─────────────────────────────── 16 MiB · no host-side WP ──
 
-The BIOS lives in a 16 MiB Winbond W25Q128JV SOIC-8 SPI flash.  There is no host-side
+The BIOS lives in the 16 MiB SOIC-8 SPI flash (BIOS_A1; typ. Winbond W25Q128JV).  There is no host-side
 write protection: the part is readable and writable from Linux with flashrom.
 
 ┌─ SPI FLASH ──────────────────────────────────────────────────────────────────────────┐
-│  Chip         Winbond W25Q128JVSQ (flashrom: W25Q128JV), SOIC-8                      │
+│  Chip         BIOS_A1 - 16 MiB SOIC-8 (typ. Winbond W25Q128JVSQ; flashrom W25Q128JV) │
 │  Capacity     16 MiB (16,777,216 bytes)                                              │
 │  Memory map   physical address 0xff000000                                            │
 │  Host WP      None (flashrom write+verify succeeds)                                  │
@@ -3957,7 +4143,7 @@ overrides on this hardware; Layer 3 is the safe, reversible surface.
 │                                 boot a snapshot.                                     │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-The 16 MB SPI image (Winbond W25Q128JV) splits into an AMD-PSP-signed region and
+The 16 MB SPI image (BIOS_A1; typ. Winbond W25Q128JV) splits into an AMD-PSP-signed region and
 an unsigned UEFI firmware volume, and this boundary governs what can be changed
 safely:
 
@@ -3972,7 +4158,7 @@ safely:
             │  UEFI BIOS FIRMWARE VOLUME      UNSIGNED — AMI internal CRC32    │
             │   Setup, CbsSetupDxe, …         only.  Safe to reflash + revert. │
             └──────────────────────────────────────────────────────────────────┘
-              Winbond W25Q128JV — 16 MB SPI flash
+              BIOS_A1 - 16 MB SPI flash (typ. Winbond W25Q128JV)
 
 ┌─ MODIFICATION SAFETY ────────────────────────────────────────────────────────────────┐
 │  $KDB key-store edits              FATAL — bricks the board                          │
