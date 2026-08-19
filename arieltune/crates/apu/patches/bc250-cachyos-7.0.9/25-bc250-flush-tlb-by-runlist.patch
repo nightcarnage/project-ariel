@@ -34,8 +34,9 @@ bc250-rocm-gabriwar/patches/bc250-flush-tlb-by-runlist.patch (cec746e):
   the deployed tree)
 - MODULE_PARM_DESC wording is the deployed English translation
 
-Off by default: amdgpu.bc250_flush_by_runlist=1 (set in
-/etc/modprobe.d/bc250-runlist.conf on the blade).
+Off by default: amdgpu.bc250_flush_by_runlist=1. The suite arms it in
+/etc/modprobe.d/aputune-40cu.conf during `aputune build --run` (deployed blades
+carry the same line as /etc/modprobe.d/bc250-runlist.conf).
 
 By Gabriel Duarte Guerra (GabriWar).
 ---

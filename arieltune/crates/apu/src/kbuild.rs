@@ -453,14 +453,14 @@ fn post_extract_plan(
             "set -e; \
              scp {pb_q}/linux-cachyos-*.pkg.tar.zst {tgt}:/tmp/; \
              ssh {tgt} 'sudo pacman -U --noconfirm /tmp/linux-cachyos-*.pkg.tar.zst && \
-               printf \"options amdgpu bc250_cc_write_mode={mode}\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
+               printf \"options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
                sudo mkinitcpio -P && sudo systemctl reboot'"
         )
     } else {
         format!(
             "set -e; \
              sudo pacman -U --noconfirm {pb_q}/linux-cachyos-*.pkg.tar.zst; \
-             printf 'options amdgpu bc250_cc_write_mode={mode}\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
+             printf 'options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
              sudo mkinitcpio -P; \
              echo 'reboot to load the liberated kernel'"
         )
