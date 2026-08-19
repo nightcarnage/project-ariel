@@ -280,6 +280,10 @@ pub struct ApuScreen {
     core_draft: Option<[bool; 8]>,
     cores_report: Option<Vec<String>>,
     cores_verify_job: Option<JoinHandle<Result<Vec<String>>>>,
+    /// Two-step guard for the FORCED firmware unlock ([F]): the q3 0x98 write
+    /// is all-or-nothing and bypasses the 0x77 safety gate, so a warning popup
+    /// must be answered before anything is sent to the SMU.
+    core_force_confirm: bool,
 }
 
 /// SoC package power (W) from the amdgpu hwmon, if exposed. Filtered to the
@@ -444,6 +448,7 @@ impl ApuScreen {
             core_draft: None,
             cores_report: None,
             cores_verify_job: None,
+            core_force_confirm: false,
         }
     }
 
@@ -739,10 +744,11 @@ impl Screen for ApuScreen {
         self.exit();
     }
 
-    /// The [p] patch popup and any in-progress field edit are modal sub-states:
-    /// while in one the shell must NOT steal global switch/quit keys.
+    /// The [p] patch popup, the [F] force-unlock confirm, and any in-progress
+    /// field edit are modal sub-states: while in one the shell must NOT steal
+    /// global switch/quit keys.
     fn modal(&self) -> bool {
-        self.patch_popup.is_some() || matches!(self.edit, Edit::Value(_))
+        self.patch_popup.is_some() || self.core_force_confirm || matches!(self.edit, Edit::Value(_))
     }
 
     fn status_hint(&self) -> Option<String> {
@@ -760,7 +766,7 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
     let code = key.code;
     // While modal (popup open OR mid-edit) the pane owns every key — never leak
     // to the shell's global bindings.
-    let is_modal = app.patch_popup.is_some() || matches!(app.edit, Edit::Value(_));
+    let is_modal = app.patch_popup.is_some() || app.core_force_confirm || matches!(app.edit, Edit::Value(_));
     if !is_modal {
         // The shell's global keys reach it only via Ignored: modified keys
         // (Ctrl-Q quit, Ctrl-Tab cycle, Alt-1..4 jump), the function keys (F1-F4),
@@ -788,6 +794,28 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
 /// popup, the global focus binds, and the focused panel. Every branch is
 /// pane-internal (the caller returns Consumed).
 fn dispatch_key(app: &mut ApuScreen, code: KeyCode) {
+    // Forced-unlock confirmation popup: while armed it owns EVERY key until
+    // answered — [y] writes, [esc]/[n] cancels, anything else is ignored.
+    if app.core_force_confirm {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.core_force_confirm = false;
+                app.status = match crate::cores::apply(false, true) {
+                    Ok(()) => {
+                        app.snap = gather();
+                        "FORCED UNLOCK OK — mask 0xFF written and verified; cores appear after a WARM reboot ([q] quit, then 'sudo systemctl reboot')".into()
+                    }
+                    Err(e) => format!("forced unlock FAILED: {e}"),
+                };
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.core_force_confirm = false;
+                app.status = "forced unlock cancelled — nothing was written".into();
+            }
+            _ => {}
+        }
+        return;
+    }
     // Modal patch popup: while open it owns EVERY key — nothing falls through
     // to the global or per-panel handlers, and [q] closes rather than quits.
     if app.patch_popup.is_some() {
@@ -1361,7 +1389,24 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
                     app.status = "mask set — warm reboot needed to enumerate".into()
                 }
                 crate::cores::CoreState::Abnormal(m) => {
-                    app.status = format!("refusing: abnormal mask 0x{m:02X}")
+                    app.status = format!(
+                        "refusing: abnormal mask 0x{m:02X} — safe path only; [F] force-unlock (EXPERIMENTAL, with warning)"
+                    )
+                }
+            },
+        },
+        KeyCode::Char('F') => match &app.snap.cores {
+            None => app.status = "core map unavailable (need root + BC-250)".into(),
+            Some(cs) => match cs.state {
+                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
+                crate::cores::CoreState::PendingReboot => {
+                    app.status = "mask already 0xFF — warm reboot needed to enumerate".into()
+                }
+                crate::cores::CoreState::Locked | crate::cores::CoreState::Abnormal(_) => {
+                    app.core_force_confirm = true;
+                    app.status =
+                        "forced unlock armed — confirm [y] to write 0xFF, [esc] to cancel"
+                            .into();
                 }
             },
         },
@@ -1543,7 +1588,9 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
     // show the EDIT keys — most importantly [esc] cancel, so you can back out of
     // e.g. a `force` edit without committing a clock you didn't want.
     let editing = matches!(app.edit, Edit::Value(_));
-    let keys: &[(&str, &str)] = if app.patch_popup.is_some() {
+    let keys: &[(&str, &str)] = if app.core_force_confirm {
+        &[("[y]", "write 0xFF (forced)"), ("[esc]", "cancel")]
+    } else if app.patch_popup.is_some() {
         &[
             ("[up/dn]", "scroll"),
             ("[pgup/pgdn]", "page"),
@@ -1617,6 +1664,9 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
     // Modal overlay LAST so it paints on top of every panel.
     if app.patch_popup.is_some() {
         draw_patch_popup(f, app);
+    }
+    if app.core_force_confirm {
+        draw_core_force_popup(f, app);
     }
 }
 
@@ -1755,6 +1805,74 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// The [F] modal: a centered warning explaining the forced unlock before the
+/// SMU write. Renders from live state only (the current mask) — no fs reads.
+fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
+    let mask = app.snap.cores.as_ref().map(|c| c.mask).unwrap_or(0);
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(74)])
+        .flex(Flex::Center)
+        .split(f.area());
+    let rect = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(10)])
+        .flex(Flex::Center)
+        .split(horiz[0])[0];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WARN))
+        .title(Span::styled(
+            " FORCED UNLOCK — EXPERIMENTAL ",
+            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+        ));
+    let text = vec![
+        Line::from(vec![
+            Span::styled("Current mask ", Style::default().fg(DIM)),
+            Span::styled(
+                format!("0x{mask:02X}"),
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " is NOT the known stock 0x77 — the safety gate",
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from("refuses it by design. The q3 0x98 write is all-or-nothing:"),
+        Line::from("it stores 0xFF (all 8 cores) regardless of the mask read."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[y] write now  ",
+                Style::default().fg(GOOD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "cores appear after a WARM reboot; a cold boot",
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "    reverts to this board's own mask. Power/thermal envelope changes.",
+            Style::default().fg(DIM),
+        )),
+        Line::from(vec![
+            Span::styled(
+                "[esc] cancel  ",
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "nothing is written.",
+                Style::default().fg(DIM),
+            ),
+        ]),
+    ];
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(text), inner);
 }
 
 /// The [p] modal: a centered scrollable popup detailing every member of the
@@ -2487,7 +2605,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] force-unlock · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists

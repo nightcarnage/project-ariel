@@ -105,9 +105,11 @@ now has an escape hatch:
 - **Code**: `OcQ3::unlock_cores_any()` in `crates/ariel-smu/src/ocq3.rs` —
   skips the 0x77 check but keeps the same all-or-nothing q3 0x98 write and
   the 0xFF readback verify. Wired as `arieltune apu cores apply
-  --force-abnormal` (`crates/apu/src/{cli,cores}.rs`); `boot`/unit path
-  unchanged (no force at boot, per design). `unlock_cores()` default refusal
-  intact. Tests 37/37 green.
+  --force-abnormal` (`crates/apu/src/{cli,cores}.rs`) and as the TUI Cores
+  panel `[F] force-unlock` key (warning popup + `[y]`/`[esc]` confirm, no
+  auto-reboot — `crates/apu/src/screen.rs`). `boot`/unit path unchanged (no
+  force at boot, per design). `unlock_cores()` default refusal intact.
+  Tests 37/37 green.
 - **Result on blade 115**: `apply --force-abnormal --reboot` wrote and
   verified 0xFF; warm reboot into pinned `snap-59cee34a` came back clean —
   mask `0xFF`, all 8 cores / 16 threads visible, 0 offline, 0 MCE entries,
