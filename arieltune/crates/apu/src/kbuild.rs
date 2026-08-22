@@ -369,6 +369,12 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
 /// Required (binary, package) pairs for a build on THIS host. `local_install`
 /// is true when `opts.target` is None (the install/mkinitcpio steps run on
 /// this host too, not on a remote target).
+///
+/// The CachyOS 7.0.9 PKGBUILD compiles with clang + thinLTO and has
+/// CONFIG_RUST=y, and both makepkg steps run with --nodeps, so every
+/// makedepend must be checked here — a missing clang/bindgen otherwise only
+/// surfaces deep into the ~30 minute build. `rust-src` is a directory
+/// component, not a binary; it is probed separately in `preflight_deps`.
 fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
     let cxx = opts.cc.replace("gcc", "g++");
     let mut req = vec![
@@ -378,6 +384,23 @@ fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
         ("bc".to_string(), "bc".to_string()),
         ("patch".to_string(), "base-devel".to_string()),
         ("make".to_string(), "base-devel".to_string()),
+        // clang + thinLTO toolchain (PKGBUILD passes CC=clang LLVM=1
+        // LLVM_IAS=1 as make args, overriding the environment). LLVM=1
+        // remaps the whole binutils toolchain too — llvm-ar/llvm-nm/
+        // llvm-objcopy/llvm-strip/llvm-readelf all ship in the `llvm`
+        // package, which `clang` does NOT pull in on Arch/CachyOS
+        // (only llvm-libs). A missing one fails deep into the build.
+        ("clang".to_string(), "clang".to_string()),
+        ("ld.lld".to_string(), "lld".to_string()),
+        ("llvm-ar".to_string(), "llvm".to_string()),
+        ("llvm-nm".to_string(), "llvm".to_string()),
+        ("llvm-objcopy".to_string(), "llvm".to_string()),
+        ("llvm-strip".to_string(), "llvm".to_string()),
+        ("llvm-readelf".to_string(), "llvm".to_string()),
+        ("pahole".to_string(), "pahole".to_string()),
+        // CONFIG_RUST=y in the shipped 7.0.9 config.
+        ("rustc".to_string(), "rust".to_string()),
+        ("bindgen".to_string(), "rust-bindgen".to_string()),
     ];
     if opts.target.is_none() {
         req.push(("mkinitcpio".to_string(), "mkinitcpio".to_string()));
@@ -446,6 +469,25 @@ fn preflight_deps(opts: &BuildOpts) -> Result<()> {
         .map(|(bin, pkg)| (bin.as_str(), pkg.as_str()))
         .collect();
     let missing = missing_deps(&required_refs, &path_has);
+    // rust-src is a directory component, not a binary: the kernel Rust build
+    // (CONFIG_RUST=y) needs it to compile the `core` crate. It lives in the
+    // sysroot of the rustc that preflight just verified, so probe there rather
+    // than a hardcoded path — pacman rust (sysroot /usr) and rustup
+    // (sysroot ~/.rustup/toolchains/...) both resolve correctly.
+    let mut missing = missing;
+    let rust_src_ok = Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .map(|o| {
+            Path::new(std::str::from_utf8(&o.stdout).unwrap_or("").trim())
+                .join("lib/rustlib/src")
+                .is_dir()
+        })
+        .unwrap_or(false);
+    if !rust_src_ok {
+        missing.push(("rust-src".to_string(), "rust-src".to_string()));
+    }
     if missing.is_empty() {
         println!("preflight: all build dependencies present");
         return Ok(());
@@ -834,6 +876,32 @@ mod tests {
         };
         let names: Vec<String> = required_deps(&remote).into_iter().map(|(b, _)| b).collect();
         assert!(!names.contains(&"mkinitcpio".to_string()));
+    }
+
+    #[test]
+    fn required_deps_include_llvm_rust_toolchain() {
+        let local = BuildOpts {
+            target: None,
+            ..Default::default()
+        };
+        let names: Vec<String> = required_deps(&local).into_iter().map(|(b, _)| b).collect();
+        for need in [
+            "clang",
+            "ld.lld",
+            "llvm-ar",
+            "llvm-nm",
+            "llvm-objcopy",
+            "llvm-strip",
+            "llvm-readelf",
+            "pahole",
+            "rustc",
+            "bindgen",
+        ] {
+            assert!(
+                names.contains(&need.to_string()),
+                "missing preflight dep: {need}"
+            );
+        }
     }
 
     #[test]
