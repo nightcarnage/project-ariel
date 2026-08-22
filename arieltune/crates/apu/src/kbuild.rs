@@ -28,6 +28,12 @@ use crate::patches;
 /// initial grace so the online-poll can't catch the OLD system in the seconds
 /// before `systemctl reboot` actually drops the link, then bounded polling.
 const VERIFY_REBOOT_GRACE_S: u64 = 30;
+
+/// The BIOS UMA frame-buffer carve the liberation series is validated at
+/// (512M). Other carves break IP discovery ("invalid ip discovery binary
+/// signature") and every PSP firmware load (LOAD_IP_FW 0xFFFF0008) in ways
+/// that look like patch bugs.
+const BC250_UMA_MB: u64 = 512;
 /// Total wall-clock budget for the node to come back after the grace.
 const VERIFY_POLL_TIMEOUT_S: u64 = 300;
 /// Fixed delay between online polls.
@@ -506,6 +512,83 @@ fn preflight_deps(opts: &BuildOpts) -> Result<()> {
     Ok(())
 }
 
+/// Read the BC-250's UMA frame-buffer carve in MB from the RCC_CONFIG_MEMSIZE
+/// MMIO register (register index 0xde3, one MB per unit), which the SMU
+/// programs from the BIOS UMA setting. The build runs as root, so /dev/mem is
+/// readable on the default CachyOS config (CONFIG_STRICT_DEVMEM off).
+///
+/// Returns Ok(None) when the host is not a BC-250 (nothing to check, e.g. a
+/// remote-build builder box), and Err when it IS a BC-250 but the read failed.
+/// Find the BC-250 APU (PCI 1002:13fe) by scanning the PCI device tree — the
+/// same discovery `ariel_apu_present` uses — instead of assuming a fixed BDF.
+/// A BIOS/enumeration change would otherwise make the UMA gate silently skip
+/// exactly when it matters most.
+fn bc250_pci_path() -> Option<PathBuf> {
+    let entries = fs::read_dir("/sys/bus/pci/devices").ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Ok(vendor) = fs::read_to_string(p.join("vendor")) else {
+            continue;
+        };
+        let Ok(device) = fs::read_to_string(p.join("device")) else {
+            continue;
+        };
+        if vendor.trim() == "0x1002" && device.trim() == "0x13fe" {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn bc250_uma_mb() -> Result<Option<u64>> {
+    let Some(pci) = bc250_pci_path() else {
+        return Ok(None);
+    };
+    let res = fs::read_to_string(pci.join("resource")).context("read PCI resource")?;
+    let mmio_base = res
+        .lines()
+        .nth(5) // resource5 = the 512K MMIO BAR (0xfe800000 on the BC-250)
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .context("MMIO BAR base")?;
+    use std::os::unix::fs::FileExt;
+    let mem = std::fs::File::open("/dev/mem").context("open /dev/mem")?;
+    let mut buf = [0u8; 4];
+    mem.read_exact_at(&mut buf, mmio_base + 0xde3 * 4)
+        .context("read RCC_CONFIG_MEMSIZE")?;
+    Ok(Some(u32::from_le_bytes(buf) as u64))
+}
+
+/// Gate the build on the BIOS UMA carve. A wrong carve is a build-host
+/// configuration problem that surfaces as driver init failures deep in
+/// validation (discovery/PSP), so catch it before the ~30 minute build.
+fn preflight_uma(opts: &BuildOpts) -> Result<()> {
+    match bc250_uma_mb() {
+        Ok(None) => Ok(()),
+        Ok(Some(BC250_UMA_MB)) => {
+            println!("preflight: UMA frame buffer 512M (expected)");
+            Ok(())
+        }
+        Ok(Some(mb)) => {
+            let msg = format!(
+                "UMA frame buffer is {mb}M — the liberation series expects {BC250_UMA_MB}M. \
+                 Wrong UMA breaks IP discovery ('invalid ip discovery binary signature') \
+                 and PSP firmware loads (LOAD_IP_FW 0xFFFF0008), which look like patch \
+                 bugs. Fix in BIOS: UMA Frame Buffer Size = {BC250_UMA_MB}M."
+            );
+            if opts.run {
+                bail!("{msg}");
+            }
+            println!("\nWARNING: {msg}");
+            Ok(())
+        }
+        Err(e) => {
+            println!("preflight: could not read UMA size ({e:#}) — skipping UMA check");
+            Ok(())
+        }
+    }
+}
+
 /// The extract step (makepkg -o). Integrity checks are NOT skipped: a kernel
 /// source that fails its checksums must stop the build, not get patched and
 /// installed anyway.
@@ -650,6 +733,9 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     // the kernel build deps, so check them ourselves before any heavy work:
     // a missing gcc-15 or bc otherwise only surfaces ~40 minutes in.
     preflight_deps(&opts)?;
+    // The BIOS UMA carve gate: a wrong carve breaks IP discovery and PSP
+    // firmware loads in ways that look like patch bugs (see preflight_uma).
+    preflight_uma(&opts)?;
     // makepkg refuses root, and arieltune is root-only: when invoked as root
     // the build steps drop to the PKGBUILD dir's owner.
     let drop_uid = resolve_drop_uid(&pkgbuild)?;
