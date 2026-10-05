@@ -5,7 +5,7 @@
 //! a patched kernel package and installs it, following the validated flow:
 //!
 //!   1. materialize the embedded patches to the work dir
-//!   2. extract + prepare the CachyOS source via the PKGBUILD (makepkg -o)
+//!   2. extract + prepare the CachyOS source via the PKGBUILD (makepkg -o -C)
 //!   3. apply each patch with `patch -p1` into the extracted tree
 //!   4. rebuild the package: `makepkg -e --noextract --noprepare ...` (CC=gcc-15)
 //!   5. install the package (locally or to a remote target), set the modprobe.d
@@ -50,6 +50,25 @@ const NO_PKGBUILD_HINT: &str = "get one with:\n  \
     git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1\n  \
     aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run\n\
     (README: \"Liberation quick start\", step 2)";
+
+/// The Rust target-spec ABI value older kernels hard-code in
+/// `scripts/generate_rust_target.rs`. rustc has since renamed it and rejects
+/// the old spelling outright.
+const LEGACY_RUSTC_ABI: &str = "x86-softfloat";
+
+/// The ABI value rustc uses today. Kept next to the legacy one so the pair is
+/// obvious to anyone reading the rename patch.
+const CURRENT_RUSTC_ABI: &str = "softfloat";
+
+/// Filename of the fix as it appears in `source[]`, and how an already-applied
+/// shim is recognised.
+const RUST_ABI_PATCH_NAME: &str = "0002-rust-abi-rename.patch";
+
+/// The fix itself, embedded like the liberation series. It is deliberately NOT
+/// in `patches::SERIES`: that series unlocks silicon and every member carries a
+/// runtime tell, whereas this is toolchain plumbing with nothing to detect — so
+/// it must never be counted by `aputune patches`.
+const RUST_ABI_PATCH: &str = include_str!("../patches/rust-abi-rename.patch");
 
 pub struct BuildOpts {
     /// Directory holding the CachyOS PKGBUILD (+ source tarball, or makepkg
@@ -400,6 +419,10 @@ fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
         ("bc".to_string(), "bc".to_string()),
         ("patch".to_string(), "base-devel".to_string()),
         ("make".to_string(), "base-devel".to_string()),
+        // b2sum (coreutils): the Rust-ABI shim hashes the patch it injects into
+        // the PKGBUILD. Neither this path nor arieltune's makepkg steps skip
+        // source integrity, so the hash is load-bearing, not decorative.
+        ("b2sum".to_string(), "coreutils".to_string()),
         // clang + thinLTO toolchain (PKGBUILD passes CC=clang LLVM=1
         // LLVM_IAS=1 as make args, overriding the environment). LLVM=1
         // remaps the whole binutils toolchain too — llvm-ar/llvm-nm/
@@ -473,7 +496,7 @@ fn missing_deps_message(missing: &[(String, String)]) -> String {
 }
 
 /// Pre-flight the build-tool dependencies on THIS host, before any heavy
-/// work (materialize/extract). `makepkg -o --nodeps` / `makepkg -e ...
+/// work (materialize/extract). `makepkg -o -C --nodeps` / `makepkg -e ...
 /// --nodeps` never ask pacman to check these, so a missing `gcc-15` or `bc`
 /// otherwise only surfaces ~40 minutes into the build. In `--run` mode a
 /// missing dependency aborts in seconds with the exact install line; in
@@ -608,16 +631,211 @@ fn preflight_uma(opts: &BuildOpts) -> Result<()> {
     }
 }
 
-/// The extract step (makepkg -o). Integrity checks are NOT skipped: a kernel
+/// The extract step (makepkg -o -C). Integrity checks are NOT skipped: a kernel
 /// source that fails its checksums must stop the build, not get patched and
 /// installed anyway.
+///
+/// `-C` is load-bearing, not tidiness. `makepkg -o` extracts over whatever
+/// `$srcdir` already holds, and the CachyOS `prepare()` applies its patch stack
+/// with `patch -Np1`. On an already-patched tree every hunk reads as previously
+/// applied, `patch` exits non-zero, and `prepare()` aborts the build — so a
+/// second run, a retry after a failure, or a source version bump in the same
+/// PKGBUILD dir dies on a stale tree rather than on anything real. Wiping
+/// `$srcdir` first makes extraction deterministic.
 fn extract_step(pkgbuild: &Path, uid: Option<u32>) -> Step {
     step(
-        "extract + prepare CachyOS source (makepkg -o)",
+        "extract + prepare CachyOS source (makepkg -o -C)",
         pkgbuild,
-        &["makepkg", "-o", "--nodeps", "--noconfirm"],
+        &["makepkg", "-o", "-C", "--nodeps", "--noconfirm"],
     )
     .with_uid(uid)
+}
+
+// ---------------------------------------------------------------------------
+// Kernel Rust vs. the installed rustc — fix it, never disable it.
+//
+// Older kernels hard-code the Rust target-spec ABI spelling in
+// `scripts/generate_rust_target.rs` (`x86-softfloat`); rustc has since renamed
+// that value to `softfloat` and refuses the old one outright:
+//
+//   error loading target specification: rustc-abi: invalid rustc abi:
+//   'x86-softfloat'. allowed values: 'x86-sse2', 'powerpc-spe', 'softfloat'
+//
+// (`x86-sse2` is listed but is NOT the replacement — x86-64 rejects it with
+// "invalid x86-64 Rust-specific ABI and `cfg(target_abi)` combination".)
+//
+// The CachyOS config ships `CONFIG_RUST=y`, so every makepkg step dies inside
+// prepare() (rust/Makefile -> rust/core.o) before anything is built. This is
+// pure toolchain skew: no liberation patch and no CachyOS patch is involved.
+// ---------------------------------------------------------------------------
+
+/// Ask rustc whether it still accepts `LEGACY_RUSTC_ABI`.
+///
+/// Probed, never inferred from a version table: rustc's own builtin
+/// `x86_64-unknown-none` spec is read, the ABI value is forced to the legacy
+/// spelling, and rustc is asked to load the result. A kernel new enough to have
+/// dropped `rustc-abi` altogether also lands here, because the key is
+/// *inserted* when absent — the value is still tested. That is what makes this
+/// correct on future kernels with no edit to this file.
+///
+/// `Ok(true)` = the installed rustc is happy; there is nothing to do.
+fn rustc_accepts_legacy_abi(probe: &Path) -> Result<bool> {
+    let base = rustc_unstable(&[
+        "--print",
+        "target-spec-json",
+        "--target",
+        "x86_64-unknown-none",
+    ])?;
+    if !base.status.success() {
+        bail!(
+            "rustc could not print its x86_64-unknown-none target spec:\n{}",
+            String::from_utf8_lossy(&base.stderr).trim()
+        );
+    }
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(&base.stdout).context("parse the target spec rustc printed")?;
+    // Indexing a JSON object cannot create a duplicate key, so this substitutes
+    // where the key exists and inserts where it does not — the two real cases,
+    // with no way to hand rustc a spec it rejects for the wrong reason.
+    spec["rustc-abi"] = serde_json::Value::String(LEGACY_RUSTC_ABI.into());
+    // rustc reads the argument as a target NAME unless it ends in `.json`.
+    fs::write(probe, serde_json::to_vec(&spec)?)
+        .with_context(|| format!("write {}", probe.display()))?;
+    let loaded = rustc_unstable(&["--target", &probe.display().to_string(), "--print", "cfg"])?;
+    Ok(loaded.status.success())
+}
+
+/// Run rustc with the unstable switch needed to load a target spec from a file.
+/// `RUSTC_BOOTSTRAP=1` is how the kernel's own build opts in; without it a
+/// release toolchain ignores `-Z unstable-options`.
+fn rustc_unstable(args: &[&str]) -> Result<std::process::Output> {
+    Command::new("rustc")
+        .env("RUSTC_BOOTSTRAP", "1")
+        .args(["-Z", "unstable-options"])
+        .args(args)
+        .output()
+        .context("run rustc (needed to probe the Rust target ABI)")
+}
+
+/// `b2sum` (coreutils) over one file, first field.
+fn b2sum(path: &Path) -> Result<String> {
+    let out = Command::new("b2sum")
+        .arg(path)
+        .output()
+        .with_context(|| "run b2sum (coreutils) to hash the injected patch")?;
+    if !out.status.success() {
+        bail!("b2sum {} failed", path.display());
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .with_context(|| format!("b2sum {} produced no hash", path.display()))
+}
+
+/// Puts the PKGBUILD back byte for byte when the build ends — success or
+/// failure. The shim is build plumbing, not a change to the operator's tree:
+/// leaving it behind would make the next `git diff` in their pinned kernel
+/// checkout look like they had edited a PKGBUILD by hand.
+struct ShimGuard {
+    pkgbuild: PathBuf,
+    patch: PathBuf,
+    original: String,
+}
+
+impl Drop for ShimGuard {
+    fn drop(&mut self) {
+        if let Err(e) = fs::write(&self.pkgbuild, &self.original) {
+            eprintln!(
+                "warning: could not restore {} ({e}); remove the {RUST_ABI_PATCH_NAME} entry \
+                 from source[] and b2sums[] by hand",
+                self.pkgbuild.display()
+            );
+        }
+        let _ = fs::remove_file(&self.patch);
+    }
+}
+
+/// Inject `RUST_ABI_PATCH_NAME` into the PKGBUILD so kernel Rust still compiles.
+///
+/// The extract step (`makepkg -o`) runs `prepare()`, and that is where the build
+/// dies — so unlike the liberation series, the fix cannot be applied to the
+/// extracted tree afterwards. It has to travel through `source[]`: the
+/// PKGBUILD's own `prepare()` applies every `*.patch` in it (`patch -Np1 <
+/// ../$src`) *before* `make prepare` reaches `rust/core.o`.
+///
+/// The patch entry and its hash both go directly after the `config` entry, which
+/// keeps `source[]` and `b2sums[]` index-aligned — makepkg requires that
+/// correspondence.
+///
+/// `Ok(None)` = already shimmed (an earlier run, or by hand): nothing to do and
+/// — deliberately — nothing to undo, because this run did not change it.
+fn shim_pkgbuild(pkgbuild_dir: &Path) -> Result<Option<ShimGuard>> {
+    let pkgbuild = pkgbuild_dir.join("PKGBUILD");
+    let original =
+        fs::read_to_string(&pkgbuild).with_context(|| format!("read {}", pkgbuild.display()))?;
+    if original.contains(RUST_ABI_PATCH_NAME) {
+        return Ok(None);
+    }
+    let config = pkgbuild_dir.join("config");
+    if !config.is_file() {
+        bail!(
+            "no `config` next to {} — the kernel build needs the CachyOS linux-cachyos-* \
+             PKGBUILD dir",
+            pkgbuild.display()
+        );
+    }
+
+    // A local file in source[]: makepkg copies it into $srcdir itself, and
+    // checksums it from b2sums[].
+    let patch = pkgbuild_dir.join(RUST_ABI_PATCH_NAME);
+    fs::write(&patch, RUST_ABI_PATCH).with_context(|| format!("write {}", patch.display()))?;
+    let patch_hash = b2sum(&patch)?;
+
+    let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
+    // The config is the last entry of the literal `source=(...)`, so the array
+    // close sits on its line: `    "config")`.
+    let anchor = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim_start();
+            t.starts_with("\"config\"") && t.ends_with(')')
+        })
+        .with_context(|| {
+            format!(
+                "no `\"config\")` entry in {} — add {RUST_ABI_PATCH_NAME} to source[] and its \
+                 b2sum to b2sums[] by hand",
+                pkgbuild.display()
+            )
+        })?;
+    lines[anchor] = lines[anchor].replacen(
+        "\"config\"",
+        &format!("\"config\"\n    \"{RUST_ABI_PATCH_NAME}\""),
+        1,
+    );
+
+    let cfg_hash = b2sum(&config)?;
+    let cfg_line = lines
+        .iter()
+        .position(|l| l.contains(&cfg_hash))
+        .with_context(|| {
+            format!(
+                "the config b2sum ({cfg_hash}) is not in {} — add '{patch_hash}' to b2sums[] by \
+                 hand",
+                pkgbuild.display()
+            )
+        })?;
+    lines.insert(cfg_line + 1, format!("        '{patch_hash}'"));
+
+    let mut shimmed = lines.join("\n");
+    shimmed.push('\n');
+    fs::write(&pkgbuild, shimmed).with_context(|| format!("write {}", pkgbuild.display()))?;
+
+    Ok(Some(ShimGuard {
+        pkgbuild,
+        patch,
+        original,
+    }))
 }
 
 /// Steps AFTER extraction: patch apply (argv `patch`, no shell), rebuild,
@@ -751,7 +969,7 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
-    // `makepkg -o --nodeps` / `makepkg -e ... --nodeps` never let pacman check
+    // `makepkg -o -C --nodeps` / `makepkg -e ... --nodeps` never let pacman check
     // the kernel build deps, so check them ourselves before any heavy work:
     // a missing gcc-15 or bc otherwise only surfaces ~40 minutes in.
     preflight_deps(&opts)?;
@@ -778,6 +996,57 @@ pub fn build(opts: BuildOpts) -> Result<()> {
         patches::count(),
         patch_dir.display()
     );
+
+    // Kernel Rust vs. the installed rustc. Probed, so a newer kernel that no
+    // longer needs the fix is a no-op. `_abi_shim` exists only to keep the
+    // guard alive: it restores the PKGBUILD when build() returns, success or
+    // failure, so the operator's pinned checkout is left as it was found.
+    //
+    // The probe only means anything when rustc is on PATH — and it is the right
+    // rustc, because the steps below inherit THIS process's PATH when they drop
+    // to the build uid. Without it, `preflight_deps` has already reported it
+    // (and aborts in --run), so probing here would only bury that message under
+    // a second, more confusing failure.
+    let mut _abi_shim: Option<ShimGuard> = None;
+    if !path_has("rustc") {
+        println!(
+            "kernel Rust: rustc is not on PATH — skipped the target-ABI check (see the \
+             missing-dependency report above)"
+        );
+    } else {
+        let abi_probe = work_dir.join("rustc-abi-probe.json");
+        let abi_ok = rustc_accepts_legacy_abi(&abi_probe)?;
+        let _ = fs::remove_file(&abi_probe);
+        if abi_ok {
+            println!("kernel Rust: rustc accepts the kernel's target ABI ({CURRENT_RUSTC_ABI})");
+        } else if opts.run {
+            // `Ok(None)` means the shim was already in the PKGBUILD: an earlier
+            // run that was interrupted, or an operator who applied it by hand.
+            // Nothing is injected and no guard is taken, so this path must not
+            // claim either — it reports what it found and changes nothing.
+            match shim_pkgbuild(&pkgbuild)? {
+                Some(guard) => {
+                    _abi_shim = Some(guard);
+                    println!(
+                        "kernel Rust: rustc rejects the kernel's target ABI ({LEGACY_RUSTC_ABI}) — \
+                         injected {RUST_ABI_PATCH_NAME}; CONFIG_RUST stays on and the PKGBUILD is \
+                         restored when this build ends"
+                    );
+                }
+                None => println!(
+                    "kernel Rust: rustc rejects the kernel's target ABI ({LEGACY_RUSTC_ABI}) — \
+                     {RUST_ABI_PATCH_NAME} is already in {} (an earlier run, or applied by hand); \
+                     leaving it in place — this build neither added nor will remove it",
+                    pkgbuild.display()
+                ),
+            }
+        } else {
+            println!(
+                "kernel Rust: rustc rejects the kernel's target ABI ({LEGACY_RUSTC_ABI}) — the \
+                 run will inject {RUST_ABI_PATCH_NAME} so kernel Rust still compiles"
+            );
+        }
+    }
 
     let extract = extract_step(&pkgbuild, drop_uid);
 
@@ -858,6 +1127,75 @@ mod tests {
         // Issue #27: 40-CU routing is opt-in. A default build must NOT arm it;
         // callers set cc_mode=3 explicitly (`build --full` / liberate `full`).
         assert_eq!(BuildOpts::default().cc_mode, 0);
+    }
+
+    #[test]
+    fn extract_step_wipes_srcdir_first() {
+        // A stale $srcdir makes `makepkg -o` extract over the previous tree, so
+        // the CachyOS prepare() patch stack sees every hunk as already applied
+        // and aborts. Extraction has to start from a clean $srcdir.
+        let extract = extract_step(Path::new("/tmp/some-pkgbuild"), None);
+        assert!(
+            extract.argv.iter().any(|a| a == "-C"),
+            "extract step must clean $srcdir, got {:?}",
+            extract.argv
+        );
+        assert!(extract.argv.iter().any(|a| a == "-o"));
+    }
+
+    #[test]
+    fn shim_pkgbuild_is_aligned_idempotent_and_reversible() {
+        let dir = std::env::temp_dir().join(format!("aputune-shim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let config = dir.join("config");
+        fs::write(&config, "CONFIG_RUST=y\n").unwrap();
+        let cfg_hash = b2sum(&config).unwrap();
+
+        let pkgbuild = dir.join("PKGBUILD");
+        let original = format!(
+            "pkgname=linux-cachyos-bore\nsource=(\"https://example/linux.tar.xz\"\n    \"config\")\nb2sums=('aa'\n        '{cfg_hash}')\n"
+        );
+        fs::write(&pkgbuild, &original).unwrap();
+
+        let guard = shim_pkgbuild(&dir)
+            .unwrap()
+            .expect("first call applies the shim");
+        let shimmed = fs::read_to_string(&pkgbuild).unwrap();
+
+        // The patch lands directly after the config entry in BOTH arrays, so
+        // they stay index-aligned (makepkg pairs them element for element).
+        let anchor = shimmed
+            .lines()
+            .position(|l| l.trim() == "\"config\"")
+            .expect("config entry split onto its own line");
+        assert_eq!(
+            shimmed.lines().nth(anchor + 1).unwrap(),
+            format!("    \"{RUST_ABI_PATCH_NAME}\")")
+        );
+        let patch_hash = b2sum(&dir.join(RUST_ABI_PATCH_NAME)).unwrap();
+        let cfg_line = shimmed.lines().position(|l| l.contains(&cfg_hash)).unwrap();
+        assert_eq!(
+            shimmed.lines().nth(cfg_line + 1).unwrap(),
+            format!("        '{patch_hash}'")
+        );
+
+        // Already shimmed: no second entry, and nothing to undo.
+        assert!(shim_pkgbuild(&dir).unwrap().is_none());
+
+        drop(guard);
+        assert_eq!(
+            fs::read_to_string(&pkgbuild).unwrap(),
+            original,
+            "PKGBUILD restored byte for byte"
+        );
+        assert!(
+            !dir.join(RUST_ABI_PATCH_NAME).exists(),
+            "injected patch removed"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

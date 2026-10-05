@@ -1,11 +1,17 @@
 GPL-2.0 NOTICE -- BC-250 amdgpu liberation patch series
 ========================================================
 
-The patch files in this directory (`bc250-cachyos-7.0.9/*.patch`) are diffs
-against the Linux kernel (the amdgpu driver / AMD SMU code). Because they are
-derivative works of the Linux kernel, they are licensed GPL-2.0-only — the same
-license as the code they modify and the same license as this project
-(GPL-2.0-only, matching upstream cachenetics/project-ariel).
+The patch files here — the liberation series in `bc250-cachyos-7.0.9/*.patch`
+and the build-plumbing `rust-abi-rename.patch` — are diffs against the Linux
+kernel (the amdgpu driver / AMD SMU code, and the Rust target-spec generator).
+Because they are derivative works of the Linux kernel, they are licensed
+GPL-2.0-only — the same license as the code they modify and the same license as
+this project (GPL-2.0-only, matching upstream cachenetics/project-ariel).
+
+`rust-abi-rename.patch` is NOT a member of the liberation series: it unlocks no
+silicon and carries no runtime tell, so `aputune patches` never counts it. It
+only renames the Rust target-spec ABI value that older kernels hard-code to the
+spelling rustc uses today, so kernel Rust keeps compiling on a newer toolchain.
 
 - Base work: the Linux kernel (https://kernel.org), GPL-2.0, (c) its many
   contributors; the CachyOS patch set (https://github.com/CachyOS).

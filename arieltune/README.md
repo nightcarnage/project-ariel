@@ -45,6 +45,48 @@ sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bind
 aborts in seconds with the exact missing packages instead of failing deep into the
 ~30 minute build.
 
+#### Kernel Rust on a newer rustc
+
+The shipped 7.0.9 config has `CONFIG_RUST=y`, and older kernels hard-code the Rust
+target-spec ABI in `scripts/generate_rust_target.rs` as `x86-softfloat` — a
+spelling rustc has since renamed to `softfloat`. A rustc new enough to reject the
+old name kills the build before it produces anything, inside `prepare()`
+(`rust/Makefile` -> `rust/core.o`):
+
+```
+error: error loading target specification: rustc-abi: invalid rustc abi:
+'x86-softfloat'. allowed values: 'x86-sse2', 'powerpc-spe', 'softfloat'
+```
+
+`x86-sse2` appears in that list but is **not** the replacement — x86-64 rejects it
+with *invalid x86-64 Rust-specific ABI and `cfg(target_abi)` combination*.
+`softfloat` is the renamed value, and is what rustc's own builtin
+`x86_64-unknown-none` spec already carries.
+
+This is toolchain skew, not a project-ariel bug: `rust`, `rust-bindgen` and
+`rust-src` are installed exactly as documented above, and the build still fails.
+
+`aputune build` fixes it, and tells you which case you are in:
+
+```
+kernel Rust: rustc accepts the kernel's target ABI (softfloat)
+kernel Rust: rustc rejects the kernel's target ABI (x86-softfloat) — injected
+             0002-rust-abi-rename.patch; CONFIG_RUST stays on and the PKGBUILD is
+             restored when this build ends
+```
+
+It never guesses versions — it asks rustc. It reads rustc's own builtin target
+spec, forces the ABI value to the kernel's spelling, and asks rustc to load the
+result. If rustc accepts it, nothing is changed — so a newer bore kernel that no
+longer needs the fix is handled with no change to arieltune.
+
+Kernel Rust is **kept on**: the fix renames the ABI value rather than disabling
+Rust. The patch travels through `source[]`/`b2sums[]` because that is the only
+channel the PKGBUILD's own `prepare()` applies before the build reaches
+`rust/core.o`. `config` is left untouched, the PKGBUILD is restored byte for byte
+when the build finishes, and `aputune patches` still counts only the liberation
+series — this shim unlocks no silicon and carries no runtime tell.
+
 ## Quick start
 
 Needs Rust (see *Build dependencies* above) and sudo.
