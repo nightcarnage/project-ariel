@@ -126,6 +126,13 @@ pub enum Cmd {
         /// Pick the tier non-interactively (full | tuning-only | inspect-only), skipping the prompt.
         #[arg(long, value_enum, value_name = "TIER")]
         tier: Option<LiberateTier>,
+        /// Target kernel: `7.2.9` (default) or `7.0.9`.
+        ///
+        /// Both are supported, so a snapshot setup can drift between them while
+        /// validating without swapping tools; also settable via `APUTUNE_KERNEL`.
+        /// A PKGBUILD that does not match is refused before any heavy work.
+        #[arg(long, value_name = "VERSION")]
+        kernel: Option<String>,
         /// Actually build and install. Default: preview the plan only.
         #[arg(long)]
         run: bool,
@@ -524,8 +531,9 @@ pub fn run(cmd: Cmd) -> Result<()> {
             pkgbuild,
             target,
             tier,
+            kernel,
             run,
-        } => cmd_liberate(pkgbuild, target, tier, run),
+        } => cmd_liberate(pkgbuild, target, tier, kernel, run),
         Cmd::Profile { action } => cmd_profile(action),
         Cmd::Doctor { json, verify } => cmd_doctor(json, verify),
     }
@@ -1705,6 +1713,7 @@ fn cmd_liberate(
     pkgbuild: Option<std::path::PathBuf>,
     target: Option<String>,
     tier: Option<LiberateTier>,
+    kernel: Option<String>,
     run: bool,
 ) -> Result<()> {
     // Gate first: never offer a kernel build on non-BC-250 silicon.
@@ -1732,6 +1741,11 @@ fn cmd_liberate(
             let mut opts = kbuild::BuildOpts::default();
             if pkgbuild.is_some() {
                 opts.pkgbuild_dir = pkgbuild;
+            }
+            if let Some(v) = kernel {
+                opts.kernel = Kernel::parse(&v).ok_or_else(|| {
+                    anyhow::anyhow!("unknown --kernel {v:?}; supported: 7.2.9 (default), 7.0.9")
+                })?;
             }
             opts.target = target;
             opts.run = run;
