@@ -15,6 +15,7 @@
 //! 0xFF000000 MMIO window). Writes are AND-only (program bits 1->0; no erase) —
 //! the OEM-edit path appends into erased (0xFF) free space, so that's fine.
 
+use crate::kmod;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io;
@@ -33,18 +34,6 @@ const KO_PATHS: &[&str] = &["/usr/lib/biostune/smiflash.ko", "/tmp/smiflash.ko"]
 /// Where `biostune install.sh` stages the DKMS driver sources, so
 /// `biostune driver build` can (re)build them after install.
 const DRIVER_SRC_DIRS: &[&str] = &["/usr/share/biostune/driver", "driver"];
-
-/// Is the module registered with DKMS / installed under /lib/modules (i.e.
-/// loadable via `modprobe`)?
-fn modprobe_known() -> bool {
-    Command::new("modinfo")
-        .arg("smiflash")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// The real SW-SMI command port from the ACPI FADT (`SMI_CMD` @ offset 48).
 /// On the BC-250 this is 0xB0 — NOT the conventional 0xB2 (writing 0xB2 raises no
@@ -70,12 +59,22 @@ pub fn ko_path() -> Option<&'static str> {
 
 /// Human-readable install state of the module for `driver status`.
 pub fn install_state() -> String {
-    if modprobe_known() {
-        "installed via DKMS (modprobe smiflash)".into()
+    if kmod::modprobe_resolves() {
+        "installed (modprobe smiflash)".into()
     } else if let Some(p) = ko_path() {
         format!("loose module at {p}")
+    } else if kmod::have_blob(&kmod::running_kver()) {
+        format!(
+            "not installed — a prebuilt for {} ships in this binary; \
+             `arieltune bios driver build` installs it",
+            kmod::running_kver()
+        )
     } else {
-        "not installed — run `arieltune bios driver build` (DKMS)".into()
+        format!(
+            "not installed — no prebuilt for {}; `arieltune bios driver build` \
+             compiles it on the board (needs dkms + kernel headers)",
+            kmod::running_kver()
+        )
     }
 }
 
@@ -86,9 +85,14 @@ pub fn load() -> io::Result<()> {
         return Ok(());
     }
     let port = smi_cmd_port()?;
-    // Prefer the DKMS-installed module via modprobe (the recommended install);
-    // fall back to a loose smiflash.ko for the manual/dev path.
-    if modprobe_known() {
+    // Prefer the module this binary carries for this kernel — that path needs
+    // no dkms, no headers and no build tree, so it survives the kernel upgrade
+    // that removes an older release's tree. Then a DKMS install someone else
+    // made, then a loose smiflash.ko for the manual/dev path.
+    if !kmod::modprobe_resolves() {
+        let _ = kmod::install_embedded();
+    }
+    if kmod::modprobe_resolves() {
         let status = Command::new("modprobe")
             .arg("smiflash")
             .arg(format!("smi_port=0x{port:x}"))
@@ -100,10 +104,12 @@ pub fn load() -> io::Result<()> {
     let ko = ko_path().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "smiflash module not installed. Install it with `arieltune bios driver build` \
-             (DKMS — builds it for your kernel on the board), or manually per \
-             driver/README.md."
-                .to_string(),
+            format!(
+                "smiflash module not installed for {}. Run `arieltune bios driver build` — \
+                 it installs the prebuilt this binary carries, or compiles it on the board \
+                 when we ship none for your kernel.",
+                kmod::running_kver()
+            ),
         )
     })?;
     let status = Command::new("insmod")
@@ -123,29 +129,37 @@ pub fn load() -> io::Result<()> {
     Ok(())
 }
 
-/// Build + install the smiflash module for the running kernel via DKMS. Runs the
-/// staged `driver/install-dkms.sh` (idempotent). Needs root, `dkms`, and kernel
-/// headers; on a BC-250 it builds on the board (the prepare hook handles the
-/// stripped CachyOS headers). Returns the script's combined output on failure.
+/// Make the smiflash module available for the running kernel.
+///
+/// Installs the prebuilt module this binary carries whenever we have one for the
+/// running kernel — no `dkms`, no kernel headers, no build tree, so it works on a
+/// snapshot boot whose tree is gone. Only for a kernel we ship none of does it
+/// fall back to compiling on the board via the staged `driver/install-dkms.sh`
+/// (idempotent; needs root, `dkms` and headers, which the prepare hook makes
+/// usable on a BC-250). Returns the script's output on failure.
 pub fn build() -> io::Result<()> {
-    let script = DRIVER_SRC_DIRS
-        .iter()
-        .map(|d| format!("{d}/install-dkms.sh"))
-        .find(|p| Path::new(p).exists())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "driver sources not found in {DRIVER_SRC_DIRS:?} — reinstall arieltune \
-                     (install.sh stages them), or run driver/install-dkms.sh from a checkout."
-                ),
-            )
-        })?;
-    let status = Command::new("sh").arg(&script).status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "{script} failed — see its output above (need root, dkms, and kernel headers)."
-        )));
+    if !kmod::install_embedded() {
+        let script = DRIVER_SRC_DIRS
+            .iter()
+            .map(|d| format!("{d}/install-dkms.sh"))
+            .find(|p| Path::new(p).exists())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "no prebuilt smiflash for {} and driver sources not found in \
+                         {DRIVER_SRC_DIRS:?} — reinstall arieltune (install.sh stages them), \
+                         or run driver/install-dkms.sh from a checkout.",
+                        kmod::running_kver()
+                    ),
+                )
+            })?;
+        let status = Command::new("sh").arg(&script).status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "{script} failed — see its output above (need root, dkms, and kernel headers)."
+            )));
+        }
     }
     // Persist autoload so the driver comes back after reboots: the DKMS install
     // only drops the module into the module tree; nothing else writes the

@@ -168,9 +168,11 @@ pub enum EffectCmd {
 
 #[derive(Subcommand)]
 pub enum DriverCmd {
-    /// Build + install the smiflash module for THIS kernel via DKMS. Root; needs dkms + kernel headers.
+    /// Install the smiflash module for THIS kernel. Root.
     ///
-    /// DKMS rebuilds it automatically on kernel upgrades. On a BC-250 it builds on the board.
+    /// Installs the prebuilt copy this binary carries for the running kernel, so
+    /// it needs no dkms, headers or build tree. Only for a kernel we ship none of
+    /// does it fall back to compiling on the board (dkms + kernel headers).
     Build,
     /// Load the smiflash module with the FADT SW-SMI command port (auto-detected). Root.
     Load,
@@ -572,8 +574,8 @@ fn oem_set_cmd(assignments: &[String], apply: bool, force: bool) -> Result<()> {
 fn driver_cmd(action: DriverCmd) -> Result<()> {
     match action {
         DriverCmd::Build => {
-            smm::build().context("building the smiflash driver via DKMS")?;
-            println!("\nsmiflash built + installed. Load it: sudo arieltune bios driver load");
+            smm::build().context("installing the smiflash driver")?;
+            println!("\nsmiflash installed. Load it: sudo arieltune bios driver load");
             Ok(())
         }
         DriverCmd::Status => {

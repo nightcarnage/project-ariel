@@ -21,6 +21,7 @@ mod effect;
 mod efivar;
 mod flash;
 mod gate;
+mod kmod;
 mod nvram;
 mod oem;
 mod risk;
