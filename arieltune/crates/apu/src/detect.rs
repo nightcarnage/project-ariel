@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Runtime patch-state detection.
 //!
-//! For each member of [`patches::SERIES`] we probe the booted kernel for that
+//! For each member of [`patches::series`] we probe the booted kernel for that
 //! patch's [`Tell`] and classify it. The result is the ground truth the rest of
 //! the tool keys off: whether to offer a live action, fall back, or offer to
 //! *build the patch into the system* (see `kbuild`).
@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cu;
+use crate::kernel::Kernel;
 use crate::patches::{self, Tell};
 
 /// Per-patch detection result.
@@ -84,7 +85,7 @@ pub struct DoctorJson {
     pub kernel: String,
     /// Series members live (Present or Inferred).
     pub present: usize,
-    /// Series size (patches::count()).
+    /// Series size (`patches::count(k)`).
     pub total: usize,
     pub fully: bool,
 }
@@ -99,7 +100,7 @@ impl DoctorJson {
                 .iter()
                 .filter(|r| matches!(r.state, State::Present | State::Inferred))
                 .count(),
-            total: patches::count(),
+            total: patches::count(Kernel::booted()),
             fully: rep.fully_patched(),
         }
     }
@@ -181,8 +182,7 @@ fn probe(tell: Tell, dbg: Option<&Path>) -> State {
 /// Probe the full series against the running kernel.
 pub fn report() -> Report {
     let dbg = ariel_hal::amdgpu_dbg_dir();
-    let mut rows: Vec<PatchStatus> = patches::SERIES
-        .iter()
+    let mut rows: Vec<PatchStatus> = patches::series(Kernel::booted())
         .map(|p| PatchStatus {
             id: p.id,
             title: p.title,
@@ -253,8 +253,8 @@ mod tests {
         let d = DoctorJson {
             is_bc250: true,
             kernel: "6.12.4-aputune".into(),
-            present: patches::count(),
-            total: patches::count(),
+            present: patches::count(Kernel::booted()),
+            total: patches::count(Kernel::booted()),
             fully: true,
         };
         let s = serde_json::to_string(&d).unwrap();
@@ -265,9 +265,9 @@ mod tests {
         assert!(v["kernel"].is_string());
         assert_eq!(v["kernel"], "6.12.4-aputune");
         assert!(v["present"].is_u64());
-        assert_eq!(v["present"], patches::count() as u64);
+        assert_eq!(v["present"], patches::count(Kernel::booted()) as u64);
         assert!(v["total"].is_u64());
-        assert_eq!(v["total"], patches::count() as u64);
+        assert_eq!(v["total"], patches::count(Kernel::booted()) as u64);
         assert_eq!(v["fully"], serde_json::Value::Bool(true));
         // And it round-trips.
         let back: DoctorJson = serde_json::from_str(&s).unwrap();

@@ -27,6 +27,8 @@ use crate::{
 use ariel_smu::ocq3;
 use ariel_smu::smu::{self, Smu};
 
+use crate::kernel::Kernel;
+
 /// The `arieltune apu` subcommand tree (was `aputune`'s, verbatim minus `Tui` --
 /// the TUI is the suite shell's APU tab now, not a subcommand). Every clamp /
 /// ceiling / refusal / guard is preserved.
@@ -98,6 +100,14 @@ pub enum Cmd {
         /// arm later with `arieltune apu cu enable` after validating your hardware.
         #[arg(long)]
         full: bool,
+        /// Target kernel: `7.2.9` (default) or `7.0.9`.
+        ///
+        /// Both ship inside this binary — the series, the nct6687 module and the
+        /// PKGBUILD pin all follow from this choice. Build 7.0.9 to validate a
+        /// snapshot on the older kernel without swapping tools. Also settable via
+        /// `APUTUNE_KERNEL`.
+        #[arg(long, value_name = "VERSION")]
+        kernel: Option<String>,
         /// Actually build and install. Default: preview the plan only.
         #[arg(long)]
         run: bool,
@@ -485,11 +495,17 @@ pub fn run(cmd: Cmd) -> Result<()> {
             pkgbuild,
             target,
             full,
+            kernel,
             run,
         } => {
             let mut opts = kbuild::BuildOpts::default();
             if pkgbuild.is_some() {
                 opts.pkgbuild_dir = pkgbuild;
+            }
+            if let Some(v) = kernel {
+                opts.kernel = Kernel::parse(&v).ok_or_else(|| {
+                    anyhow::anyhow!("unknown --kernel {v:?}; supported: 7.2.9 (default), 7.0.9")
+                })?;
             }
             opts.target = target;
             opts.run = run;
@@ -1557,14 +1573,30 @@ fn cmd_cores(action: CoreCmd) -> Result<()> {
 
 fn cmd_patches(show: Option<String>) -> Result<()> {
     if let Some(id) = show {
-        let found = patches::SERIES
+        // Search every kernel's members, not only the booted one: patch 29
+        // exists for 7.0.9 and is still worth reading from a 7.2.9 box.
+        let found = patches::APPLIED
             .iter()
-            .find(|p| p.id == id)
-            .or_else(|| patches::ON_DISK.iter().find(|p| p.id == id));
+            .chain(patches::ON_DISK.iter())
+            .find(|p| p.id == id);
         match found {
             Some(p) => {
-                println!("# {}, {}\n# touches: {}\n", p.id, p.title, p.touches);
-                print!("{}", p.body);
+                // Prefer the booted kernel's text, else whichever kernel does
+                // carry the patch — so this always prints something useful.
+                let booted = Kernel::booted();
+                let k = if p.in_series(booted) {
+                    booted
+                } else {
+                    Kernel::ALL
+                        .into_iter()
+                        .find(|k| p.in_series(*k))
+                        .unwrap_or(booted)
+                };
+                println!(
+                    "# {}, {}   [kernel {}]\n# touches: {}\n",
+                    p.id, p.title, k, p.touches
+                );
+                print!("{}", p.body(k).unwrap_or_default());
             }
             None => println!("no such patch: {id}"),
         }
@@ -1575,7 +1607,7 @@ fn cmd_patches(show: Option<String>) -> Result<()> {
     println!(
         "BC-250: {}    series: {} patches    {}",
         if rep.is_bc250 { "yes" } else { "NO" },
-        patches::count(),
+        patches::count(Kernel::booted()),
         if rep.fully_patched() {
             "FULLY PATCHED"
         } else {
@@ -1625,7 +1657,10 @@ fn print_series(rep: &detect::Report) {
         .iter()
         .filter(|r| matches!(r.state, detect::State::Present | detect::State::Inferred))
         .count();
-    println!("  liberation series: {present}/{} live", patches::count());
+    println!(
+        "  liberation series: {present}/{} live",
+        patches::count(Kernel::booted())
+    );
     for r in &rep.rows {
         println!("  {} {:<5} {}", r.state.glyph(), r.id, r.title);
     }
@@ -1755,7 +1790,10 @@ fn cmd_doctor(json: bool, verify: bool) -> Result<()> {
         .iter()
         .filter(|r| matches!(r.state, detect::State::Present | detect::State::Inferred))
         .count();
-    println!("  liberation series: {present}/{} live", patches::count());
+    println!(
+        "  liberation series: {present}/{} live",
+        patches::count(Kernel::booted())
+    );
     match cu::map() {
         Some(m) => println!("  CUs active: {}/{}", m.active, m.possible),
         None => println!("  CUs active: unknown (amdgpu not queryable)"),

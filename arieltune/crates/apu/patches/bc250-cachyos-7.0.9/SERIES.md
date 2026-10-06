@@ -5,9 +5,12 @@ The kernel-patch series aputune embeds and builds into the system. Authored on
 identical through `7.0.9`, so the same patches apply unchanged. Applied via the
 `makepkg` flow (driven by `aputune build`), not `make M=...`.
 
-**Kernel: pin to `linux-cachyos-bore-7.0.9`** (the current known-good target).
-Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
-path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
+**Kernel: `linux-cachyos-bore-7.0.9` - supported, no longer the default.** 7.2.9 is the default
+target; this set is built with `aputune build --kernel 7.0.9` (or `APUTUNE_KERNEL=709`), and both
+series ship inside the same binary so a snapshot can move between the two kernels freely. Do **not**
+build against `7.0.11+` yet - those kernels regress the BC-250 SDMA path. 7.0.9 additionally needs the
+rust target-ABI shim, which `aputune` injects automatically once it probes a rustc that rejects the
+pre-rename `x86-softfloat` spelling. The folder is named for the kernel it was validated on.
 
 This set is **curated for portability** - only patches that are safe and useful
 on any BC-250 ship, numbered **01-28**. Three patches are on disk but NOT applied,

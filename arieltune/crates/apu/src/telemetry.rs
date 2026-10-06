@@ -142,9 +142,13 @@ pub fn carrier_present() -> bool {
     nct6686_dir().is_some()
 }
 
-/// The prebuilt writable driver, embedded in the binary, and the exact kernel
-/// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
-/// itself on a matching kernel (fresh blades with no nct6687 installed).
+/// The prebuilt writable drivers, embedded in the binary, each keyed by the
+/// kernel release whose vermagic it matches.
+///
+/// Both supported kernels are carried so the *same binary* serves either one: a
+/// blade can be re-imaged from a 7.0.9 snapshot to a 7.2.9 one — or drift back
+/// while validating — without swapping the tool. That is what makes an A/B
+/// validation honest, since the only thing that changes is the kernel.
 ///
 /// The board *can* build this module. What earlier revisions described here as
 /// an impossible build was really the CachyOS **linux-headers package** shipping
@@ -156,13 +160,39 @@ pub fn carrier_present() -> bool {
 /// build` runs it for you; a locally built headers package carries no such note
 /// and needs no prep at all.
 ///
-/// This embedded blob is therefore a convenience rather than the only route: it
-/// spares a fresh board any build. It matches exactly one kernel, so for any
-/// other kernel either rebuild it with that script or accept the read-only
+/// These blobs are therefore a convenience rather than the only route: they
+/// spare a fresh board any build. Each matches exactly one kernel release, so for
+/// any other kernel either rebuild it with that script or accept the read-only
 /// fallback in `ensure_carrier_sensors`.
-const NCT6687_KO: &[u8] =
-    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.2.9-1-cachyos-bore.ko");
-const NCT6687_KVER: &str = "7.2.9-1-cachyos-bore";
+/// Three blobs for two kernels, because 7.0.9 exists in two build flavours:
+/// the fleet builds `linux-cachyos-bore/` (release `7.0.9-1-cachyos-bore`) and
+/// that is what `Kernel::Bore709` targets, while an older stock
+/// `linux-cachyos/` build reports `7.0.9-1-cachyos`. Both are keyed so that
+/// whichever 7.0.9 a blade is running gets a writable fan driver. All three
+/// share one srcversion (`2D4B6235D20CD0BD87ABE3A`) — same driver source,
+/// compiled against three different kernels.
+const NCT6687_KO: &[(&str, &[u8])] = &[
+    (
+        "7.2.9-1-cachyos-bore",
+        include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.2.9-1-cachyos-bore.ko"),
+    ),
+    (
+        "7.0.9-1-cachyos-bore",
+        include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos-bore.ko"),
+    ),
+    (
+        "7.0.9-1-cachyos",
+        include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko"),
+    ),
+];
+
+/// The embedded driver matching a kernel release, when we carry one.
+fn nct6687_blob(kver: &str) -> Option<&'static [u8]> {
+    NCT6687_KO
+        .iter()
+        .find(|(k, _)| *k == kver)
+        .map(|(_, blob)| *blob)
+}
 
 /// Running kernel release (`uname -r`).
 fn running_kver() -> String {
@@ -174,10 +204,14 @@ fn running_kver() -> String {
 
 /// Install the embedded writable module into the running kernel's module tree
 /// if it isn't already resolvable by modprobe. Returns true if the module is
-/// available to load afterwards. When the running kernel doesn't match the
-/// prebuilt vermagic we return false rather than force-load a mismatched module
-/// (rebuild for the new kernel as described on `NCT6687_KO`). Best-effort; needs
-/// root.
+/// available to load afterwards.
+///
+/// The blob is picked from [`NCT6687_KO`] by the running kernel's release, so
+/// the same binary does the right thing on either supported kernel. When we
+/// carry no blob for this kernel we return false rather than force-load a
+/// mismatched module — a `.ko` with the wrong vermagic gets indexed by depmod
+/// and then fails to bind, which is worse than having none. Rebuild it with
+/// `kmod/nct6687-bc250/build-and-install.sh` instead. Best-effort; needs root.
 fn install_writable_module() -> bool {
     let kver = running_kver();
     let dst = PathBuf::from(format!("/lib/modules/{kver}/updates/nct6687.ko"));
@@ -193,13 +227,13 @@ fn install_writable_module() -> bool {
     {
         return true;
     }
-    if kver != NCT6687_KVER {
-        return false; // prebuilt blob won't load on a different kernel
-    }
+    let Some(blob) = nct6687_blob(&kver) else {
+        return false;
+    };
     if let Some(parent) = dst.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if fs::write(&dst, NCT6687_KO).is_err() {
+    if fs::write(&dst, blob).is_err() {
         return false;
     }
     let _ = std::process::Command::new("depmod").arg("-a").status();
@@ -638,6 +672,57 @@ pub fn gfxclk_mhz() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::Kernel;
+
+    /// The table keys and `Kernel::release()` are written independently — one is
+    /// data, one is code — so this pins them together. A drift here would mean a
+    /// blade silently losing its writable fan driver on one of the two kernels.
+    #[test]
+    fn every_supported_kernel_has_an_embedded_module() {
+        for k in Kernel::ALL {
+            let blob = nct6687_blob(k.release());
+            assert!(
+                blob.is_some(),
+                "no embedded nct6687 module for {}",
+                k.release()
+            );
+            assert!(
+                blob.unwrap().len() > 100_000,
+                "{} module looks truncated",
+                k.release()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_kernel_gets_no_blob() {
+        assert!(nct6687_blob("6.19.9-1-cachyos").is_none());
+        assert!(nct6687_blob("").is_none());
+    }
+
+    /// Same source, different kernels — so these must be different binaries. A
+    /// copy-paste of one path into two slots would be caught here.
+    #[test]
+    fn every_embedded_module_is_a_distinct_binary() {
+        let mut seen: Vec<&[u8]> = Vec::new();
+        for (kver, blob) in NCT6687_KO {
+            assert!(
+                !seen.contains(blob),
+                "{kver} embeds a duplicate of another module"
+            );
+            seen.push(blob);
+        }
+        assert_eq!(seen.len(), NCT6687_KO.len());
+    }
+
+    /// 7.0.9 ships two flavours and the fleet one must be present, otherwise
+    /// every provisioned 7.0.9 blade silently loses fan control.
+    #[test]
+    fn the_fleet_7_0_9_build_flavour_is_covered() {
+        assert!(nct6687_blob("7.0.9-1-cachyos-bore").is_some());
+        assert!(nct6687_blob("7.0.9-1-cachyos").is_some());
+        assert_eq!(Kernel::Bore709.release(), "7.0.9-1-cachyos-bore");
+    }
 
     /// REGRESSION: the old parser never trimmed the token before take_while, so
     /// it returned None for EVERY real pp_dpm_sclk (the value always has a

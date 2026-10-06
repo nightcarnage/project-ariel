@@ -4,12 +4,13 @@ The kernel-patch series aputune embeds and builds into the system. Authored on
 `linux-cachyos-bore-7.0.2` and rebased onto **`linux-cachyos-bore-7.2.9`**.
 Applied via the `makepkg` flow (driven by `aputune build`), not `make M=...`.
 
-**Kernel: target `linux-cachyos-bore-7.2.9`.** The old 7.0.9 pin is retired. It
-existed to dodge the BC-250 SDMA regression in 7.0.10-13, which 7.2.9 does not
-have - and 7.0.9 has since become the hazard: its config sets `CONFIG_RUST=y`
-while `scripts/generate_rust_target.rs` hard-codes the pre-rename target ABI
-`x86-softfloat`, which rustc >= 1.99 rejects, killing the build inside
-`prepare()`. 7.2.9 carries the renamed `softfloat` spec, so no shim is needed.
+**Kernel: `linux-cachyos-bore-7.2.9` - the default target.** 7.0.9 is also supported: `aputune build
+--kernel 7.0.9` (or `APUTUNE_KERNEL=709`) uses `crates/apu/patches/bc250-cachyos-7.0.9/` instead, and
+both sets ship in the same binary. The pin moved off 7.0.9 because 7.0.9 had become the hazard rather
+than the protection: its config sets `CONFIG_RUST=y` while `scripts/generate_rust_target.rs` hard-codes
+the pre-rename target ABI `x86-softfloat`, which rustc >= 1.99 rejects, so the build dies inside
+`prepare()` unless the rust ABI shim is injected. 7.2.9 carries the renamed `softfloat` spec and needs
+no shim, and the BC-250 SDMA regression that 7.0.10-13 introduced does not affect it.
 
 ### What the 7.2.9 rebase changed
 

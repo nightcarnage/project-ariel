@@ -33,6 +33,7 @@ mod detect;
 mod dpm;
 mod gpuctl;
 mod kbuild;
+mod kernel;
 mod patches;
 mod persist;
 mod profile;

@@ -5313,8 +5313,8 @@ linux-cachyos-bore-7.0.2 and rebased onto linux-cachyos-bore-7.2.9, the current 
 The rebase was mechanical: one patch (07) re-anchored, and patch 29 dropped as obsolete
 (7.2.9 already ships the IFWI discovery-TMR logic that 29 backported). Applied via the
 makepkg flow (driven by aputune build), not make M=. It supersedes the earlier six-patch
-set. Three patches sit on disk, NOT applied: 12, 19, 21. The old 7.0.9 pin is retired:
-the BC-250 SDMA regression in 7.0.10-13 is fixed in 7.2.9, and 7.0.9 no longer builds at
+set. Three patches sit on disk, NOT applied: 12, 19, 21. 7.2.9 is the default target;
+7.0.9 is still supported, though it needs the rust ABI shim because it no longer builds at
 all under a current rustc (its config sets CONFIG_RUST=y while the generated target
 hard-codes the pre-rename x86-softfloat ABI that rustc 1.99+ rejects). Read the series
 as layers, not a flat list.
@@ -5486,8 +5486,8 @@ override armed (bc250_sdma_fw=navi12 + bc250_early_sdma_trap=1; patch 19 retired
 both SDMA rings come up with TRAP_ENABLE=1 and no fence-fallback boot stalls.
 
 ┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
-│  Kernel pin is load-bearing: build only against linux-cachyos-bore-7.2.9 (the old    │
-│  7.0.9 pin is retired).  Patches 12/19/21 are on disk, NOT applied — 12 hangs ROCm;  │
+│  Kernel pin is load-bearing: 7.2.9 is the default target; 7.0.9 is still supported   │
+│  via --kernel 7.0.9.  Patches 12/19/21 are on disk, NOT applied — 12 hangs ROCm;     │
 │  19 is the retired SDMA fallback, re-armed only if the navi12 firmware swap is       │
 │  reverted.  ppfeaturemask must keep bit 14 (PP_OVERDRIVE_MASK) set (0xfff77ef7) or   │
 │  every pp_od_clk_voltage write silently no-ops.  In the clock/voltage path (patch 03)│

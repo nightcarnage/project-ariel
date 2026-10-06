@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use crate::detect;
+use crate::kernel::Kernel;
 use crate::patches;
 
 /// Post-reboot verification tuning (remote `--target --run` builds): an
@@ -45,11 +46,23 @@ const VERIFY_SSH_TIMEOUT_S: u64 = 10;
 const VERIFY_REMOTE_BIN: &str = "/tmp/aputune-verify";
 /// Appended to every "no PKGBUILD dir" error so the fix is in the error, not
 /// just the README — a fresh CachyOS install has no pinned kernel source yet.
-const NO_PKGBUILD_HINT: &str = "get one with:\n  \
+///
+/// Built per target kernel: the pin, the release label and even the PKGBUILD
+/// subdirectory differ between the two, and a hint naming the wrong one sends
+/// the operator to a tree that builds a kernel the series does not match.
+fn no_pkgbuild_hint(k: Kernel) -> String {
+    format!(
+        "get one with:\n  \
     git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos\n  \
-    git -C ~/linux-cachyos checkout b11ba14854d9748bdb3e3daf7a90e8d3a31004ec   # 7.2.9-1\n  \
-    aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run\n\
-    (README: \"Liberation quick start\", step 2)";
+    git -C ~/linux-cachyos checkout {}   # {}-1\n  \
+    aputune build --kernel {} --pkgbuild ~/linux-cachyos/{} --run\n\
+    (README: \"Liberation quick start\", step 2)",
+        k.pkgbuild_pin(),
+        k.label(),
+        k.label(),
+        k.pkgbuild_subdir()
+    )
+}
 
 /// The Rust target-spec ABI value older kernels hard-code in
 /// `scripts/generate_rust_target.rs`. rustc has since renamed it and rejects
@@ -65,7 +78,7 @@ const CURRENT_RUSTC_ABI: &str = "softfloat";
 const RUST_ABI_PATCH_NAME: &str = "0002-rust-abi-rename.patch";
 
 /// The fix itself, embedded like the liberation series. It is deliberately NOT
-/// in `patches::SERIES`: that series unlocks silicon and every member carries a
+/// in `patches::APPLIED`: that series unlocks silicon and every member carries a
 /// runtime tell, whereas this is toolchain plumbing with nothing to detect — so
 /// it must never be counted by `aputune patches`.
 const RUST_ABI_PATCH: &str = include_str!("../patches/rust-abi-rename.patch");
@@ -90,6 +103,13 @@ pub struct BuildOpts {
     pub cc_mode: u32,
     /// Actually execute (default: preview only).
     pub run: bool,
+    /// Which supported kernel to build.
+    ///
+    /// Defaults to 7.2.9; `--kernel` (or `APUTUNE_KERNEL`) selects the other.
+    /// Deliberately explicit rather than inferred from the local kernel — the
+    /// target may be a remote host, and "what happens to be booted here" is not
+    /// a statement about what should be built there.
+    pub kernel: Kernel,
 }
 
 impl Default for BuildOpts {
@@ -107,19 +127,50 @@ impl Default for BuildOpts {
             target: None,
             cc_mode: 0,
             run: false,
+            kernel: std::env::var("APUTUNE_KERNEL")
+                .ok()
+                .and_then(|s| Kernel::parse(&s))
+                .unwrap_or(Kernel::DEFAULT),
         }
     }
 }
 
-/// Write every embedded patch to `<work>/patches/` and return the dir.
-pub fn materialize_patches(work: &Path) -> Result<PathBuf> {
+/// Write `k`'s embedded series to `<work>/patches/` and return the dir.
+///
+/// Only that kernel's members are written. The on-disk sets differ (patch 29 is
+/// 7.0.9-only), and a stray member from the other kernel is a mis-application
+/// waiting to happen: it would apply at best partially and at worst silently.
+pub fn materialize_patches(work: &Path, k: Kernel) -> Result<PathBuf> {
     let dir = work.join("patches");
     fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
-    for p in patches::SERIES {
+
+    // Drop members left behind by a run for the other kernel. The apply step
+    // only walks `series(k)`, so a stale file would never be applied — but a
+    // work dir holding half of each series is exactly what makes a validation
+    // ambiguous when drifting between kernels, so it must not survive a switch.
+    let keep: Vec<String> = patches::series(k)
+        .map(|p| format!("{}.patch", p.id))
+        .collect();
+    for entry in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_member = name
+            .strip_suffix(".patch")
+            .is_some_and(|stem| stem.len() == 2 && stem.chars().all(|c| c.is_ascii_digit()));
+        if is_member && !keep.contains(&name) {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("remove stale {}", entry.path().display()))?;
+        }
+    }
+
+    for p in patches::series(k) {
         // reconstruct the on-disk filename: <id>-<title-ish>.patch isn't stored,
         // so name them by ordinal; apply order is what matters.
         let name = format!("{}.patch", p.id);
-        fs::write(dir.join(&name), p.body)
+        let body = p
+            .body(k)
+            .expect("series() yields only members present for this kernel");
+        fs::write(dir.join(&name), body)
             .with_context(|| format!("write {}", dir.join(&name).display()))?;
     }
     Ok(dir)
@@ -898,7 +949,8 @@ fn post_extract_plan(
 ) -> Result<Vec<Step>> {
     let pkgbuild = opts.pkgbuild_dir.clone().with_context(|| {
         format!(
-            "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {NO_PKGBUILD_HINT}"
+            "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {}",
+            no_pkgbuild_hint(opts.kernel)
         )
     })?;
     let mut steps = Vec::new();
@@ -909,7 +961,7 @@ fn post_extract_plan(
     //    reverse-prompting; `--fuzz=0` so a hunk that no longer matches the
     //    source exactly FAILS LOUDLY instead of fuzzy-applying at an offset —
     //    a silently mis-placed hunk builds a kernel that only LOOKS patched.
-    for p in patches::SERIES {
+    for p in patches::series(opts.kernel) {
         let patch_file = patch_dir.join(format!("{}.patch", p.id));
         steps.push(Step {
             desc: format!("apply {} ({})", p.id, p.title),
@@ -1012,12 +1064,28 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     let pkgbuild = opts.pkgbuild_dir.clone().with_context(|| {
         format!(
             "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); \
-             it must hold a CachyOS linux-cachyos-* PKGBUILD\n{NO_PKGBUILD_HINT}"
+             it must hold a CachyOS linux-cachyos-* PKGBUILD\n{}",
+            no_pkgbuild_hint(opts.kernel)
         )
     })?;
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
+
+    // State the target up front: the series, the embedded nct6687 module and
+    // the PKGBUILD pin all follow from this one choice, and a build that
+    // silently picked the wrong kernel is expensive to notice later.
+    println!(
+        "target kernel: {} ({}) — series crates/apu/patches/{}{}",
+        opts.kernel,
+        opts.kernel.release(),
+        opts.kernel.series_dir(),
+        if opts.kernel.is_booted() {
+            "; this is the running kernel"
+        } else {
+            ""
+        }
+    );
     // `makepkg -o --nodeps` / `makepkg -e ... --nodeps` never let pacman check
     // the kernel build deps, so check them ourselves before any heavy work:
     // a missing gcc-15 or bc otherwise only surfaces ~40 minutes in.
@@ -1036,13 +1104,13 @@ pub fn build(opts: BuildOpts) -> Result<()> {
         opts.work_dir.clone()
     };
     fs::create_dir_all(&work_dir).with_context(|| format!("mkdir {}", work_dir.display()))?;
-    let patch_dir = materialize_patches(&work_dir)?;
+    let patch_dir = materialize_patches(&work_dir, opts.kernel)?;
     if let Some(uid) = drop_uid {
         chown_recursive(&work_dir, uid)?;
     }
     println!(
         "materialized {} patches -> {}",
-        patches::count(),
+        patches::count(opts.kernel),
         patch_dir.display()
     );
 
@@ -1160,8 +1228,8 @@ pub fn build(opts: BuildOpts) -> Result<()> {
         println!("  sudo arieltune apu doctor --verify");
         println!(
             "  (expect kernel != {pre_kernel}, {}/{} patches live)",
-            patches::count(),
-            patches::count()
+            patches::count(opts.kernel),
+            patches::count(opts.kernel)
         );
     }
     Ok(())
@@ -1299,7 +1367,7 @@ mod tests {
         )
         .unwrap();
         let patch_steps: Vec<_> = steps.iter().filter(|s| s.argv[0] == "patch").collect();
-        assert_eq!(patch_steps.len(), patches::count());
+        assert_eq!(patch_steps.len(), patches::count(opts.kernel));
         for s in patch_steps {
             assert!(
                 s.argv.contains(&"--fuzz=0".to_string()),
@@ -1514,8 +1582,41 @@ mod tests {
     }
 
     #[test]
+    fn switching_kernel_does_not_leave_the_old_series_behind() {
+        let dir = std::env::temp_dir().join(format!("aputune-switch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        // 7.0.9 first: it carries patch 29.
+        materialize_patches(&dir, Kernel::Bore709).unwrap();
+        let p = dir.join("patches");
+        assert!(
+            p.join("29.patch").exists(),
+            "7.0.9 must materialize patch 29"
+        );
+
+        // Switch to 7.2.9 in the same tree: 29 must be gone, not merely left
+        // unapplied, so the directory describes exactly one kernel.
+        materialize_patches(&dir, Kernel::Bore729).unwrap();
+        assert!(
+            !p.join("29.patch").exists(),
+            "switching to 7.2.9 left the 7.0.9-only patch behind"
+        );
+        assert_eq!(
+            fs::read_dir(&p).unwrap().count(),
+            patches::count(Kernel::Bore729),
+            "work dir should hold exactly the target kernel's series"
+        );
+
+        // And back again, to prove the switch is not one-way.
+        materialize_patches(&dir, Kernel::Bore709).unwrap();
+        assert!(p.join("29.patch").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn doctor_json_parsing() {
-        let n = patches::count();
+        let n = patches::count(Kernel::DEFAULT);
         let d = parse_doctor_json(&format!(
             "{{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":{n},\
                  \"total\":{n},\"fully\":true}}\n"

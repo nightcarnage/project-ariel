@@ -2,35 +2,39 @@
 //! The BC-250 liberation kernel-patch series, embedded into the binary.
 //!
 //! aputune *owns* the silicon-liberation surface: the curated CachyOS amdgpu
-//! series (authored on `linux-cachyos-bore-7.0.2`, rebased onto
-//! `linux-cachyos-bore-7.2.9` — the current target) ships inside the binary as
+//! series (authored on `linux-cachyos-bore-7.0.2`) ships inside the binary as
 //! data, and each patch carries the *runtime tell* that proves it is live on the
 //! running kernel. That lets `aputune patches` report a true per-patch state
 //! without trusting a version string, and lets the build path (see `kbuild`)
 //! reconstruct the exact source tree it was validated against.
 //!
-//! **Target: `linux-cachyos-bore-7.2.9`.** The series no longer pins 7.0.9; the
-//! 7.0.10-13 SDMA regression that motivated that pin is gone, and 7.0.9 is now
-//! the thing that breaks — its config sets CONFIG_RUST=y while
-//! `scripts/generate_rust_target.rs` hard-codes the pre-rename
-//! `x86-softfloat` target ABI, so any rustc new enough to reject that spelling
-//! (1.99+) kills the build in `prepare()`. 7.2.9 carries the renamed
-//! `softfloat` spec, so the series builds without the shim.
+//! **Two kernels ship at once.** 7.2.9 is the default target; 7.0.9 is still
+//! supported because blades in the field boot it and a snapshot setup can drift
+//! between the two while validating — the same binary has to serve both, or a
+//! validation ends up measuring the tool rather than the kernel. Every member
+//! below carries *both* bodies, so the titles, descriptions and runtime tells
+//! are written once and cannot drift apart between the two kernels.
 //!
-//! The rebase for 7.2.9 was mechanical and small: two of patch 07's hunks were
-//! re-anchored, because 7.2.9 inserts a single new line inside each of their
+//! The two series are near-identical. The 7.2.9 rebase re-anchored two of patch
+//! 07's hunks, because 7.2.9 inserts a single new line inside each of their
 //! three-line contexts (`smu->smc_driver_if_version = MP1_DRIVER_IF_VERSION;`
 //! in `cyan_skillfish_ppt.c`, and `#include "smu_v15_0_8_ppt.h"` in
 //! `amdgpu_smu.c`). Nothing else in the applied set needed a change: 09/10/11
 //! patch only the debugfs block that 07 *adds*, so they applied verbatim once
-//! 07 was fixed. Patch 29 was dropped — it backported `amdgpu_discovery_tmr_info`
-//! from newer kernels, and 7.2.9 already has it
+//! 07 was fixed. Patch 29 is 7.0.9-only: it backported
+//! `amdgpu_discovery_tmr_info` from newer kernels, and 7.2.9 already has it
 //! (`amdgpu_discovery_get_tmr_info()`, `mmDRIVER_SCRATCH_0`).
+//!
+//! 7.0.9 additionally needs the rust target-ABI shim. That is toolchain
+//! plumbing rather than a series member, so it lives in `kbuild` and is chosen
+//! by probing rustc — not by kernel (see `kbuild::RUST_ABI_PATCH`).
 //!
 //! The patches themselves are GPL-2.0 (kernel diffs) — the same license as this
 //! project (GPL-2.0-only, matching upstream cachenetics/project-ariel).
 //! arieltune carries them as build assets applied by the kernel-build path — they
 //! are not linked into the binary.
+
+use crate::kernel::Kernel;
 
 /// How to prove, at runtime, that a given patch is live on the booted kernel.
 #[derive(Clone, Copy, Debug)]
@@ -55,11 +59,17 @@ pub enum Tell {
 }
 
 /// One member of the series.
+///
+/// Both kernels' texts are carried. Which one is used depends on the *target*
+/// of a build or the kernel booted right now — never on how this binary was
+/// built, which is what lets one binary validate either kernel.
 pub struct Patch {
     /// Ordinal as it appears in the filename (e.g. "08").
     pub id: &'static str,
-    /// Embedded patch text.
-    pub body: &'static str,
+    /// Patch text for 7.0.9; `None` when it is not part of that series.
+    body_709: Option<&'static str>,
+    /// Patch text for 7.2.9; `None` when it is not part of that series.
+    body_729: Option<&'static str>,
     /// One-line purpose (mirrors patches/.../SERIES.md).
     pub title: &'static str,
     /// Plain-English description: what the patch does and why it matters
@@ -71,11 +81,35 @@ pub struct Patch {
     pub tell: Tell,
 }
 
+impl Patch {
+    /// This patch's text for `k`, or `None` when it is not part of that
+    /// kernel's series.
+    pub fn body(&self, k: Kernel) -> Option<&'static str> {
+        match k {
+            Kernel::Bore709 => self.body_709,
+            Kernel::Bore729 => self.body_729,
+        }
+    }
+
+    /// Whether this patch is a member of `k`'s series at all.
+    pub fn in_series(&self, k: Kernel) -> bool {
+        self.body(k).is_some()
+    }
+}
+
+/// A patch present in both kernels' trees.
 macro_rules! patch {
     ($id:literal, $file:literal, $title:literal, $desc:literal, $touches:literal, $tell:expr) => {
         Patch {
             id: $id,
-            body: include_str!(concat!("../patches/bc250-cachyos-7.2.9/", $file)),
+            body_709: Some(include_str!(concat!(
+                "../patches/bc250-cachyos-7.0.9/",
+                $file
+            ))),
+            body_729: Some(include_str!(concat!(
+                "../patches/bc250-cachyos-7.2.9/",
+                $file
+            ))),
             title: $title,
             desc: $desc,
             touches: $touches,
@@ -84,8 +118,30 @@ macro_rules! patch {
     };
 }
 
-/// The full series, in apply order.
-pub const SERIES: &[Patch] = &[
+/// A patch that exists only in the 7.0.9 tree — 7.2.9 already carries the
+/// upstream fix it backported, so there is nothing to apply there.
+macro_rules! patch_709_only {
+    ($id:literal, $file:literal, $title:literal, $desc:literal, $touches:literal, $tell:expr) => {
+        Patch {
+            id: $id,
+            body_709: Some(include_str!(concat!(
+                "../patches/bc250-cachyos-7.0.9/",
+                $file
+            ))),
+            body_729: None,
+            title: $title,
+            desc: $desc,
+            touches: $touches,
+            tell: $tell,
+        }
+    };
+}
+
+/// Every applied member, in apply order, covering both kernels.
+///
+/// Not a series on its own — use [`series`] for one kernel's view. A member
+/// whose body is `None` for that kernel is skipped there.
+pub const APPLIED: &[Patch] = &[
     patch!(
         "01",
         "01-declare-20-smu-message-enums.patch",
@@ -407,6 +463,22 @@ pub const SERIES: &[Patch] = &[
     // `amdgpu_acpi_get_tmr_info`). Applying it on 7.2.9 reports
     // "Reversed (or previously applied)". Its file is not carried in the
     // 7.2.9 series directory.
+    patch_709_only!(
+        "29",
+        "29-bc250-tmr-discovery-offset-fix.patch",
+        "Honor IFWI-reported discovery TMR offset (scratch-register fallback)",
+        "The 6.12 discovery read assumes the IP discovery TMR sits at the top \
+         of VRAM (vram_size - 64K) and only falls back to sysmem when the VRAM \
+         size register reads zero. On BC-250 firmware neither assumption holds: \
+         the TMR location is reported through the driver scratch registers \
+         (mmDRIVER_SCRATCH_0/1/2), with the legacy default probed first. \
+         Backports the upstream amdgpu get_tmr_info logic (shipping in newer \
+         kernels) so discovery succeeds on boards whose TMR is not at the \
+         legacy default. Runtime-validated on blade15. **7.0.9 only** — 7.2.9 \
+         already ships this upstream as amdgpu_discovery_get_tmr_info().",
+        "amdgpu_discovery.c, amdgpu_discovery.h",
+        Tell::Bundled
+    ),
     patch!(
         "30",
         "30-cyan-skillfish2-hardcoded-fallback.patch",
@@ -425,7 +497,7 @@ pub const SERIES: &[Patch] = &[
 
 /// Patches that ship on disk and are tracked in the TUI, but are NOT part of
 /// the applied series — `aputune build` does not materialize them. Opt one in
-/// by moving its entry into [`SERIES`] (mind apply-order and hunk overlaps).
+/// by moving its entry into [`APPLIED`] (mind apply-order and hunk overlaps).
 pub const ON_DISK: &[Patch] = &[
     patch!(
         "12",
@@ -464,9 +536,17 @@ pub const ON_DISK: &[Patch] = &[
     ),
 ];
 
-/// Number of patches in the embedded series.
-pub fn count() -> usize {
-    SERIES.len()
+/// One kernel's applied series, in apply order.
+///
+/// Members that do not exist for `k` (patch 29 on 7.2.9) are skipped, so the
+/// iterator *is* that kernel's series and callers never have to guard.
+pub fn series(k: Kernel) -> impl Iterator<Item = &'static Patch> + Clone {
+    APPLIED.iter().filter(move |p| p.in_series(k))
+}
+
+/// Number of patches in `k`'s applied series.
+pub fn count(k: Kernel) -> usize {
+    series(k).count()
 }
 
 /// Series members whose absence does not poison the bundled-inference or the
@@ -475,3 +555,62 @@ pub fn count() -> usize {
 /// deployed build2 tree on blade 15) deliberately do not carry it, so its
 /// missing tell must not drag every Bundled member to `[??]`.
 pub const OPTIONAL: &[&str] = &["17"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_kernel_gets_its_own_series_size() {
+        // 7.0.9 carries patch 29; 7.2.9 does not (it has the upstream fix).
+        assert_eq!(count(Kernel::Bore709), count(Kernel::Bore729) + 1);
+        assert_eq!(series(Kernel::Bore729).count(), count(Kernel::Bore729));
+    }
+
+    #[test]
+    fn patch_29_is_7_0_9_only() {
+        let p29 = APPLIED
+            .iter()
+            .find(|p| p.id == "29")
+            .expect("patch 29 must still be carried for 7.0.9");
+        assert!(p29.in_series(Kernel::Bore709));
+        assert!(!p29.in_series(Kernel::Bore729));
+        assert!(p29.body(Kernel::Bore729).is_none());
+        assert!(!series(Kernel::Bore729).any(|p| p.id == "29"));
+        assert!(series(Kernel::Bore709).any(|p| p.id == "29"));
+    }
+
+    #[test]
+    fn every_member_of_both_series_has_a_body() {
+        for k in Kernel::ALL {
+            for p in series(k) {
+                assert!(
+                    p.body(k).is_some_and(|b| !b.trim().is_empty()),
+                    "{} missing a body for {}",
+                    p.id,
+                    k
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_series_do_not_share_one_body_text() {
+        // The whole point of carrying two bodies: at least one member differs.
+        let differs = APPLIED
+            .iter()
+            .any(|p| p.body_709.is_some() && p.body_729.is_some() && p.body_709 != p.body_729);
+        assert!(differs, "the two kernels should not embed identical series");
+    }
+
+    #[test]
+    fn ids_are_unique_and_apply_order_is_stable() {
+        let ids: Vec<_> = series(Kernel::Bore709).map(|p| p.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(ids.len(), sorted.len(), "duplicate patch ids in the series");
+        // Ordinals ascend: the series is applied in this order.
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+    }
+}

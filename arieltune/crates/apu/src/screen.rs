@@ -21,7 +21,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::cpu::CpuOc;
 use crate::detect::{self, State};
-use crate::{cpu, cu, curoute, cutest, dpm, patches, telemetry};
+use crate::{cpu, cu, curoute, cutest, dpm, kernel::Kernel, patches, telemetry};
 use ariel_smu::ocq3::{self, OcQ3};
 use ariel_smu::smu::{self, Smu};
 
@@ -145,7 +145,7 @@ fn gather() -> Snapshot {
         kernel,
         fully: rep.fully_patched(),
         present,
-        total: patches::count(),
+        total: patches::count(Kernel::booted()),
         gfxclk: telemetry::gfxclk_mhz(),
         temp: telemetry::junction_temp_c(),
         top_set: cfg.top_mhz,
@@ -1714,7 +1714,7 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
         Line::from(Span::styled(
             format!(
                 " The curated {}-patch amdgpu series arieltune embeds and builds into",
-                patches::count()
+                patches::count(Kernel::booted())
             ),
             intro,
         )),
@@ -1728,7 +1728,10 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
         )),
         Line::from(""),
     ];
-    for (i, (p, st)) in patches::SERIES.iter().zip(states.iter()).enumerate() {
+    for (i, (p, st)) in patches::series(Kernel::booted())
+        .zip(states.iter())
+        .enumerate()
+    {
         let state_color = match st {
             State::Present | State::Inferred => GOOD,
             State::Absent => BAD,
@@ -1901,7 +1904,7 @@ fn draw_patch_popup(f: &mut Frame, app: &ApuScreen) {
         .count();
     let title = format!(
         " liberation series — {live}/{} live  [up/down scroll  esc close] ",
-        patches::count()
+        patches::count(Kernel::booted())
     );
     let block = Block::default()
         .borders(Borders::ALL)
