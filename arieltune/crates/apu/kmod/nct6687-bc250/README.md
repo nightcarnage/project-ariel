@@ -47,16 +47,28 @@ map is correct.
 
 ## Build + install
 
-The BC-250 is x86-64-**v3**; CachyOS host build tools are x86-64-**v4**, so the
-module cannot be built on the board (`fixdep: CPU ISA level is lower than
-required`). Build on a v4 host against the board's kernel build tree, copy the
-`.ko` over, install:
+It builds **on the board**:
 
 ```
-# on a v4 host (a modern x86-64 build host), against the board's rsync'd /lib/modules/<ver>/build:
-./build-and-install.sh build /path/to/kbuild-tree
-# copy the resulting nct6687.ko to the board, then on the board:
-./build-and-install.sh install nct6687.ko
+# against the running kernel:
+./build-and-install.sh build
+./build-and-install.sh install /tmp/nct6687d/nct6687.ko
+```
+
+`build` first runs the shared kernel-tree prep
+(`crates/bios/driver/prepare.sh`), and that is what makes it work on CachyOS.
+The CachyOS `linux-headers` package ships its host tools (`fixdep`, `modpost`,
+`objtool`) compiled `-march=x86-64-v4`; the Zen2 BC-250 has no AVX-512, so glibc
+refuses to start them — `CPU ISA level is lower than required`. Those tools only
+*use* baseline instructions, so stripping the advisory ISA note is enough to run
+them. This is a property of that package rather than of the board: a locally
+built headers package carries no such note, and there the prep is a no-op.
+
+Building on a separate x86-64-v4 host still works if you prefer. Pass that
+host's build tree and copy the `.ko` across:
+
+```
+./build-and-install.sh build /path/to/other-kbuild
 ```
 
 `install` drops the module in `/lib/modules/<ver>/updates/`, blacklists

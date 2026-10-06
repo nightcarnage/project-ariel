@@ -146,13 +146,20 @@ pub fn carrier_present() -> bool {
 /// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
 /// itself on a matching kernel (fresh blades with no nct6687 installed).
 ///
-/// The board itself CANNOT build this module: its CPU is x86-64-v3 while the
-/// CachyOS build tools are x86-64-v4, so fixdep aborts with "CPU ISA level is
-/// lower than required". Build it on an x86-64-v4 host against the board's
-/// kernel tree and copy the result here — `kmod/nct6687-bc250/` holds the
-/// source, the patches and `build-and-install.sh` (which auto-passes LLVM=1 when
-/// it detects a clang-built kernel, and plain gcc otherwise; the shipped CachyOS
-/// kernel is gcc-built, CONFIG_CC_IS_GCC=y). Rebuild for a different kernel.
+/// The board *can* build this module. What earlier revisions described here as
+/// an impossible build was really the CachyOS **linux-headers package** shipping
+/// host tools compiled `-march=x86-64-v4`, which the Zen2 cannot start ("CPU ISA
+/// level is lower than required"). That is a property of the package, not of the
+/// board, and it is handled by the shared tree prep at
+/// `crates/bios/driver/prepare.sh` — which strips the advisory ISA note and
+/// generates the missing `autoconf.h`. `kmod/nct6687-bc250/build-and-install.sh
+/// build` runs it for you; a locally built headers package carries no such note
+/// and needs no prep at all.
+///
+/// This embedded blob is therefore a convenience rather than the only route: it
+/// spares a fresh board any build. It matches exactly one kernel, so for any
+/// other kernel either rebuild it with that script or accept the read-only
+/// fallback in `ensure_carrier_sensors`.
 const NCT6687_KO: &[u8] =
     include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.2.9-1-cachyos-bore.ko");
 const NCT6687_KVER: &str = "7.2.9-1-cachyos-bore";

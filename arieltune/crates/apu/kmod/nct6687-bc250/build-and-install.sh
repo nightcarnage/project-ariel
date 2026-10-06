@@ -4,34 +4,56 @@
 # BC-250 carrier board. Writable PWM fan control (the in-kernel nct6683 is
 # read-only; the BC-250 EC ignores its FAN_CFG-handshake writes).
 #
-# The BC-250 CPU is x86-64-v3 but CachyOS host build tools are x86-64-v4, so
-# the kernel module CANNOT be built on the board itself (fixdep aborts with
-# "CPU ISA level is lower than required"). Build on an x86-64-v4 host (a modern
-# x86-64 build host) against the board's kernel build tree, then copy the .ko over.
+# This builds ON THE BOARD. An earlier version of this header claimed the
+# opposite, on the grounds that the board's CPU is x86-64-v3 while CachyOS
+# build tools are x86-64-v4. That describes the CachyOS *linux-headers package*,
+# not the board: it ships fixdep/modpost/objtool compiled -march=x86-64-v4, so
+# glibc refuses to start them on the Zen2 ("CPU ISA level is lower than
+# required"). The tools only use baseline instructions, so stripping the
+# advisory ISA note fixes it — and a locally built headers package carries no
+# such note at all. `build` applies the shared tree prep (which is a property of
+# the tree, not of this driver) before compiling.
+#
+# Building on a separate x86-64-v4 host still works if you prefer: prepare that
+# host's tree, compile there, and copy the .ko over.
 #
 # Usage:
-#   On the board:   ./build-and-install.sh install <path-to-nct6687.ko>
-#   On a v4 host:   ./build-and-install.sh build <kernel-build-tree> <upstream-nct6687d-src>
+#   On the board:   ./build-and-install.sh build                 # running kernel
+#                   ./build-and-install.sh install <path-to-nct6687.ko>
+#   Off-board:      ./build-and-install.sh build <other-kbuild> [upstream-src]
 set -euo pipefail
 UPSTREAM=https://github.com/Fred78290/nct6687d.git
 UPSTREAM_COMMIT=cd735225a95e04dda3e2befd94ba77e1f7609dcc
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Shared kernel-tree prep, used by the smiflash driver too — both problems it
+# fixes (the x86-64-v4 ISA note on the headers package's host tools, and the
+# missing autoconf.h) belong to the tree rather than to either driver, so it
+# lives in one place instead of being copied.
+TREE_PREP="$HERE/../../../bios/driver/prepare.sh"
 
 case "${1:-}" in
 build)
-  KBUILD=${2:?kernel build tree, e.g. /path/to/kbuild}
+  KBUILD=${2:-/lib/modules/$(uname -r)/build}
   SRC=${3:-/tmp/nct6687d}
+  [ -d "$KBUILD" ] || { echo "no kernel build tree at $KBUILD" >&2; exit 1; }
+  # Prepare the tree before anything compiles in it.
+  [ -x "$TREE_PREP" ] || [ -f "$TREE_PREP" ] || {
+    echo "tree prep not found at $TREE_PREP" >&2; exit 1; }
+  sh "$TREE_PREP" "$(basename "$KBUILD")" "$KBUILD"
   [ -d "$SRC/.git" ] || git clone "$UPSTREAM" "$SRC"
-  git -C "$SRC" checkout "$UPSTREAM_COMMIT"
+  git -C "$SRC" checkout -q "$UPSTREAM_COMMIT"
+  # Force the checkout back to pristine upstream before patching, so re-running
+  # `build` does not die with "patch does not apply" against a tree that already
+  # carries them. `checkout -- .` is not sufficient: a previously applied patch
+  # can be staged, and checkout restores from the index, not from HEAD. SRC is
+  # treated as a scratch build directory — local edits in it are discarded here.
+  git -C "$SRC" reset -q --hard "$UPSTREAM_COMMIT"
+  git -C "$SRC" clean -qfd
   git -C "$SRC" apply "$HERE/0001-nct6687-bc250-ec-firmware-attach.patch"
   git -C "$SRC" apply "$HERE/0002-nct6687-silence-secondary-port-open-bus.patch"
-  # The board's linux-headers package may ship a trimmed tree missing
-  # non-x86 arch Kconfigs; stub them so syncconfig can generate autoconf.h.
-  for i in $(seq 1 40); do
-    m=$(make -C "$KBUILD" syncconfig 2>&1 | sed -n 's/.*can.t open file "\([^"]*\)".*/\1/p' | head -1)
-    [ -z "$m" ] && break
-    mkdir -p "$KBUILD/$(dirname "$m")"; : > "$KBUILD/$m"
-  done
+  # The board's linux-headers package may ship a trimmed tree and omits
+  # autoconf.h; the shared tree prep above has already stubbed the missing
+  # Kconfig sources and run syncconfig, so nothing to repeat here.
   # A clang-built kernel's tree carries clang-only flags, so pass LLVM=1 to match
   # it; a gcc-built kernel (the CachyOS default — CONFIG_CC_IS_GCC=y) needs no
   # LLVM args and builds as before. Detected from the tree rather than assumed:

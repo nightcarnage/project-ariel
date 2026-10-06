@@ -1,9 +1,12 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# smiflash build prep — make a stripped/incomplete kernel-headers tree buildable
-# on a BC-250, so the module compiles ON THE BOARD with no cross-build host.
+# Kernel-tree prep — make a stripped/incomplete kernel-headers tree buildable
+# on a BC-250, so an out-of-tree module compiles ON THE BOARD with no
+# cross-build host.
 #
-# This is the DKMS PRE_BUILD hook (and is reused by `arieltune bios driver build`).
+# This is the smiflash DKMS PRE_BUILD hook (and is reused by
+# `arieltune bios driver build`). The nct6687 fan driver's build calls it too —
+# both problems it fixes are properties of the *tree*, not of any driver.
 # It is idempotent and non-destructive: on a complete headers tree (most distros)
 # every step is a no-op and a normal module build proceeds.
 #
@@ -13,14 +16,22 @@
 #      glibc refuses to start them on the Zen2 (no AVX-512) BC-250 CPU
 #      ("CPU ISA level is lower than required"). But they only *use* baseline
 #      instructions — stripping the advisory note lets them run unchanged.
+#      Note this is the *package's* doing, not the board's limit: a locally
+#      built headers package carries no such note and needs none of this.
 #   2. include/generated/autoconf.h is missing (the headers package never ran
 #      modules_prepare) and crypto/Kconfig sources arch Kconfig files the package
 #      stripped. We stub the missing sources and run syncconfig to generate it.
 set -eu
 
+# Arguments: [KVER] [TREE]
+#   KVER  kernel release whose /lib/modules/<KVER>/build is to be prepared
+#         (default: the running kernel)
+#   TREE  explicit build tree, instead of /lib/modules/<KVER>/build — lets a
+#         caller prepare a tree that is not installed under /lib/modules, such
+#         as one rsync'd over for an off-board build
 KVER="${1:-$(uname -r)}"
-KDIR="/lib/modules/$KVER/build"
-[ -d "$KDIR" ] || { echo "smiflash prepare: no kernel build tree at $KDIR" >&2; exit 1; }
+KDIR="${2:-/lib/modules/$KVER/build}"
+[ -d "$KDIR" ] || { echo "kernel-tree prep: no kernel build tree at $KDIR" >&2; exit 1; }
 
 # 1. ISA-note strip — only when this CPU lacks AVX-512 (so we don't touch a
 #    machine whose tools already run). Removing the note is harmless: it drops an
@@ -50,4 +61,4 @@ if [ ! -f "$KDIR/include/generated/autoconf.h" ]; then
 	done
 fi
 
-echo "smiflash prepare: kernel tree ready for $KVER"
+echo "kernel-tree prep: tree ready for $KVER"
