@@ -5803,8 +5803,8 @@ step generation) — the open compute defect, analysed in Chapter 6.
 │  Compute units       40         patch-16 unlock (patch 12 hangs ROCm on the first KFD│
 │                                 queue)                                               │
 │  Memory              ~17.2 GB   unified GDDR6 (UMA)                                  │
-│  Kernel              7.0.9      cachyos, 25-patch build (amdgpu.ko srcversion        │
-│                                 C484A6D2)                                            │
+│  Kernel              7.2.9      cachyos-bore, 26-patch build (amdgpu.ko srcversion   │
+│                                 11F98DC7EE7590D51AA9C9C)                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ REQUIRED ENVIRONMENT ───────────────────────────────────────────────────────────────┐
@@ -7515,7 +7515,7 @@ completes, the next one dies.
 
 ┌─ VERIFIED STACK ─────────────────────────────────────────────────────────────────────┐
 │  Hardware   BC-250     gfx1013 / Cyan Skillfish, 40 CU, ~17.2 GB unified GDDR6       │
-│  Kernel     7.0.9      cachyos, 25-patch build (modtree build2, srcversion C484A6D2) │
+│  Kernel     7.2.9      cachyos-bore, 26-patch build (modtree 7.2.9-2)                │
 │  ROCm       7.2.4      arch4edu                                                      │
 │  PyTorch    2.12.0a0   custom gfx1013 build                                          │
 │  CU unlock  patch 16   CC + SPI, no RLC (patch 12 hangs ROCm on the first KFD queue) │
