@@ -3,7 +3,7 @@
 # Build and install arieltune -- the unified BC-250 tuning suite (WIKI|BIOS|APU|MEM).
 #
 #   ./install.sh                 build (release) + install to /usr/local/bin
-#   ./install.sh --with-units    also install the APU GPU/route systemd units
+#   ./install.sh --with-units    print how to lay + enable the APU GPU power unit
 #   ./install.sh --with-driver   also build+install the BIOS smiflash DKMS driver
 #
 # Installs ONE binary (`arieltune`) plus:
@@ -34,7 +34,7 @@ command -v cargo >/dev/null 2>&1 || {
 }
 
 echo ">> building release binary..."
-cargo build --release
+cargo build --release --locked
 
 echo ">> installing $BIN (sudo)..."
 sudo install -d "$PREFIX/bin"
@@ -49,8 +49,14 @@ done
 echo ">> installed: $("$BIN" --version)"
 
 if [ "$WITH_UNITS" = 1 ]; then
-  echo ">> APU units: pick a power mode to lay + enable the unit, e.g."
-  echo "     sudo arieltune apu gpu autosleep-on"
+  # The unit is not a file this script copies: choosing a power mode writes and
+  # enables it (arieltune-gpu.service, driven by the persisted power.json), so
+  # there is nothing to lay until a mode is picked. Say that instead of
+  # implying the flag installed something.
+  echo ">> APU GPU power unit: the mode command writes + enables it, so pick one:"
+  echo "     sudo arieltune apu gpu governor-on | autosleep-on | force <mhz>"
+  echo "   optional CU-routing unit:"
+  echo "     sudo arieltune apu cu route-save && sudo systemctl enable arieltune-route"
 fi
 if [ "$WITH_DRIVER" = 1 ]; then
   echo ">> building the BIOS smiflash DKMS driver (on-board)..."
