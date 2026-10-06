@@ -28,7 +28,20 @@ use std::process::Command;
 const INSTALL_DIR: &str = "updates";
 
 /// Prebuilt `smiflash` modules, keyed by the exact kernel release they were
-/// built against. Keep in step with the kernel series arieltune supports.
+/// built against.
+///
+/// Two entries for two kernels: the supported set is `Kernel::ALL` —
+/// `7.2.9-1-cachyos-bore` and `7.0.9-1-cachyos-bore` — and both are covered
+/// here, so every supported kernel has a driver with no build tree required.
+///
+/// This table is deliberately **not** symmetric with the fan driver's
+/// `NCT6687_KO`, which carries a third entry for the older stock
+/// `7.0.9-1-cachyos` build. That asymmetry is the point, not an omission: for
+/// the fan driver the fallback is *read-only sensors*, so covering that flavour
+/// buys real function. Here the fallback is the driver simply being absent from
+/// an optional BIOS-editing path, against a fleet steering to the two `-bore`
+/// series — so there is nothing to buy. A kernel outside this table falls
+/// through to the on-board build, which reports itself as such.
 const SMIFLASH_KO: &[(&str, &[u8])] = &[
     (
         "7.2.9-1-cachyos-bore",
