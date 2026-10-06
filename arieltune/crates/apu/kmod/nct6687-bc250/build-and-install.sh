@@ -31,8 +31,11 @@ build)
     [ -z "$m" ] && break
     mkdir -p "$KBUILD/$(dirname "$m")"; : > "$KBUILD/$m"
   done
-  # The board's kernel is clang-built (see include/config/CC_IS_CLANG); its
-  # flags are clang-only, so pass LLVM=1. gcc-built kernels build as before.
+  # A clang-built kernel's tree carries clang-only flags, so pass LLVM=1 to match
+  # it; a gcc-built kernel (the CachyOS default — CONFIG_CC_IS_GCC=y) needs no
+  # LLVM args and builds as before. Detected from the tree rather than assumed:
+  # the board's shipped kernel is gcc-built, but a clang-built tree still works
+  # here without editing this script.
   LLVM_ARG=
   [ -e "$KBUILD/include/config/CC_IS_CLANG" ] && LLVM_ARG="LLVM=1"
   make -C "$KBUILD" M="$SRC" $LLVM_ARG modules

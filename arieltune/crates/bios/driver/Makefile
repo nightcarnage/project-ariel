@@ -10,11 +10,13 @@ obj-m := smiflash.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-# The BC-250's kernel (7.2.9-1-cachyos-bore) is built with clang; its build tree
-# passes clang-only flags (e.g. -mstack-alignment=8) that gcc rejects. Detect a
-# clang-built kernel via its config marker and pass LLVM=1 so both the manual
-# build and the DKMS build (which runs this Makefile) use the matching toolchain.
-# A gcc-built kernel has no CC_IS_CLANG marker and builds the ordinary way.
+# A clang-built kernel's tree passes clang-only flags (e.g.
+# -mstack-alignment=8) that gcc rejects, so detect that via the config marker and
+# pass LLVM=1 to use the matching toolchain for both the manual build and the
+# DKMS build (which runs this Makefile). The BC-250's shipped kernel is
+# gcc-built (CONFIG_CC_IS_GCC=y, CONFIG_LTO_NONE=y on the 7.2.9-1 config), so no
+# marker is present and it takes the ordinary path; the detection is kept for
+# clang-built kernels.
 CLANG_KERNEL := $(wildcard $(KDIR)/include/config/CC_IS_CLANG)
 MAKE_EXTRA := $(if $(strip $(CLANG_KERNEL)),LLVM=1,)
 

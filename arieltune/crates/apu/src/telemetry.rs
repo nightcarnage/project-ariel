@@ -144,14 +144,18 @@ pub fn carrier_present() -> bool {
 
 /// The prebuilt writable driver, embedded in the binary, and the exact kernel
 /// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
-/// itself on a matching kernel (fresh blades with no nct6687 installed). The
-/// board CAN also rebuild it in place (its kernel is clang-built: use LLVM=1,
-/// see `kmod/nct6687-bc250/build-and-install.sh`), but the embedded copy keeps
-/// a clean blade fully autonomous. Source + patch + rebuild script:
-/// `kmod/nct6687-bc250/` — rebuild there for a different kernel.
+/// itself on a matching kernel (fresh blades with no nct6687 installed).
+///
+/// The board itself CANNOT build this module: its CPU is x86-64-v3 while the
+/// CachyOS build tools are x86-64-v4, so fixdep aborts with "CPU ISA level is
+/// lower than required". Build it on an x86-64-v4 host against the board's
+/// kernel tree and copy the result here — `kmod/nct6687-bc250/` holds the
+/// source, the patches and `build-and-install.sh` (which auto-passes LLVM=1 when
+/// it detects a clang-built kernel, and plain gcc otherwise; the shipped CachyOS
+/// kernel is gcc-built, CONFIG_CC_IS_GCC=y). Rebuild for a different kernel.
 const NCT6687_KO: &[u8] =
-    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko");
-const NCT6687_KVER: &str = "7.0.9-1-cachyos";
+    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.2.9-1-cachyos-bore.ko");
+const NCT6687_KVER: &str = "7.2.9-1-cachyos-bore";
 
 /// Running kernel release (`uname -r`).
 fn running_kver() -> String {
@@ -165,8 +169,8 @@ fn running_kver() -> String {
 /// if it isn't already resolvable by modprobe. Returns true if the module is
 /// available to load afterwards. When the running kernel doesn't match the
 /// prebuilt vermagic we return false rather than force-load a mismatched module
-/// (rebuild for the new kernel via `kmod/nct6687-bc250/build-and-install.sh`,
-/// which auto-passes LLVM=1 on clang-built kernels). Best-effort; needs root.
+/// (rebuild for the new kernel as described on `NCT6687_KO`). Best-effort; needs
+/// root.
 fn install_writable_module() -> bool {
     let kver = running_kver();
     let dst = PathBuf::from(format!("/lib/modules/{kver}/updates/nct6687.ko"));
