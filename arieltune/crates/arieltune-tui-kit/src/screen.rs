@@ -1,4 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
+//! The contract every tab implements: how a screen takes keys, what it draws,
+//! and how the shell and the active pane share one keyspace.
+//!
+//! Routing is pane-first. The four merged apps each bind bare
+//! `Tab`/`Shift-Tab`/`Shift`/`q` internally, so the shell cannot claim those
+//! globally without stealing them from the panes. Instead the active screen
+//! sees every key and the shell acts only on what the screen returns as
+//! [`Outcome::Ignored`] while not in a modal sub-state.
+
 use crossterm::event::KeyEvent;
 use ratatui::{layout::Rect, Frame};
 use std::time::Duration;

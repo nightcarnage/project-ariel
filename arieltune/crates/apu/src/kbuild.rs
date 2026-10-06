@@ -70,6 +70,8 @@ const RUST_ABI_PATCH_NAME: &str = "0002-rust-abi-rename.patch";
 /// it must never be counted by `aputune patches`.
 const RUST_ABI_PATCH: &str = include_str!("../patches/rust-abi-rename.patch");
 
+/// Everything one kernel build needs: which PKGBUILD to drive, where to stage
+/// the materialized patch series, and which compiler to force.
 pub struct BuildOpts {
     /// Directory holding the CachyOS PKGBUILD (+ source tarball, or makepkg
     /// fetches it). Required.
