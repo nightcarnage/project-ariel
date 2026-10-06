@@ -401,15 +401,54 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Required (binary, package) pairs for a build on THIS host. `local_install`
-/// is true when `opts.target` is None (the install/mkinitcpio steps run on
-/// this host too, not on a remote target).
+/// Whether the CachyOS PKGBUILD will select the clang + LLVM toolchain for the
+/// kernel.
 ///
-/// The CachyOS 7.2.9 PKGBUILD compiles with clang + thinLTO and has
-/// CONFIG_RUST=y, and both makepkg steps run with --nodeps, so every
-/// makedepend must be checked here — a missing clang/bindgen otherwise only
-/// surfaces deep into the ~30 minute build. `rust-src` is a directory
-/// component, not a binary; it is probed separately in `preflight_deps`.
+/// The PKGBUILD gates `CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1` behind
+/// `_is_lto_kernel`, i.e. `_use_llvm_lto` being thin/full/thin-dist — and it
+/// defaults that to `none`. The shipped config agrees (`CONFIG_LTO_NONE=y` with
+/// `CONFIG_CC_IS_GCC=y`), and so does the running kernel, which reports
+/// `gcc (GCC)`. A stock build is therefore gcc and never invokes an LLVM tool.
+///
+/// `None` means "cannot tell" (no PKGBUILD yet, or the value is supplied some
+/// way this cannot see) and callers must keep requiring LLVM: guessing wrong
+/// wastes a ~30 minute build, so the safe default is to demand them.
+fn pkgbuild_uses_llvm(opts: &BuildOpts) -> Option<bool> {
+    let dir = opts.pkgbuild_dir.as_ref()?;
+    let text = std::fs::read_to_string(dir.join("PKGBUILD")).ok()?;
+
+    // Only an assignment counts. The PKGBUILD writes this as a shell default
+    // assignment, `: "${_use_llvm_lto:=none}"`, but plain `_use_llvm_lto=thin`
+    // is accepted too. Matching any line that merely mentions the variable would
+    // pick up `if [ "$_use_llvm_lto" != "none" ]` instead and read "none" out of
+    // a comparison.
+    let line = text.lines().map(str::trim).find(|l| {
+        l.starts_with("_use_llvm_lto=")
+            || l.starts_with("_use_llvm_lto =")
+            || l.contains("${_use_llvm_lto:=")
+    })?;
+
+    let val = if let Some((_, v)) = line.split_once("${_use_llvm_lto:=") {
+        v
+    } else {
+        line.split_once('=')?.1
+    };
+    let val = val
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '}');
+
+    Some(matches!(val, "thin" | "full" | "thin-dist"))
+}
+
+/// Required (binary, package) pairs for a build on THIS host.
+///
+/// Both makepkg steps run with --nodeps, so every makedepend must be checked
+/// here — a missing one otherwise only surfaces deep into the ~30 minute build.
+/// `rust-src` is a directory component, not a binary; it is probed separately in
+/// `preflight_deps`.
+///
+/// The toolchain is the PKGBUILD's own choice rather than a fixed one, so the
+/// LLVM group below is conditional — see `pkgbuild_uses_llvm`.
 fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
     let cxx = opts.cc.replace("gcc", "g++");
     let mut req = vec![
@@ -423,24 +462,32 @@ fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
         // the PKGBUILD. Neither this path nor arieltune's makepkg steps skip
         // source integrity, so the hash is load-bearing, not decorative.
         ("b2sum".to_string(), "coreutils".to_string()),
-        // clang + thinLTO toolchain (PKGBUILD passes CC=clang LLVM=1
-        // LLVM_IAS=1 as make args, overriding the environment). LLVM=1
-        // remaps the whole binutils toolchain too — llvm-ar/llvm-nm/
-        // llvm-objcopy/llvm-strip/llvm-readelf all ship in the `llvm`
-        // package, which `clang` does NOT pull in on Arch/CachyOS
-        // (only llvm-libs). A missing one fails deep into the build.
-        ("clang".to_string(), "clang".to_string()),
-        ("ld.lld".to_string(), "lld".to_string()),
-        ("llvm-ar".to_string(), "llvm".to_string()),
-        ("llvm-nm".to_string(), "llvm".to_string()),
-        ("llvm-objcopy".to_string(), "llvm".to_string()),
-        ("llvm-strip".to_string(), "llvm".to_string()),
-        ("llvm-readelf".to_string(), "llvm".to_string()),
+        // BTF generation, needed whatever compiler builds the kernel.
         ("pahole".to_string(), "pahole".to_string()),
         // CONFIG_RUST=y in the shipped 7.2.9 config.
         ("rustc".to_string(), "rust".to_string()),
         ("bindgen".to_string(), "rust-bindgen".to_string()),
     ];
+
+    // clang + LLVM, only for the LTO kernels the PKGBUILD builds with them.
+    // There it passes CC=clang LLVM=1 LLVM_IAS=1 as make args, overriding the
+    // environment, and LLVM=1 remaps the whole binutils toolchain too —
+    // llvm-ar/llvm-nm/llvm-objcopy/llvm-strip/llvm-readelf all ship in the `llvm`
+    // package, which `clang` does NOT pull in on Arch/CachyOS (only llvm-libs).
+    // A missing one fails deep into the build. A stock gcc build invokes none of
+    // them, so demanding them there only turns a working setup into a false
+    // "missing clang" abort.
+    if pkgbuild_uses_llvm(opts) != Some(false) {
+        req.extend([
+            ("clang".to_string(), "clang".to_string()),
+            ("ld.lld".to_string(), "lld".to_string()),
+            ("llvm-ar".to_string(), "llvm".to_string()),
+            ("llvm-nm".to_string(), "llvm".to_string()),
+            ("llvm-objcopy".to_string(), "llvm".to_string()),
+            ("llvm-strip".to_string(), "llvm".to_string()),
+            ("llvm-readelf".to_string(), "llvm".to_string()),
+        ]);
+    }
     if opts.target.is_none() {
         req.push(("mkinitcpio".to_string(), "mkinitcpio".to_string()));
     }
@@ -1331,9 +1378,12 @@ mod tests {
         assert!(!names.contains(&"mkinitcpio".to_string()));
     }
 
+    /// The safe default: with no readable PKGBUILD the toolchain the build will
+    /// use cannot be determined, so nothing may be dropped.
     #[test]
-    fn required_deps_include_llvm_rust_toolchain() {
+    fn required_deps_include_llvm_when_the_pkgbuild_is_unknown() {
         let local = BuildOpts {
+            pkgbuild_dir: None,
             target: None,
             ..Default::default()
         };
@@ -1353,6 +1403,110 @@ mod tests {
             assert!(
                 names.contains(&need.to_string()),
                 "missing preflight dep: {need}"
+            );
+        }
+    }
+
+    /// A directory holding a PKGBUILD with just the toolchain default line.
+    ///
+    /// Every call gets its own directory. The name must carry something unique
+    /// per call and not just the content: two tests that pass the same line
+    /// would otherwise share a path, and `fs::write` truncates before it writes,
+    /// so a concurrent read can catch an empty PKGBUILD and report `None`
+    /// instead of the real value (this made the suite flaky).
+    fn pkgbuild_dir_with(line: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+        let slug: String = line
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let dir = std::env::temp_dir().join(format!(
+            "apu-kbuild-{}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            slug
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("PKGBUILD"), format!("{line}\n")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pkgbuild_uses_llvm_reads_the_default_assignment_form() {
+        // The real PKGBUILD writes it as `: "${_use_llvm_lto:=none}"`.
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with(r#": "${_use_llvm_lto:=none}""#)),
+            ..Default::default()
+        };
+        assert_eq!(pkgbuild_uses_llvm(&opts), Some(false));
+
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with(r#": "${_use_llvm_lto:=thin}""#)),
+            ..Default::default()
+        };
+        assert_eq!(pkgbuild_uses_llvm(&opts), Some(true));
+    }
+
+    #[test]
+    fn pkgbuild_uses_llvm_reads_a_plain_assignment() {
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with("_use_llvm_lto=thin-dist")),
+            ..Default::default()
+        };
+        assert_eq!(pkgbuild_uses_llvm(&opts), Some(true));
+    }
+
+    /// A line that merely *mentions* the variable must not be read as its value.
+    /// `if [ "$_use_llvm_lto" != "none" ]` contains both `=` and `none`, so
+    /// matching loosely would report the opposite of the truth.
+    #[test]
+    fn pkgbuild_uses_llvm_ignores_comparison_lines() {
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with(
+                r#"  if [ "$_use_llvm_lto" != "none" ]; then"#,
+            )),
+            ..Default::default()
+        };
+        assert_eq!(pkgbuild_uses_llvm(&opts), None);
+    }
+
+    #[test]
+    fn required_deps_drop_llvm_for_a_gcc_pkgbuild() {
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with(r#": "${_use_llvm_lto:=none}""#)),
+            target: None,
+            ..Default::default()
+        };
+        let names: Vec<String> = required_deps(&opts).into_iter().map(|(b, _)| b).collect();
+
+        for gone in ["clang", "ld.lld", "llvm-ar", "llvm-strip", "llvm-readelf"] {
+            assert!(
+                !names.contains(&gone.to_string()),
+                "{gone} is never invoked by a gcc build and must not be required"
+            );
+        }
+        for kept in ["pahole", "rustc", "bindgen", "bc", "make", "b2sum"] {
+            assert!(
+                names.contains(&kept.to_string()),
+                "{kept} must still be required"
+            );
+        }
+    }
+
+    #[test]
+    fn required_deps_keep_llvm_for_an_lto_pkgbuild() {
+        let opts = BuildOpts {
+            pkgbuild_dir: Some(pkgbuild_dir_with(r#": "${_use_llvm_lto:=thin}""#)),
+            target: None,
+            ..Default::default()
+        };
+        let names: Vec<String> = required_deps(&opts).into_iter().map(|(b, _)| b).collect();
+        for need in ["clang", "ld.lld", "llvm-ar", "llvm-strip"] {
+            assert!(
+                names.contains(&need.to_string()),
+                "{need} must be required for an LTO build"
             );
         }
     }

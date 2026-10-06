@@ -30,16 +30,24 @@ Build the series against `linux-cachyos-bore` 7.2.9-1 (the `linux-cachyos-bore/`
 
 On Arch/CachyOS the distro Rust toolchain is enough — no rustup needed. On other
 distros, install Rust via [rustup.rs](https://rustup.rs) first. The patched-kernel
-build then needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain
-(`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`,
-`rust-bindgen`, `rust-src` — the shipped 7.2.9 config has `CONFIG_RUST=y`).
+build then needs `gcc15`, `bc`, `base-devel`, `pahole`, and the kernel-Rust pieces
+(`rust`, `rust-bindgen`, `rust-src` — the shipped 7.2.9 config has `CONFIG_RUST=y`).
 `mkinitcpio` ships by default on CachyOS. On a fresh install, sync mirrors first - a live
 ISO's package database can be stale enough that a needed package 404s:
 
 ```sh
 sudo pacman -Syyu
-sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bindgen rust-src
+sudo pacman -S --needed gcc15 bc base-devel pahole rust rust-bindgen rust-src
 ```
+
+The kernel build is **gcc**, not clang. The PKGBUILD gates
+`CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1` behind `_is_lto_kernel` — `_use_llvm_lto`
+being `thin`/`full`/`thin-dist` — and defaults that to `none`. The shipped 7.2.9
+config agrees (`CONFIG_CC_IS_GCC=y` with `CONFIG_LTO_NONE=y`) and the running
+kernel reports `gcc`, so a stock build never invokes an LLVM tool. Add
+`clang llvm lld` only if you deliberately build an LLVM-LTO flavour: `arieltune`
+reads `_use_llvm_lto` from the PKGBUILD and requires them for exactly those, so a
+stock build no longer stops on a "missing clang" it was never going to call.
 
 `arieltune apu build` pre-flight-checks the toolchain before touching anything and
 aborts in seconds with the exact missing packages instead of failing deep into the

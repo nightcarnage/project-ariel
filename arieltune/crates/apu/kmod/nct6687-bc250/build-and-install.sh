@@ -35,9 +35,16 @@ build)
   # it; a gcc-built kernel (the CachyOS default — CONFIG_CC_IS_GCC=y) needs no
   # LLVM args and builds as before. Detected from the tree rather than assumed:
   # the board's shipped kernel is gcc-built, but a clang-built tree still works
-  # here without editing this script.
+  # here without editing this script. Say which one was picked — assuming the
+  # answer is what produced the "the board's kernel is clang-built" myth in the
+  # first place.
   LLVM_ARG=
-  [ -e "$KBUILD/include/config/CC_IS_CLANG" ] && LLVM_ARG="LLVM=1"
+  if [ -e "$KBUILD/include/config/CC_IS_CLANG" ]; then
+    LLVM_ARG="LLVM=1"
+    echo "kernel toolchain: clang  (the tree has CC_IS_CLANG, passing LLVM=1)"
+  else
+    echo "kernel toolchain: gcc    (no CC_IS_CLANG in the tree, no LLVM flags)"
+  fi
   make -C "$KBUILD" M="$SRC" $LLVM_ARG modules
   echo "built: $SRC/nct6687.ko  (copy to the board and run: $0 install nct6687.ko)"
   ;;

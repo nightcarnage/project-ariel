@@ -45,9 +45,10 @@ arieltune                    # launch the TUI (opens on WIKI)
 See [`arieltune/README.md`](arieltune/README.md) for the full build/usage guide.
 
 A Rust toolchain is only enough to build `arieltune` itself. Building the *patched kernel*
-later (`arieltune apu build`/`liberate`) needs a bigger toolchain (gcc15, clang/llvm/lld,
-rust-bindgen, rust-src, and more) - follow [`arieltune/README.md`](arieltune/README.md)'s
-own "Build dependencies" section before running that step, do not assume the Rust toolchain
+later (`arieltune apu build`/`liberate`) needs a bigger toolchain (gcc15, rust-bindgen,
+rust-src, and more; the kernel build is gcc - clang/llvm/lld only if you deliberately
+choose an LLVM-LTO flavour) - follow [`arieltune/README.md`](arieltune/README.md)'s own
+"Build dependencies" section before running that step, do not assume the Rust toolchain
 above already covers it.
 
 ## Safety
