@@ -493,6 +493,39 @@ fn pkgbuild_uses_llvm(opts: &BuildOpts) -> Option<bool> {
     Some(matches!(val, "thin" | "full" | "thin-dist"))
 }
 
+/// `name="value"` or `name=value` on its own line, unquoted. `None` when the
+/// value is an expansion (`${_major}.${_minor}`) — a literal is the only thing
+/// worth comparing against a target.
+fn assignment(line: &str, name: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix(name)?.strip_prefix('=')?;
+    let v = rest.split_whitespace().next().unwrap_or("");
+    let v = v.trim_matches(|c: char| c == '"' || c == '\'');
+    if v.is_empty() || v.contains('$') {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// The kernel version a PKGBUILD builds, as `major.patch` (`7.2.9`).
+///
+/// CachyOS splits it as `_major=7.2` / `_minor=9` — `_minor` is really the patch
+/// level — with `pkgver=${_major}.${_minor}`. Parsed explicitly rather than taken
+/// from `pkgver`, which is an expansion and so tells us nothing here.
+fn pkgbuild_kernel_version(dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(dir.join("PKGBUILD")).ok()?;
+    let mut major = None;
+    let mut minor = None;
+    for line in text.lines() {
+        if let Some(v) = assignment(line, "_major") {
+            major = Some(v);
+        } else if let Some(v) = assignment(line, "_minor") {
+            minor = Some(v);
+        }
+    }
+    Some(format!("{}.{}", major?, minor?))
+}
+
 /// Required (binary, package) pairs for a build on THIS host.
 ///
 /// Both makepkg steps run with --nodeps, so every makedepend must be checked
@@ -1072,6 +1105,29 @@ pub fn build(opts: BuildOpts) -> Result<()> {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
 
+    // Tie the tree to the target. Nothing used to connect the two, so handing
+    // over a 7.0.9 PKGBUILD with `--kernel 7.2.9` (or forgetting the flag) got
+    // as far as applying the wrong series, failing hunk by hunk after the
+    // expensive parts had already run. Refuse before anything heavy starts.
+    // Skipped when the version cannot be read: an unparseable PKGBUILD is not
+    // evidence of a mismatch, and the patch step still fails loudly.
+    if let Some(found) = pkgbuild_kernel_version(&pkgbuild) {
+        if found != opts.kernel.label() {
+            bail!(
+                "PKGBUILD builds {found}, but the target kernel is {} (--kernel {}, \
+                 APUTUNE_KERNEL={}).\nPoint --pkgbuild at the {}-1 tree (pin {}), \
+                 or select --kernel {found}. The {} series cannot apply to a {found} \
+                 tree.",
+                opts.kernel.label(),
+                opts.kernel.label(),
+                opts.kernel.label(),
+                opts.kernel.label(),
+                opts.kernel.pkgbuild_pin(),
+                opts.kernel.label()
+            );
+        }
+    }
+
     // State the target up front: the series, the embedded nct6687 module and
     // the PKGBUILD pin all follow from this one choice, and a build that
     // silently picked the wrong kernel is expensive to notice later.
@@ -1501,6 +1557,40 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("PKGBUILD"), format!("{line}\n")).unwrap();
         dir
+    }
+
+    /// A real CachyOS PKGBUILD splits the version as `_major=7.2` / `_minor=9`;
+    /// `pkgver` is an expansion, so it is deliberately not the source.
+    #[test]
+    fn pkgbuild_kernel_version_reads_the_cachyos_split() {
+        let dir = std::env::temp_dir().join(format!("aputune-kver-split-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(
+            dir.join("PKGBUILD"),
+            "pkgbase=\"linux-${_pkgsuffix}\"\n_major=7.2\n_minor=9\n\
+             pkgver=${_major}.${_minor}\npkgrel=1\n",
+        )
+        .unwrap();
+        assert_eq!(pkgbuild_kernel_version(&dir).as_deref(), Some("7.2.9"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pkgbuild_kernel_version_is_none_without_a_literal() {
+        let dir = std::env::temp_dir().join(format!("aputune-kver-none-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("PKGBUILD"), "pkgver=${_major}.${_minor}\n").unwrap();
+        assert_eq!(pkgbuild_kernel_version(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assignment_rejects_expansions_and_accepts_quoted() {
+        assert_eq!(assignment("_major=7.2", "_major").as_deref(), Some("7.2"));
+        assert_eq!(assignment("_minor=\"9\"", "_minor").as_deref(), Some("9"));
+        assert_eq!(assignment("pkgver=${_major}.${_minor}", "pkgver"), None);
+        assert_eq!(assignment("_majorx=1", "_major"), None);
+        assert_eq!(assignment("_major=", "_major"), None);
     }
 
     #[test]
