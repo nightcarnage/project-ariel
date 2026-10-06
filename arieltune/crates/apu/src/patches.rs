@@ -2,15 +2,30 @@
 //! The BC-250 liberation kernel-patch series, embedded into the binary.
 //!
 //! aputune *owns* the silicon-liberation surface: the curated CachyOS amdgpu
-//! series (authored on `linux-cachyos-bore-7.0.2`, structurally identical through
-//! `7.0.9` — the pinned, known-good kernel) ships inside the binary as data, and
-//! each patch carries the *runtime tell* that proves it is live on the running
-//! kernel. That lets `aputune patches` report a true per-patch state without
-//! trusting a version string, and lets the build path (see `kbuild`) reconstruct
-//! the exact source tree it was validated against.
+//! series (authored on `linux-cachyos-bore-7.0.2`, rebased onto
+//! `linux-cachyos-bore-7.2.9` — the current target) ships inside the binary as
+//! data, and each patch carries the *runtime tell* that proves it is live on the
+//! running kernel. That lets `aputune patches` report a true per-patch state
+//! without trusting a version string, and lets the build path (see `kbuild`)
+//! reconstruct the exact source tree it was validated against.
 //!
-//! Pin to `linux-cachyos-bore-7.0.9`. Newer kernels (7.0.11+) regress the BC-250
-//! SDMA path — do not build the series against them until that is resolved.
+//! **Target: `linux-cachyos-bore-7.2.9`.** The series no longer pins 7.0.9; the
+//! 7.0.10-13 SDMA regression that motivated that pin is gone, and 7.0.9 is now
+//! the thing that breaks — its config sets CONFIG_RUST=y while
+//! `scripts/generate_rust_target.rs` hard-codes the pre-rename
+//! `x86-softfloat` target ABI, so any rustc new enough to reject that spelling
+//! (1.99+) kills the build in `prepare()`. 7.2.9 carries the renamed
+//! `softfloat` spec, so the series builds without the shim.
+//!
+//! The rebase for 7.2.9 was mechanical and small: two of patch 07's hunks were
+//! re-anchored, because 7.2.9 inserts a single new line inside each of their
+//! three-line contexts (`smu->smc_driver_if_version = MP1_DRIVER_IF_VERSION;`
+//! in `cyan_skillfish_ppt.c`, and `#include "smu_v15_0_8_ppt.h"` in
+//! `amdgpu_smu.c`). Nothing else in the applied set needed a change: 09/10/11
+//! patch only the debugfs block that 07 *adds*, so they applied verbatim once
+//! 07 was fixed. Patch 29 was dropped — it backported `amdgpu_discovery_tmr_info`
+//! from newer kernels, and 7.2.9 already has it
+//! (`amdgpu_discovery_get_tmr_info()`, `mmDRIVER_SCRATCH_0`).
 //!
 //! The patches themselves are GPL-2.0 (kernel diffs) — the same license as this
 //! project (GPL-2.0-only, matching upstream cachenetics/project-ariel).
@@ -60,7 +75,7 @@ macro_rules! patch {
     ($id:literal, $file:literal, $title:literal, $desc:literal, $touches:literal, $tell:expr) => {
         Patch {
             id: $id,
-            body: include_str!(concat!("../patches/bc250-cachyos-7.0.9/", $file)),
+            body: include_str!(concat!("../patches/bc250-cachyos-7.2.9/", $file)),
             title: $title,
             desc: $desc,
             touches: $touches,
@@ -386,21 +401,12 @@ pub const SERIES: &[Patch] = &[
         "cyan_skillfish_ppt.c, smu11_driver_if_cyan_skillfish.h",
         Tell::ModParam("cs_eight_core_map")
     ),
-    patch!(
-        "29",
-        "29-bc250-tmr-discovery-offset-fix.patch",
-        "Honor IFWI-reported discovery TMR offset (scratch-register fallback)",
-        "The 6.12 discovery read assumes the IP discovery TMR sits at the top \
-         of VRAM (vram_size - 64K) and only falls back to sysmem when the VRAM \
-         size register reads zero. On BC-250 firmware neither assumption holds: \
-         the TMR location is reported through the driver scratch registers \
-         (mmDRIVER_SCRATCH_0/1/2), with the legacy default probed first. \
-         Backports the upstream amdgpu get_tmr_info logic (shipping in newer \
-         kernels) so discovery succeeds on boards whose TMR is not at the \
-         legacy default. Runtime-validated on blade15.",
-        "amdgpu_discovery.c, amdgpu_discovery.h",
-        Tell::Bundled
-    ),
+    // Patch 29 (bc250-tmr-discovery-offset-fix) is intentionally absent: it
+    // backported `amdgpu_discovery_get_tmr_info` from newer kernels, and 7.2.9
+    // already ships that logic (`mmDRIVER_SCRATCH_0/1/2`,
+    // `amdgpu_acpi_get_tmr_info`). Applying it on 7.2.9 reports
+    // "Reversed (or previously applied)". Its file is not carried in the
+    // 7.2.9 series directory.
     patch!(
         "30",
         "30-cyan-skillfish2-hardcoded-fallback.patch",

@@ -47,7 +47,7 @@ const VERIFY_REMOTE_BIN: &str = "/tmp/aputune-verify";
 /// just the README — a fresh CachyOS install has no pinned kernel source yet.
 const NO_PKGBUILD_HINT: &str = "get one with:\n  \
     git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos\n  \
-    git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1\n  \
+    git -C ~/linux-cachyos checkout b11ba14854d9748bdb3e3daf7a90e8d3a31004ec   # 7.2.9-1\n  \
     aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run\n\
     (README: \"Liberation quick start\", step 2)";
 
@@ -405,7 +405,7 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
 /// is true when `opts.target` is None (the install/mkinitcpio steps run on
 /// this host too, not on a remote target).
 ///
-/// The CachyOS 7.0.9 PKGBUILD compiles with clang + thinLTO and has
+/// The CachyOS 7.2.9 PKGBUILD compiles with clang + thinLTO and has
 /// CONFIG_RUST=y, and both makepkg steps run with --nodeps, so every
 /// makedepend must be checked here — a missing clang/bindgen otherwise only
 /// surfaces deep into the ~30 minute build. `rust-src` is a directory
@@ -437,7 +437,7 @@ fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
         ("llvm-strip".to_string(), "llvm".to_string()),
         ("llvm-readelf".to_string(), "llvm".to_string()),
         ("pahole".to_string(), "pahole".to_string()),
-        // CONFIG_RUST=y in the shipped 7.0.9 config.
+        // CONFIG_RUST=y in the shipped 7.2.9 config.
         ("rustc".to_string(), "rust".to_string()),
         ("bindgen".to_string(), "rust-bindgen".to_string()),
     ];
@@ -496,7 +496,7 @@ fn missing_deps_message(missing: &[(String, String)]) -> String {
 }
 
 /// Pre-flight the build-tool dependencies on THIS host, before any heavy
-/// work (materialize/extract). `makepkg -o -C --nodeps` / `makepkg -e ...
+/// work (materialize/extract). `makepkg -o --nodeps` / `makepkg -e ...
 /// --nodeps` never ask pacman to check these, so a missing `gcc-15` or `bc`
 /// otherwise only surfaces ~40 minutes into the build. In `--run` mode a
 /// missing dependency aborts in seconds with the exact install line; in
@@ -969,7 +969,7 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
-    // `makepkg -o -C --nodeps` / `makepkg -e ... --nodeps` never let pacman check
+    // `makepkg -o --nodeps` / `makepkg -e ... --nodeps` never let pacman check
     // the kernel build deps, so check them ourselves before any heavy work:
     // a missing gcc-15 or bc otherwise only surfaces ~40 minutes in.
     preflight_deps(&opts)?;
