@@ -25,7 +25,8 @@
 //! The GPU dispatch runs through [`ariel_compute::with_session`] on the ONE
 //! shared Vulkan device while holding the process-wide compute lock, so a MEM
 //! bandwidth bench and this KAT can never drive the GPU at once — they serialize
-//! on that mutex. `kat.spv` stays crate-local (embedded below).
+//! on that mutex. `kat.spv` sits next to its `kat.comp` source in `../shaders/`,
+//! so the source and the blob it produces stay together.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -47,7 +48,7 @@ const KAT_TIMEOUT_NS: u64 = 10_000_000_000;
 /// quadrants and the GPU isn't parked at the deep-sleep floor. Restored after.
 const TEST_CLK_MHZ: u32 = 1500;
 
-const KAT_SPV: &[u8] = include_bytes!("kat.spv");
+const KAT_SPV: &[u8] = include_bytes!("../shaders/kat.spv");
 
 /// Health verdict for one routing config.
 #[derive(Clone, Debug)]

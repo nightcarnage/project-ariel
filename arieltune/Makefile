@@ -5,11 +5,22 @@ BINDIR  := $(DESTDIR)$(PREFIX)/bin
 COMPAT  := aputune memtune biostune wikitune
 
 # Compute shaders. The .spv is embedded with include_bytes!, so the build never
-# regenerates it; these targets are the explicit path to do so. glslc (shaderc),
-# not glslangValidator, because byte-identity with the committed blobs depends on
-# the two GL_GOOGLE_* extensions glslc enables by default.
-SHADER_SRC := $(wildcard crates/mem/src/shaders/*.comp)
-GLSLC      ?= glslc
+# regenerates it; these targets are the explicit path to do so.
+#
+# glslc (shaderc), not glslangValidator: glslc enables the two GL_GOOGLE_*
+# extensions by default, so its output carries extra OpSourceExtension entries
+# and a different generator word, and byte-identity with the committed blobs
+# depends on that.
+#
+# The flags are per-directory and are NOT cosmetic. Each committed blob
+# reproduces only with the set it was originally built with: mem's kernels are
+# unoptimized, apu's KAT went through spirv-opt (-O), which is what gives it its
+# OpPhi-based body. Building either with the other's flags changes the bytes.
+MEM_SHADERS := $(wildcard crates/mem/src/shaders/*.comp)
+MEM_FLAGS   :=
+APU_SHADERS := $(wildcard crates/apu/shaders/*.comp)
+APU_FLAGS   := -O
+GLSLC       ?= glslc
 
 .PHONY: build release install install-units install-driver uninstall test check fmt \
         shaders shaders-check clean
@@ -55,32 +66,37 @@ check: fmt
 fmt:
 	cargo fmt --check
 
-# Rebuild every committed .spv from its .comp. Only needed after editing a
-# shader; `cargo build` embeds the existing blob.
+# Rebuild every .spv from its .comp. Only needed after editing a shader;
+# `cargo build` embeds the existing blob.
 shaders:
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "$(GLSLC) (shaderc) not found"; exit 1; }
-	@for s in $(SHADER_SRC); do \
-	  $(GLSLC) -fshader-stage=comp "$$s" -o "$${s%.comp}.spv" || exit 1; \
+	@for s in $(MEM_SHADERS); do \
+	  $(GLSLC) -fshader-stage=comp $(MEM_FLAGS) "$$s" -o "$${s%.comp}.spv" || exit 1; \
+	  echo "  built $${s%.comp}.spv"; \
+	done
+	@for s in $(APU_SHADERS); do \
+	  $(GLSLC) -fshader-stage=comp $(APU_FLAGS) "$$s" -o "$${s%.comp}.spv" || exit 1; \
 	  echo "  built $${s%.comp}.spv"; \
 	done
 
 # Prove the committed blobs match their sources. Kept out of `check` on purpose:
-# it needs shaderc installed, and the generator word it writes depends on the
-# shaderc version, so a mismatch here may mean an upgraded tool rather than an
-# edited shader. See crates/mem/src/shaders/README.md before acting on a failure.
+# it needs shaderc installed, and the generator word it writes tracks the shaderc
+# version, so a mismatch here may mean an upgraded tool rather than an edited
+# shader. See the shader READMEs before acting on a failure.
 shaders-check:
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "$(GLSLC) (shaderc) not found"; exit 1; }
 	@fail=0; \
-	for s in $(SHADER_SRC); do \
+	check() { \
 	  out=$$(mktemp); \
-	  $(GLSLC) -fshader-stage=comp "$$s" -o "$$out" || fail=1; \
-	  if cmp -s "$$out" "$${s%.comp}.spv"; then \
-	    echo "  ok   $${s#crates/mem/src/shaders/}"; \
+	  if $(GLSLC) -fshader-stage=comp $$1 "$$2" -o "$$out" 2>/dev/null && cmp -s "$$out" "$${2%.comp}.spv"; then \
+	    echo "  ok   $${2}"; \
 	  else \
-	    echo "  DIFF $${s#crates/mem/src/shaders/} — see shaders/README.md"; fail=1; \
+	    echo "  DIFF $${2} - see the shader README"; fail=1; \
 	  fi; \
 	  rm -f "$$out"; \
-	done; \
+	}; \
+	for s in $(MEM_SHADERS); do check "$(MEM_FLAGS)" "$$s"; done; \
+	for s in $(APU_SHADERS); do check "$(APU_FLAGS)" "$$s"; done; \
 	exit $$fail
 
 clean:
