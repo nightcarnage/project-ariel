@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Launch ComfyUI with the BC-250 ROCm environment. Run on the blade.
 set -u
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Build the BC-250-patched nct6687 fan-control driver and install it on a
 # BC-250 carrier board. Writable PWM fan control (the in-kernel nct6683 is
 # read-only; the BC-250 EC ignores its FAN_CFG-handshake writes).

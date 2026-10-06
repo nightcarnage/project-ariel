@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Build and install arieltune -- the unified BC-250 tuning suite (WIKI|BIOS|APU|MEM).
 #
 #   ./install.sh                 build (release) + install to /usr/local/bin

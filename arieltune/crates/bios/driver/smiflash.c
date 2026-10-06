@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //
 // smiflash — BC-250 (AMI Aptio V) kernel -> SMM -> SPI-flash R/W primitive.
 //

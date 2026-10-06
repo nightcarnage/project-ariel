@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #version 450
 // aputune CU health-test — known-answer integer compute (KAT).
 //

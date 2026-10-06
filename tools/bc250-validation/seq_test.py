@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 import json, os, urllib.request, time, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Register + build + install the smiflash module via DKMS, so it is rebuilt
 # automatically on every kernel upgrade. Run as root (or it will use sudo).
 #

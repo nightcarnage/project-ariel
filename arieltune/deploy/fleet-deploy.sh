@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Deploy the arieltune suite to one (or many) BC-250 nodes.
 #
 #   ./deploy/fleet-deploy.sh user@host [user@host ...]

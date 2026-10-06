@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # smiflash build prep — make a stripped/incomplete kernel-headers tree buildable
 # on a BC-250, so the module compiles ON THE BOARD with no cross-build host.
 #

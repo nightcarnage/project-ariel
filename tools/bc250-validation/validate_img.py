@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 import sys
 import numpy as np
 from PIL import Image

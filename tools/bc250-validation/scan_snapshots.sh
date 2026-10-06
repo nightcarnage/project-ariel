@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Report, for each snapshot initramfs, whether the embedded amdgpu.ko has the TLB param.
 shopt -s nullglob
 cd /var/tmp || exit 1

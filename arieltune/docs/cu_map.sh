@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # cu_map.sh — Read and display CU bitmap from DRM ioctl via libdrm
 
 python3 << 'PYEOF'
