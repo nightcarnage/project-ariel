@@ -34,7 +34,7 @@ TREE_PREP="$HERE/../../../bios/driver/prepare.sh"
 case "${1:-}" in
 build)
   KBUILD=${2:-/lib/modules/$(uname -r)/build}
-  SRC=${3:-/tmp/nct6687d}
+  SRC=${3:-/var/tmp/nct6687d}
   [ -d "$KBUILD" ] || { echo "no kernel build tree at $KBUILD" >&2; exit 1; }
   # Prepare the tree before anything compiles in it.
   [ -x "$TREE_PREP" ] || [ -f "$TREE_PREP" ] || {

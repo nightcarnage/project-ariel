@@ -52,7 +52,7 @@ It builds **on the board**:
 ```
 # against the running kernel:
 ./build-and-install.sh build
-./build-and-install.sh install /tmp/nct6687d/nct6687.ko
+./build-and-install.sh install /var/tmp/nct6687d/nct6687.ko
 ```
 
 `build` first runs the shared kernel-tree prep
