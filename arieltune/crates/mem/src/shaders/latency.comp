@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#version 450
+// Pointer-chase latency kernel: a single invocation follows a dependent chain
+// `next[idx]` for `steps` hops. The chain is a random permutation (built on the
+// host) so the prefetcher can't hide the latency. ns/hop = time / steps.
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) readonly buffer Chain { uint nxt[]; };
+layout(std430, binding = 1) buffer Out { uint result[]; };
+layout(push_constant) uniform PC { uint steps; };
+
+void main() {
+    uint idx = 0u;
+    for (uint i = 0u; i < steps; ++i) {
+        idx = nxt[idx];
+    }
+    result[0] = idx;
+}

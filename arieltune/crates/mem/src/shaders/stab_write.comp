@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#version 450
+// Stability pass 1: write a deterministic pattern across the whole buffer,
+// data[i] = i*PRIME ^ seed. Paired with stab_check.comp to detect silent
+// corruption from too-aggressive timings (a config can train but mangle data).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Data { uint data[]; };
+layout(std430, binding = 1) buffer Out { uint result[]; };
+layout(push_constant) uniform PC { uint n; uint seed; };
+
+void main() {
+    uint total = gl_NumWorkGroups.x * 64u;
+    for (uint i = gl_GlobalInvocationID.x; i < n; i += total) {
+        data[i] = i * 2654435761u ^ seed;
+    }
+}

@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#version 450
+// Random-access read kernel: each invocation reads `iters` scattered locations
+// (xorshift-hashed index, no spatial locality), so most accesses miss the open
+// row and pay tRCD/tRP/tRAS/refresh — unlike sequential streaming, which is
+// bus-bound. This is the throughput that actually responds to timing changes.
+// Bytes moved = total_threads * iters * sizeof(vec4).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Data { vec4 data[]; };
+layout(std430, binding = 1) buffer Out { float result[]; };
+layout(push_constant) uniform PC { uint n; uint iters; };
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    vec4 acc = vec4(0.0);
+    uint h = gid * 2654435761u + 1u;
+    for (uint r = 0u; r < iters; ++r) {
+        h ^= h << 13u;
+        h ^= h >> 17u;
+        h ^= h << 5u;
+        acc += data[h % n];
+    }
+    if (gid == 0u) {
+        result[0] = acc.x + acc.y + acc.z + acc.w;
+    }
+}

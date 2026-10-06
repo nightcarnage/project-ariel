@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#version 450
+// Stability pass 2: read the buffer back and atomically count any word that
+// doesn't match the written pattern. result[0] = mismatch count. The buffer is
+// >> L2, so the read-back hits real GDDR6.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Data { uint data[]; };
+layout(std430, binding = 1) buffer Out { uint result[]; };
+layout(push_constant) uniform PC { uint n; uint seed; };
+
+void main() {
+    uint total = gl_NumWorkGroups.x * 64u;
+    for (uint i = gl_GlobalInvocationID.x; i < n; i += total) {
+        uint want = i * 2654435761u ^ seed;
+        if (data[i] != want) {
+            atomicAdd(result[0], 1u);
+        }
+    }
+}

@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#version 450
+// Read-bandwidth kernel: grid-stride read of a large SSBO, repeated `iters`
+// times. Buffer is >> L2 so re-reads hit GDDR6. Only lane 0 writes, so traffic
+// is ~pure read. Bytes moved = n * sizeof(vec4) * iters.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Data { vec4 data[]; };
+layout(std430, binding = 1) buffer Out { float result[]; };
+layout(push_constant) uniform PC { uint n; uint iters; };
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total = gl_NumWorkGroups.x * 64u;
+    vec4 acc = vec4(0.0);
+    for (uint r = 0u; r < iters; ++r) {
+        for (uint idx = gid; idx < n; idx += total) {
+            acc += data[idx];
+        }
+    }
+    if (gid == 0u) {
+        result[0] = acc.x + acc.y + acc.z + acc.w;
+    }
+}
