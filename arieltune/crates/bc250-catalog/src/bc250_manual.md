@@ -5187,7 +5187,7 @@ activates 24; a kernel patch enables the fused 16 (Chapter 2 → GPU).
 │  PCI device       1002:13FE → /dev/dri/card1                                         │
 │  Compute node     /dev/kfd (CONFIG_HSA_AMD=y)                                        │
 │  Build            make M=drivers/gpu/drm/amd/amdgpu modules — the running module     │
-│                   is GCC-built (GCC 16.1.1, matching the kernel; no clang build      │
+│                   is GCC-built (GCC 16.2.1, matching the kernel; no clang build      │
 │                   strings)                                                           │
 │  Install          in place over /usr/lib/modules/$KVER/kernel/drivers/gpu/drm/       │
 │                   amd/amdgpu/ (no updates/ overlay on the running kernel), then      │
@@ -5286,7 +5286,7 @@ module trees remain installed).
 
 Earlier out-of-tree builds showed sporadic ring resets attributed to GCC codegen
 differences in atomic-ordering and branch-hint paths and were built clang-only;
-the current production module is GCC 16.1.1-built (in-tree rebuild) and stable —
+the current production module is GCC 16.2.1-built (in-tree rebuild) and stable —
 the compiler sensitivity applied to the old out-of-tree flow.
 
 ┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
