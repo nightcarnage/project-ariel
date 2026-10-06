@@ -1711,6 +1711,16 @@ fn booted_release() -> String {
         .unwrap_or_else(|_| "unknown kernel".to_string())
 }
 
+/// The other half of the supported pair — what `--kernel` takes to build the
+/// kernel this host is NOT running. `None` when only one kernel is supported.
+///
+/// This is a function of the booted kernel, not a constant: "the other one" is
+/// 7.0.9 on a 7.2.9 host and 7.2.9 on a 7.0.9 host. Naming it in a fixed string
+/// is wrong on one of the two boots, which is exactly how it was first written.
+fn other_kernel(k: Kernel) -> Option<Kernel> {
+    Kernel::ALL.iter().copied().find(|x| *x != k)
+}
+
 /// patch — live-state glyph, ordinal, purpose, description, touched kernel
 /// files, and the runtime tell. `states` come from the popup (captured at
 /// open) and zip against the booted kernel's series (same order/length), so the
@@ -1723,6 +1733,10 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     // stay under 55 columns so the name survives an 80-column popup - the
     // paragraph truncates rather than wraps, so a long line would cut it off.
     let k = Kernel::booted();
+    let other_hint = match other_kernel(k) {
+        Some(o) => format!(" Build the other with --kernel {o}."),
+        None => String::new(),
+    };
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!(" {} — the kernel booted here.", booted_release()),
@@ -1736,7 +1750,7 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
             " Each patch's tell is checked when this opened.",
             intro,
         )),
-        Line::from(Span::styled(" Build the other with --kernel 7.0.9.", intro)),
+        Line::from(Span::styled(other_hint, intro)),
         Line::from(""),
     ];
     for (i, (p, st)) in patches::series(Kernel::booted())
@@ -2946,6 +2960,19 @@ mod tests {
             .join("")
     }
 
+    /// "The other one" is a function of what is booted — the regression guard for
+    /// a hardcoded `--kernel` value, which is wrong on the opposite boot.
+    #[test]
+    fn the_other_kernel_is_the_opposite_half_of_the_pair() {
+        assert_eq!(other_kernel(Kernel::Bore729), Some(Kernel::Bore709));
+        assert_eq!(other_kernel(Kernel::Bore709), Some(Kernel::Bore729));
+        for k in Kernel::ALL {
+            let o = other_kernel(k).expect("a pair always has an other");
+            assert_ne!(o, k);
+            assert!(Kernel::ALL.contains(&o));
+        }
+    }
+
     /// The popup is 72% of the terminal with a two-column border, so on the 80
     /// columns a serial console gives you the inner width is 55. The paragraph
     /// truncates instead of wrapping, and a cut-off kernel name is worse than no
@@ -2979,9 +3006,22 @@ mod tests {
             text.contains(&patches::count(k).to_string()),
             "no series size in: {text}"
         );
-        assert!(
-            text.contains("--kernel 7.0.9"),
-            "no pointer to the other kernel in: {text}"
-        );
+        // The hint must name the OTHER kernel. A fixed string is wrong on one of
+        // the two boots, so pin the relationship rather than the text.
+        let booted = Kernel::booted();
+        match other_kernel(booted) {
+            Some(o) => {
+                assert!(
+                    text.contains(&format!("--kernel {o}")),
+                    "hint does not name the other kernel ({o}): {text}"
+                );
+                assert!(
+                    !text.contains(&format!("--kernel {}", booted.label()))
+                        || booted.label() == o.label(),
+                    "hint points at the kernel already booted: {text}"
+                );
+            }
+            None => assert!(!text.contains("--kernel"), "unexpected hint: {text}"),
+        }
     }
 }
