@@ -167,9 +167,9 @@ pub fn resolve_chain(image: &[u8], name: &str, want: Option<usize>) -> Option<Ch
             p += 2;
         }
         // p may now sit past tail_end (name ran to the edge) — checked_sub -> None.
-        match tail_end.checked_sub(p) {
-            Some(len) => (p, len),
-            None => return None,
+        {
+            let len = tail_end.checked_sub(p)?;
+            (p, len)
         }
     };
     if body_off + body_len > n {

@@ -7,7 +7,7 @@ COMPAT  := aputune memtune biostune wikitune
 .PHONY: build release install install-units install-driver uninstall test check fmt clean
 
 build release:
-	cargo build --release
+	cargo build --release --locked
 
 # Install the one binary + the `at` alias + the four compat symlinks.
 # Use `sudo make install` (writes to $(PREFIX)/bin).
@@ -33,12 +33,16 @@ uninstall:
 	$(BIN) uninstall || rm -f $(BINDIR)/$(BIN) $(BINDIR)/at $(foreach n,$(COMPAT),$(BINDIR)/$(n))
 
 test:
-	cargo test --workspace
+	cargo test --workspace --locked
 
-# Full local gate: format, lint, test.
+# Full local gate. Keep this in step with .github/workflows/ci.yml: a
+# contributor's local gate being weaker than CI is what lets a change pass
+# here and still fail review.
 check: fmt
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo test --workspace
+	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo test --workspace --locked
+	RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_html_tags" \
+		cargo doc --workspace --no-deps --locked
 
 fmt:
 	cargo fmt --check

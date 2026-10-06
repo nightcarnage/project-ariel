@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: arieltune
@@ -20,3 +22,22 @@ jobs:
       - name: test
         working-directory: arieltune
         run: cargo test --workspace --locked
+      # Deny clippy warnings so CI is at least as strict as the Makefile's
+      # `check` target. Without this a change can pass CI and still fail
+      # `make check`, which is the gate a contributor actually runs locally.
+      - name: clippy
+        working-directory: arieltune
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Deny only the link/HTML lints rather than every rustdoc warning, so this
+      # stays stable across toolchain bumps while still catching the doc defects
+      # that mislead: unresolved links, links from public docs to private items,
+      # and unclosed tags. Rustdoc reads `[tab]`-style key hints as links, so
+      # prose that means a key must escape it.
+      - name: docs
+        working-directory: arieltune
+        env:
+          RUSTDOCFLAGS: >-
+            -D rustdoc::broken_intra_doc_links
+            -D rustdoc::private_intra_doc_links
+            -D rustdoc::invalid_html_tags
+        run: cargo doc --workspace --no-deps --locked

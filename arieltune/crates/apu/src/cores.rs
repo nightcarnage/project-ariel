@@ -375,8 +375,7 @@ pub fn boot() -> Result<()> {
 
 /// `aputune cores install` — write + enable the boot unit.
 pub fn install() -> Result<()> {
-    let unit = format!(
-        "[Unit]\n\
+    let unit = "[Unit]\n\
          Description=BC-250 8-core unlock (SMU msg 0x98)\n\
          After=multi-user.target\n\
          ConditionPathExists=/sys/bus/pci/devices/0000:00:00.0/config\n\
@@ -388,7 +387,7 @@ pub fn install() -> Result<()> {
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n"
-    );
+        .to_string();
     fs::write(UNIT_PATH, unit).context("write unit file")?;
     for args in [&["daemon-reload"][..], &["enable", UNIT_NAME][..]] {
         let st = Command::new("systemctl").args(args).status()?;

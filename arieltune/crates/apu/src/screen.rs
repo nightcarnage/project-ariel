@@ -2,7 +2,7 @@
 //! Interactive control-center TUI — one screen, styled to match memtune/biostune.
 //!
 //! A single dashboard with FOUR panels: the system card (fan control), CPU
-//! overclock, GPU clock, and CU routing. [tab]/[shift-tab] move input focus
+//! overclock, GPU clock, and CU routing. \[tab\]/\[shift-tab\] move input focus
 //! across the panels (bare 1-4 are the suite's tab-switch shortcut, not panel
 //! jumps); the focused panel's border lights up and takes the arrow/adjust/apply
 //! keys. The everyday BC-250 owner drives the
@@ -744,7 +744,7 @@ impl Screen for ApuScreen {
         self.exit();
     }
 
-    /// The [p] patch popup, the [F] force-unlock confirm, and any in-progress
+    /// The \[p\] patch popup, the \[F\] force-unlock confirm, and any in-progress
     /// field edit are modal sub-states: while in one the shell must NOT steal
     /// global switch/quit keys.
     fn modal(&self) -> bool {
@@ -1299,7 +1299,7 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
         KeyCode::Char(' ') => {
             let sel = app.core_sel;
             let live = core_live_draft(app);
-            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            let mut d = *app.core_draft.get_or_insert(live);
             if sel == 0 && d[0] {
                 app.status = "core 0 cannot be offlined (kernel keeps cpu0)".into();
                 return;
@@ -1310,7 +1310,7 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
         }
         KeyCode::Char('o') => {
             let live = core_live_draft(app);
-            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            let mut d = *app.core_draft.get_or_insert(live);
             for (i, v) in d.iter_mut().enumerate() {
                 if i != 0 {
                     *v = false;
@@ -1321,7 +1321,7 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
         }
         KeyCode::Char('O') => {
             let live = core_live_draft(app);
-            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            let mut d = *app.core_draft.get_or_insert(live);
             for v in d.iter_mut() {
                 *v = true;
             }

@@ -91,8 +91,8 @@ const SMN_DATA: u64 = 0xBC;
 ///     stomped by the driver mid-transaction.
 ///   * Callers `flock(LOCK_EX)` the config fd ([`SmnAperture::lock`]) to
 ///     serialize their own accesses.
-///   * Short/failed transfers are NEVER swallowed (see [`SmnAperture::wc`] /
-///     [`SmnAperture::rc`]): a short SMN write would leave a STALE argument
+///   * Short/failed transfers are NEVER swallowed (see `SmnAperture::wc` /
+///     `SmnAperture::rc`): a short SMN write would leave a STALE argument
 ///     register in place, and firing a command anyway could send a completely
 ///     different request (e.g. a massive overvolt from a leftover Vid arg).
 pub struct SmnAperture {

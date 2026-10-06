@@ -113,7 +113,7 @@ enum Top {
     },
 }
 
-/// Support the legacy binary names via argv[0]: when invoked through a compat
+/// Support the legacy binary names via argv\[0\]: when invoked through a compat
 /// symlink (`aputune`/`memtune`/`biostune`/`wikitune` -> arieltune), inject the
 /// matching subcommand namespace so old commands AND systemd units that call the
 /// old names keep working unchanged. `at` and `arieltune` pass through.
@@ -121,7 +121,7 @@ fn compat_args() -> Vec<String> {
     inject_compat_namespace(std::env::args().collect())
 }
 
-/// Pure core of [`compat_args`]: given the full argv, if argv[0]'s basename is a
+/// Pure core of [`compat_args`]: given the full argv, if argv\[0\]'s basename is a
 /// legacy tool name, insert its subcommand namespace at position 1.
 fn inject_compat_namespace(mut args: Vec<String>) -> Vec<String> {
     let base = args

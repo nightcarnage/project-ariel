@@ -8,8 +8,8 @@
 //! recoverable with an NVRAM/CMOS clear, not an external programmer.
 //!
 //! Flow:
-//!   1. copy a UEFI Shell + setup_var.efi to <ESP>/EFI/biostune/
-//!   2. write <ESP>/startup.nsh: the setup_var writes, then `reset` (so it can
+//!   1. copy a UEFI Shell + setup_var.efi to `<ESP>/EFI/biostune/`
+//!   2. write `<ESP>/startup.nsh`: the setup_var writes, then `reset` (so it can
 //!      NEVER sit in the shell — it always returns to the OS)
 //!   3. create a boot entry for the shell and set BootNext to it (ONE-SHOT:
 //!      firmware consumes BootNext, so any failed boot falls back to the normal

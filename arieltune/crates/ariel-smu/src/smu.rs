@@ -11,7 +11,11 @@
 //! nodes that wrap specific msgids), never a raw SMN write.
 //!
 //! Write format of `amdgpu_smu_send_raw` (patch 0008b):
-//!     "<msgid_hex> <param_hex> [<extra_hex>]\n"
+//!
+//! ```text
+//! "<msgid_hex> <param_hex> [<extra_hex>]\n"
+//! ```
+//!
 //! The typed cclk / sdpm nodes take a single decimal value.
 
 use std::fs;
