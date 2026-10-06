@@ -424,8 +424,9 @@ None of them explains why bit 47 is set.
 
 ## Kernel pin
 
-Pin to `linux-cachyos-bore-7.0.9`. Do not build the series against `7.0.11+` —
-those regress the BC-250 SDMA path.
+Pin to `linux-cachyos-bore-7.2.9`. The old `7.0.9` pin is retired — the SDMA
+regression it steered around (`7.0.11+`) is fixed in 7.2.9, and 7.0.9 no longer
+builds at all under a current rustc.
 
 **Operator note on `HSA_ENABLE_SDMA=0`:** the claim that SDMA is simply broken on
 this hardware is not accurate. Kernel 7.0.9 has working SDMA. It is disabled

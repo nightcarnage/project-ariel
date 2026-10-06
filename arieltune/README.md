@@ -47,7 +47,7 @@ aborts in seconds with the exact missing packages instead of failing deep into t
 
 #### Kernel Rust on a newer rustc
 
-The shipped 7.0.9 config has `CONFIG_RUST=y`, and older kernels hard-code the Rust
+The shipped 7.2.9 config has `CONFIG_RUST=y`, and older kernels hard-code the Rust
 target-spec ABI in `scripts/generate_rust_target.rs` as `x86-softfloat` — a
 spelling rustc has since renamed to `softfloat`. A rustc new enough to reject the
 old name kills the build before it produces anything, inside `prepare()`
@@ -120,7 +120,7 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 
    ```sh
    git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos
-   git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1
+   git -C ~/linux-cachyos checkout b11ba14854d9748bdb3e3daf7a90e8d3a31004ec   # 7.2.9-1
    ```
 
 3. **Arm the fleet kernel command line.** Without it the PSP rejects every

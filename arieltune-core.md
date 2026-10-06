@@ -288,7 +288,7 @@ Rules that MUST survive any edit:
 
 Source: GabriWar `0001-bc250-8core-telemetry.patch`. Ported onto the
 `01–27`-patched tree; new file
-`arieltune/crates/apu/patches/bc250-cachyos-7.0.9/28-bc250-8core-telemetry.patch`.
+`arieltune/crates/apu/patches/bc250-cachyos-7.2.9/28-bc250-8core-telemetry.patch`.
 
 Content (both files below):
 - `smu11_driver_if_cyan_skillfish.h`: `SmuMetricsTable_hybrid_t` (empirical

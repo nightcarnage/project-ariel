@@ -67,6 +67,6 @@ sudo insmod smiflash.ko smi_port=0xB0
 
 `Makefile` auto-detects a clang-built kernel (via the `CC_IS_CLANG` config
 marker in the build tree) and passes `LLVM=1`, so the board's clang-built
-`7.0.9-1-cachyos` kernel builds with the matching toolchain; gcc kernels build
+`7.2.9-1-cachyos-bore` kernel builds with the matching toolchain; gcc kernels build
 the ordinary way. Verified 2026-08-18 on blade 115: DKMS `add/build/install`
 succeeded and the module lives at `/lib/modules/<ver>/updates/dkms/smiflash.ko.zst`.
