@@ -135,9 +135,7 @@ fn gather() -> Snapshot {
         .filter(|r| matches!(r.state, State::Present | State::Inferred))
         .count();
     let cfg = dpm::PowerConfig::load_or_default();
-    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let kernel = booted_release();
     let od = telemetry::od_point();
 
     Snapshot {
@@ -1704,28 +1702,41 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Render the patch-popup body: a short series intro, then one block per
+/// The kernel release booted on this host, or a placeholder when it cannot be
+/// read. One helper for both readers — the status line and the patch-popup
+/// header — so the header can never disagree with the rows beneath it.
+fn booted_release() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown kernel".to_string())
+}
+
 /// patch — live-state glyph, ordinal, purpose, description, touched kernel
 /// files, and the runtime tell. `states` come from the popup (captured at
-/// open) and zip against SERIES (same order/length). Also the scroll-clamp
+/// open) and zip against the booted kernel's series (same order/length), so the
+/// header and the rows always describe the same kernel. Also the scroll-clamp
 /// length source.
 fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     let intro = Style::default().fg(DIM);
+    // Name the kernel. Which series this list holds follows from what is booted,
+    // and an A/B run depends on knowing which half you are looking at. The lines
+    // stay under 55 columns so the name survives an 80-column popup - the
+    // paragraph truncates rather than wraps, so a long line would cut it off.
+    let k = Kernel::booted();
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            format!(
-                " The curated {}-patch amdgpu series arieltune embeds and builds into",
-                patches::count(Kernel::booted())
-            ),
+            format!(" {} — the kernel booted here.", booted_release()),
             intro,
         )),
         Line::from(Span::styled(
-            " the kernel (arieltune apu build). Each patch carries a runtime tell that",
+            format!(" This is the {} series: {} patches.", k, patches::count(k)),
             intro,
         )),
         Line::from(Span::styled(
-            " proves it is live on the booted kernel, checked when this opened.",
+            " Each patch's tell is checked when this opened.",
             intro,
         )),
+        Line::from(Span::styled(" Build the other with --kernel 7.0.9.", intro)),
         Line::from(""),
     ];
     for (i, (p, st)) in patches::series(Kernel::booted())
@@ -2917,4 +2928,60 @@ fn draw_gpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         lines.push(gauge("vdd", format!("{mv} mV"), frac, ACCENT));
     }
     f.render_widget(Paragraph::new(lines).block(panel("GPU", focused)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::State;
+
+    fn header_text() -> String {
+        let k = Kernel::booted();
+        let states = vec![State::Unknown; patches::count(k)];
+        patch_popup_lines(&states)
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// The popup is 72% of the terminal with a two-column border, so on the 80
+    /// columns a serial console gives you the inner width is 55. The paragraph
+    /// truncates instead of wrapping, and a cut-off kernel name is worse than no
+    /// name at all - so the header has to fit.
+    #[test]
+    fn patch_popup_header_fits_an_eighty_column_terminal() {
+        let k = Kernel::booted();
+        let widest = patch_popup_lines(&vec![State::Unknown; patches::count(k)])
+            .iter()
+            .take(4)
+            .map(|l| l.width())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest <= 55,
+            "header is {widest} columns, popup inner is 55"
+        );
+    }
+
+    /// The list has to say which kernel it describes. Which series it holds
+    /// follows from what is booted, and that is the whole point of shipping two:
+    /// without the name, an A/B run over snapshots cannot tell which half it is
+    /// looking at.
+    #[test]
+    fn patch_popup_header_names_the_booted_kernel_and_its_series_size() {
+        let text = header_text();
+        let k = Kernel::booted();
+        assert!(text.contains(&booted_release()), "no release in: {text}");
+        assert!(text.contains(k.label()), "no kernel label in: {text}");
+        assert!(
+            text.contains(&patches::count(k).to_string()),
+            "no series size in: {text}"
+        );
+        assert!(
+            text.contains("--kernel 7.0.9"),
+            "no pointer to the other kernel in: {text}"
+        );
+    }
 }

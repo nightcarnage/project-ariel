@@ -124,12 +124,23 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    failures that look like patch bugs. The preflight reads the live carve and
    blocks the build until the BIOS is fixed.
 
-2. **Pin the linux-cachyos-bore PKGBUILD** (arieltune cannot fetch this itself):
+2. **Pin a linux-cachyos PKGBUILD** (arieltune cannot fetch this itself). Both
+   series ship inside the binary, so pin whichever kernel you are validating —
+   7.2.9 is the default and 7.0.9 is still supported:
 
    ```sh
    git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos
-   git -C ~/linux-cachyos checkout b11ba14854d9748bdb3e3daf7a90e8d3a31004ec   # 7.2.9-1
+
+   # 7.2.9 (default) — builds release 7.2.9-1-cachyos-bore
+   git -C ~/linux-cachyos checkout b11ba14854d9748bdb3e3daf7a90e8d3a31004ec
+
+   # ...or 7.0.9 — builds release 7.0.9-1-cachyos-bore
+   git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be
    ```
+
+   Both build from the same `linux-cachyos-bore/` PKGBUILD; the version is what
+   separates them, and step 4 refuses a tree that does not match the kernel you
+   asked for.
 
 3. **Arm the fleet kernel command line.** Without it the PSP rejects every
    firmware load and most patch features report dead. CachyOS installs default
@@ -161,18 +172,32 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    any existing flags instead of clobbering them, and drop `mitigations=off`
    unless this is a dedicated inference box.
 
-4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`):
+4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`).
+   `--kernel` selects the series, the embedded nct6687 module and the PKGBUILD pin.
+   7.2.9 is the default, so the flag is only needed for 7.0.9:
 
    ```sh
+   # 7.2.9 (default)
    sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore          # preview
    sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run    # go
+
+   # 7.0.9 — same PKGBUILD dir, older pin
+   sudo aputune build --kernel 7.0.9 --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run
    ```
+
+   The build states its target before doing anything, and refuses a PKGBUILD whose
+   version does not match `--kernel` — so a mismatched pair fails immediately
+   instead of hunk-by-hunk after the expensive steps have run.
 
 5. **Reboot and verify**:
 
    ```sh
    sudo reboot
    sudo aputune doctor        # expect all checks live and 40/40 CUs
+
+   `aputune doctor` reports the series for whichever kernel is booted, and the
+   APU tab names it in the patch list — so a validation run always says which
+   half of the pair it is measuring.
    ```
 
 The build installs the kernel, arms `/etc/modprobe.d/aputune-40cu.conf`, and
