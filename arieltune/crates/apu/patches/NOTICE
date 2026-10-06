@@ -1,7 +1,7 @@
 GPL-2.0 NOTICE -- BC-250 amdgpu liberation patch series
 ========================================================
 
-The patch files here — the liberation series in `bc250-cachyos-7.0.9/*.patch`
+The patch files here — the liberation series in `bc250-cachyos-7.2.9/*.patch`
 and the build-plumbing `rust-abi-rename.patch` — are diffs against the Linux
 kernel (the amdgpu driver / AMD SMU code, and the Rust target-spec generator).
 Because they are derivative works of the Linux kernel, they are licensed

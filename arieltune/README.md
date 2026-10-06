@@ -24,7 +24,7 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
 
 The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 30 minute build plus a reboot, always previewed first, and it only acts with `--run`.
 
-Build the series against `linux-cachyos-bore` 7.0.9-1 (the `linux-cachyos-bore/` PKGBUILD dir - the plain `linux-cachyos/` dir builds a kernel release string the prebuilt nct6687 fan-telemetry module's vermagic won't match). Not 7.0.11+, which regresses BC-250 SDMA. The series lives in `crates/apu/patches/bc250-cachyos-7.0.9/`; every diff and what it does is explained in `SERIES.md` (patches that are on disk but not applied are marked there).
+Build the series against `linux-cachyos-bore` 7.2.9-1 (the `linux-cachyos-bore/` PKGBUILD dir - the plain `linux-cachyos/` dir builds a kernel release string the prebuilt nct6687 fan-telemetry module's vermagic won't match; the prebuilt module must match whichever release you target). 7.0.9 is retired: the SDMA regression in 7.0.10-13 that motivated the old pin is fixed in 7.2.9, and 7.0.9 now fails to build at all under a current rustc, because its config sets `CONFIG_RUST=y` while `scripts/generate_rust_target.rs` hard-codes the pre-rename `x86-softfloat` target ABI that rustc 1.99+ rejects. The series lives in `crates/apu/patches/bc250-cachyos-7.2.9/`; every diff and what it does is explained in `SERIES.md` (patches that are on disk but not applied are marked there).
 
 ### Build dependencies
 
@@ -32,7 +32,7 @@ On Arch/CachyOS the distro Rust toolchain is enough — no rustup needed. On oth
 distros, install Rust via [rustup.rs](https://rustup.rs) first. The patched-kernel
 build then needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain
 (`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`,
-`rust-bindgen`, `rust-src` — the shipped 7.0.9 config has `CONFIG_RUST=y`).
+`rust-bindgen`, `rust-src` — the shipped 7.2.9 config has `CONFIG_RUST=y`).
 `mkinitcpio` ships by default on CachyOS. On a fresh install, sync mirrors first - a live
 ISO's package database can be stale enough that a needed package 404s:
 

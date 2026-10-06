@@ -1,5 +1,14 @@
 # BC-250 gfx1013: compute defect analysis, and the GabiWar/production patch comparison
 
+> **Rebased for 7.2.9.** This analysis was performed against
+> `linux-cachyos-bore-7.0.9`, which was a hard pin at the time. The target is now
+> **`linux-cachyos-bore-7.2.9`** and the series lives in
+> `arieltune/crates/apu/patches/bc250-cachyos-7.2.9`. The *findings* below are
+> unchanged and still current - the rebase was mechanical (one patch re-anchored,
+> one dropped as obsolete; see `SERIES.md`) - so read the defect analysis and the
+> patch numbers as live, and every kernel-*version* claim as the historical
+> baseline it was measured on.
+
 **Date:** 2026-08-05
 **Hardware:** AMD BC-250 blade — Cyan Skillfish APU, gfx1013, GC IP 10.1.3, 16 GB unified GDDR6
 **Kernel:** `linux-cachyos-bore-7.0.9` (hard pin — see [Kernel pin](#kernel-pin))

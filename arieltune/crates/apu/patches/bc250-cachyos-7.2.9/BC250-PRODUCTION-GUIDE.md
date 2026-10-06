@@ -1,5 +1,12 @@
 # BC-250 Production Guide — ROCm + PyTorch on CachyOS 7.0.9
 
+> **Rebased for 7.2.9.** The validated production state recorded here was measured
+> on `7.0.9-cachyos`. The target is now **`linux-cachyos-bore-7.2.9`**, and the
+> applied series is 26 patches (not 25 - patch `30` joined, patch `29` was dropped
+> as obsolete in 7.2.9). Treat the ROCm/PyTorch versions and the SDMA findings as
+> still current, and the kernel version and patch count as the historical
+> baseline. See `SERIES.md` for the applied set.
+
 **Date**: 2026-08-17 (updated 2026-08-20: SDMA navi12 firmware override + early TRAP_ENABLE armed — patches 26/27 in SERIES, 19 retired to on-disk)  
 **Hardware**: AMD BC-250 (gfx1013 / Cyan Skillfish), 40 CU, 17.2 GB VRAM  
 **Kernel**: 7.0.9-cachyos, 25-patch series (modtree=build2, module srcversion C484A6D2)  
