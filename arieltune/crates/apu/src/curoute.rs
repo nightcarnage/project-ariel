@@ -201,9 +201,27 @@ pub fn enable_all() -> Result<()> {
     apply([FULL_MASK; 4])
 }
 
-/// Restore factory dispatch (24 CU).
+/// Restore factory dispatch.
+///
+/// "Factory" means THIS blade's factory, not a constant. Every array carrying
+/// 3 WGPs (`0x07` -> 24 CU) is only the textbook shape; a blade binned
+/// differently restores wrong if we assume it. The pre-liberation enumeration is
+/// recorded in the stock baseline (see `crate::stock`) and is what we restore
+/// when it is available. Falls back to `[FACTORY_MASK; 4]` when the baseline is
+/// missing or was taken while the unlock was armed -- and says which it did.
 pub fn factory() -> Result<()> {
-    apply([FACTORY_MASK; 4])
+    match crate::stock::cu_factory_masks() {
+        Some(masks) => apply(masks),
+        None => {
+            eprintln!(
+                "note: no recorded pre-liberation CU layout — assuming the textbook \
+                 [{FACTORY_MASK:#04x}; 4] = {} CU. Capture it with `arieltune apu stock capture` \
+                 on a box whose 40-CU unlock is not armed.",
+                FACTORY_MASK.count_ones() * 2 * 4
+            );
+            apply([FACTORY_MASK; 4])
+        }
+    }
 }
 
 /// Toggle one WGP (array index 0..3, wgp 0..4) in the live routing. Refuses a

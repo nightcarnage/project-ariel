@@ -50,6 +50,19 @@ pub enum Cmd {
     },
     /// Print the live CU harvest map (which compute units the driver enumerates). Read-only.
     Cumap,
+    /// Pre-liberation baseline: the CPU core mask and CU layout this blade had before arieltune
+    /// first wrote anything. Captured once, never overwritten.
+    ///
+    /// WHY it is stored: firmware core masks are per-die — a blade can come up 0xD7, not the
+    /// textbook 0x77 — and `cores boot` used to refuse anything that was not 0x77, *silently*, so
+    /// the unlock never survived a cold boot on such a blade. The CU half is only observable while
+    /// the 40-CU unlock is DISARMED; once armed the driver enumerates 40 on every boot and the real
+    /// layout is gone from software. Recording both here makes "factory" mean this machine's
+    /// factory, and lets `cu route-factory` restore the real layout instead of assuming 0x07.
+    Stock {
+        #[command(subcommand)]
+        action: Option<StockCmd>,
+    },
     /// CU routing: enable/persist 40 CUs, route per-array WGP masks, bench, and health-test.
     ///
     /// Routing writes go through umr and are persisted (survive reboot). An empty shader array is
@@ -423,6 +436,116 @@ pub enum CpuCmd {
 }
 
 #[derive(Subcommand)]
+pub enum StockCmd {
+    /// Print the recorded baseline. Default when no subcommand is given. Read-only.
+    Status,
+    /// Capture the baseline now. Refuses to replace an existing one without --force. Root.
+    Capture {
+        /// Replace an existing baseline.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print the baseline file path.
+    Path,
+}
+
+fn cmd_stock(action: Option<StockCmd>) -> Result<()> {
+    use crate::stock;
+    match action.unwrap_or(StockCmd::Status) {
+        StockCmd::Path => {
+            println!("{}", stock::STOCK_PATH);
+            Ok(())
+        }
+        StockCmd::Status => {
+            let Some(s) = stock::load() else {
+                println!(
+                    "no pre-liberation baseline recorded at {}",
+                    stock::STOCK_PATH
+                );
+                println!("  capture it with `arieltune apu stock capture` (root).");
+                println!(
+                    "  NOTE: the CU half is only observable while the 40-CU unlock is DISARMED —"
+                );
+                println!("  once armed, the driver enumerates 40 on every boot and the real layout is gone.");
+                return Ok(());
+            };
+            let join = |v: &[u8]| {
+                v.iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            println!("pre-liberation baseline: {}", stock::STOCK_PATH);
+            println!("  captured at : {}", ts(s.captured_at_unix));
+            println!("  source      : {}", s.source);
+            println!("  kernel      : {}", s.kernel);
+            println!(
+                "  cpu mask    : 0x{:02X}  enabled=[{}] disabled=[{}]",
+                s.cpu.core_mask,
+                join(&s.cpu.enabled),
+                join(&s.cpu.disabled)
+            );
+            match &s.cu {
+                Some(c) => {
+                    println!(
+                        "  cu layout   : {} CU enumerated   per-array WGP [{:02x} {:02x} {:02x} {:02x}]   per-array CU {:?}",
+                        c.enumerated_cu,
+                        c.per_array_wgp[0], c.per_array_wgp[1], c.per_array_wgp[2], c.per_array_wgp[3],
+                        c.per_array_cu
+                    );
+                    println!("                (this is what `cu route-factory` restores — not the textbook 0x07)");
+                }
+                None => {
+                    println!("  cu layout   : NOT RECORDED");
+                    if let Some(r) = &s.cu_unavailable {
+                        println!("                {r}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        StockCmd::Capture { force } => {
+            if stock::is_captured() && !force {
+                let s = stock::load().unwrap();
+                println!(
+                    "baseline already recorded (source {}, cpu mask 0x{:02X})",
+                    s.source, s.cpu.core_mask
+                );
+                println!("refusing to overwrite — pass --force to replace it.");
+                return Ok(());
+            }
+            let s = stock::capture_now("manual")?;
+            println!("captured pre-liberation baseline -> {}", stock::STOCK_PATH);
+            println!("  cpu mask 0x{:02X}", s.cpu.core_mask);
+            match &s.cu {
+                Some(c) => println!(
+                    "  cu layout {} CU enumerated, per-array WGP {:02x?}",
+                    c.enumerated_cu, c.per_array_wgp
+                ),
+                None => {
+                    println!("  cu layout NOT recorded:");
+                    if let Some(r) = &s.cu_unavailable {
+                        println!("    {r}");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Render a unix timestamp; shells out to `date` so the crate needs no date lib.
+fn ts(unix: u64) -> String {
+    std::process::Command::new("date")
+        .args(["-d", &format!("@{unix}"), "+%Y-%m-%d %H:%M:%S %Z"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| format!("{unix} (unix)"))
+}
+
+#[derive(Subcommand)]
 pub enum CoreCmd {
     /// Firmware mask, state, visible cores/threads, offlined threads, MCE count, boot-unit state. Read-only.
     Status,
@@ -494,6 +617,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Patches { show } => cmd_patches(show),
         Cmd::Cumap => cmd_cumap(),
+        Cmd::Stock { action } => cmd_stock(action),
         Cmd::Cu { action } => cmd_cu(action),
         Cmd::Gpu { action } => cmd_gpu(action),
         Cmd::Cpu { action } => cmd_cpu(action),

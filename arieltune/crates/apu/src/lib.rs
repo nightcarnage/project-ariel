@@ -37,6 +37,7 @@ mod kernel;
 mod patches;
 mod persist;
 mod profile;
+mod stock;
 mod stress;
 mod telemetry;
 

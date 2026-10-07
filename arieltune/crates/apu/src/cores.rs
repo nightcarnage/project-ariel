@@ -305,6 +305,12 @@ pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
     let before = snapshot()?;
     println!("before: mask {}", describe_mask(before.mask));
 
+    // Record the baseline BEFORE the first write. This is the last moment the
+    // firmware's own value is visible, and on this path it is visible on a warm
+    // reboot too -- so it is the one reliable capture point that does not need a
+    // cold boot. Never overwrites an existing baseline.
+    crate::stock::capture_if_absent("cores-apply");
+
     let q = OcQ3::open()?;
     let outcome = if force_abnormal {
         println!(
@@ -342,8 +348,13 @@ pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
     Ok(())
 }
 
-/// Boot-time path for `aputune-cores.service`. Idempotent; NEVER reboots;
-/// exit 0 even on refusal (no restart storm, per design).
+/// Boot-time path for `aputune-cores.service`. Idempotent; NEVER reboots.
+///
+/// EXITS NON-ZERO on a refusal it cannot explain. (It used to return Ok(()) for
+/// every outcome, "no restart storm" -- but that made a genuine failure
+/// indistinguishable from success: a blade whose firmware mask is not 0x77 got
+/// "unexpected mask" and exit 0 forever, so the unlock silently never survived a
+/// cold boot. A loud failure is worth one systemd restart attempt.)
 pub fn boot() -> Result<()> {
     let mask = match OcQ3::open().and_then(|q| q.core_mask()) {
         Ok(m) => m,
@@ -356,20 +367,46 @@ pub fn boot() -> Result<()> {
         println!("already unlocked — nothing to do");
         return Ok(());
     }
-    if mask != CORE_MASK_STOCK {
-        eprintln!("unexpected mask 0x{mask:02X}, not touching anything");
-        return Ok(());
+
+    // The gate is this BLADE's recorded stock, not the textbook 0x77. Firmware
+    // masks are per-die: a blade can come up 0xD7 (115 does), and demanding 0x77
+    // there means refusing forever. With no baseline yet, this is exactly the
+    // right moment to take one -- after a cold boot the live mask IS the stock.
+    let stock = match crate::stock::cpu_stock_mask() {
+        Some(m) => m,
+        None => {
+            crate::stock::capture_if_absent("cores-boot");
+            crate::stock::cpu_stock_mask().unwrap_or(CORE_MASK_STOCK)
+        }
+    };
+
+    if mask != stock {
+        anyhow::bail!(
+            "refusing to write: live mask 0x{mask:02X} is neither this blade's recorded stock \
+             0x{stock:02X} nor 0x{CORE_MASK_FULL:02X} (already unlocked). Nothing was changed. If \
+             0x{mask:02X} IS this blade's factory layout, record it with \
+             `arieltune apu stock capture --force` and re-run."
+        );
     }
+
     let q = OcQ3::open()?;
-    match q.unlock_cores() {
-        Ok(CoreUnlock::Unlocked) => {
+    // lock_cores()/unlock_cores() are gated on 0x77 internally, so a blade whose
+    // stock is abnormal must go through the any-mask path. That is not a bypass
+    // here -- the mask already matched the value we recorded from this die.
+    let outcome = if stock == CORE_MASK_STOCK {
+        q.unlock_cores()?
+    } else {
+        q.unlock_cores_any()?
+    };
+    match outcome {
+        CoreUnlock::Unlocked => {
             println!("mask set to 0xFF — all 8 cores will appear on your next reboot");
         }
-        Ok(CoreUnlock::AlreadyUnlocked) => {}
-        Err(e) => {
-            eprintln!("unlock failed ({e}) — staying at 6 cores");
-        }
+        CoreUnlock::AlreadyUnlocked => {}
     }
+    // A write failure propagates as a non-zero exit on purpose: the unit is then
+    // marked failed and `systemctl --failed` shows it, instead of the old
+    // print-and-return-Ok() that made a real failure look like success.
     Ok(())
 }
 
