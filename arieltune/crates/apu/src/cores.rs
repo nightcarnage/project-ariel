@@ -57,7 +57,8 @@ pub const ACPI_TABLES: &[(&str, &str, &str)] = &[
 /// Firmware/OS core state, computed from live reads only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreState {
-    /// Mask 0x77: stock 6C/12T.
+    /// This blade's recorded factory mask — 6C/12T. Not necessarily `0x77`:
+    /// firmware masks are per-die and a blade can legitimately ship `0xD7`.
     Locked,
     /// Mask 0xFF but fewer than 8 cores visible: warm reboot needed.
     PendingReboot,
@@ -78,9 +79,23 @@ impl CoreState {
     }
 }
 
-/// Pure state derivation (unit-tested): mask + visible physical cores.
-pub fn state_for(mask: u8, visible_cores: u32) -> CoreState {
-    if mask == CORE_MASK_STOCK {
+/// Test-only convenience wrapper: the textbook-stock view of [`state_for_stock`],
+/// so the table-driven cases can read without repeating the mask. Production
+/// callers must pass the blade's *recorded* stock, not this constant.
+#[cfg(test)]
+fn state_for(mask: u8, visible_cores: u32) -> CoreState {
+    state_for_stock(mask, visible_cores, CORE_MASK_STOCK)
+}
+
+/// Pure state derivation against **this blade's recorded stock**.
+///
+/// Firmware masks are per-die: blade 115 ships `0xD7`, not `0x77`. Judging it
+/// against the textbook constant labelled a perfectly healthy blade `Abnormal`,
+/// which sent the TUI down the *forced* path and made `cores apply` refuse a mask
+/// the boot unit wrote without complaint. `Abnormal` must mean "we have no
+/// baseline for this", never "it isn't the value I assumed".
+pub fn state_for_stock(mask: u8, visible_cores: u32, stock: u8) -> CoreState {
+    if mask == stock {
         CoreState::Locked
     } else if mask == CORE_MASK_FULL {
         if visible_cores >= 8 {
@@ -193,6 +208,12 @@ fn thread_counts() -> (u32, u32) {
     (total, off)
 }
 
+/// This blade's recorded factory mask, falling back to the textbook `0x77` when
+/// no baseline has been captured yet (see [`crate::stock`]).
+fn recorded_stock() -> u8 {
+    crate::stock::cpu_stock_mask().unwrap_or(CORE_MASK_STOCK)
+}
+
 /// Live snapshot (requires root + BC-250 — `OcQ3::open` refuses other silicon).
 pub fn snapshot() -> Result<CoreSnapshot> {
     let q = OcQ3::open()?;
@@ -201,7 +222,9 @@ pub fn snapshot() -> Result<CoreSnapshot> {
     let cores = per_core.len() as u32;
     let (threads, offline) = thread_counts();
     Ok(CoreSnapshot {
-        state: state_for(mask, cores),
+        // Judge against the recorded baseline, so a blade whose factory mask is
+        // 0xD7 reads Locked rather than Abnormal.
+        state: state_for_stock(mask, cores, recorded_stock()),
         mask,
         cores,
         threads,
@@ -267,9 +290,10 @@ pub fn status() -> Result<()> {
     println!("SMN 0x115A870 = {}", describe_mask(s.mask));
     println!("state: {}", s.state.label());
     match s.state {
-        CoreState::Locked => {
-            println!("stock 6 cores / 12 threads — run 'aputune cores apply' to unlock")
-        }
+        CoreState::Locked => println!(
+            "at this blade's recorded stock (mask 0x{:02X}) — run 'aputune cores apply' to unlock",
+            s.mask
+        ),
         CoreState::Unlocked => println!("all 8 cores / 16 threads active"),
         CoreState::PendingReboot => {
             println!("mask is set but the firmware has not re-enumerated yet — warm reboot needed")
@@ -300,7 +324,12 @@ fn set_warm_reboot() {
 }
 
 /// `aputune cores apply`. Never reboots unless `warm_reboot`.
-/// `force_abnormal` bypasses the 0x77 gate (experimental escape hatch).
+///
+/// The gate is **this blade's recorded stock** — the same rule `boot()` uses —
+/// not the textbook `0x77`. Firmware masks are per-die (115 ships `0xD7`), so
+/// demanding `0x77` here meant the interactive path refused a mask the boot unit
+/// wrote without complaint. `force_abnormal` is for a mask we have no baseline
+/// for at all: an acknowledgement, not a bypass of the check.
 pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
     let before = snapshot()?;
     println!("before: mask {}", describe_mask(before.mask));
@@ -311,15 +340,36 @@ pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
     // cold boot. Never overwrites an existing baseline.
     crate::stock::capture_if_absent("cores-apply");
 
-    let q = OcQ3::open()?;
-    let outcome = if force_abnormal {
+    // Read the baseline *after* the capture attempt, so a first-ever run on a
+    // 0xD7 blade records the real value before we judge the live mask by it.
+    let stock = recorded_stock();
+    let unexpected = before.mask != stock && before.mask != CORE_MASK_FULL;
+    if unexpected && !force_abnormal {
+        bail!(
+            "refusing to write: live mask 0x{mask:02X} is neither this blade's recorded stock \
+             0x{stock:02X} nor 0x{full:02X} (already unlocked). Nothing was changed. If \
+             0x{mask:02X} IS this blade's factory layout, record it with \
+             `arieltune apu stock capture --force`, or pass --force-abnormal to accept it once.",
+            mask = before.mask,
+            stock = stock,
+            full = CORE_MASK_FULL
+        );
+    }
+    if unexpected {
         println!(
-            "WARNING: --force-abnormal bypasses the 0x77 gate (starting mask 0x{:02X}) — EXPERIMENTAL",
+            "WARNING: --force-abnormal accepted mask 0x{:02X}, which has no recorded baseline — EXPERIMENTAL",
             before.mask
         );
-        q.unlock_cores_any()?
-    } else {
+    }
+
+    let q = OcQ3::open()?;
+    // `unlock_cores()` is gated on 0x77 inside ocq3, so a blade whose recorded
+    // stock is anything else has to take the any-mask path. That is not a bypass
+    // here -- the mask already matched the value we recorded from this die.
+    let outcome = if stock == CORE_MASK_STOCK && !unexpected {
         q.unlock_cores()?
+    } else {
+        q.unlock_cores_any()?
     };
     match outcome {
         CoreUnlock::AlreadyUnlocked => {
@@ -1007,6 +1057,38 @@ mod tests {
         assert_eq!(state_for(0x7F, 7), CoreState::Abnormal(0x7F));
         assert_eq!(state_for(0x03, 2), CoreState::Abnormal(0x03));
         assert_eq!(state_for(0x00, 0), CoreState::Abnormal(0x00));
+    }
+
+    /// A per-die factory mask must read as `Locked`, not `Abnormal`. Blade 115
+    /// ships `0xD7`; judging it against the textbook `0x77` is what sent it down
+    /// the forced path and made `cores apply` refuse a mask `cores boot` accepts.
+    #[test]
+    fn recorded_stock_is_not_abnormal() {
+        // With a baseline for that mask, the factory value is simply "locked".
+        assert_eq!(state_for_stock(0xD7, 6, 0xD7), CoreState::Locked);
+        assert_eq!(
+            state_for_stock(CORE_MASK_STOCK, 6, CORE_MASK_STOCK),
+            CoreState::Locked
+        );
+        // Without a baseline for it, the mask stays Abnormal so the escape hatch
+        // still has something to warn about.
+        assert_eq!(
+            state_for_stock(0xD7, 6, CORE_MASK_STOCK),
+            CoreState::Abnormal(0xD7)
+        );
+        assert_eq!(
+            state_for_stock(CORE_MASK_STOCK, 6, 0xD7),
+            CoreState::Abnormal(0x77)
+        );
+        // The full mask is judged the same way whatever the baseline says.
+        assert_eq!(
+            state_for_stock(CORE_MASK_FULL, 8, 0xD7),
+            CoreState::Unlocked
+        );
+        assert_eq!(
+            state_for_stock(CORE_MASK_FULL, 6, 0xD7),
+            CoreState::PendingReboot
+        );
     }
 
     #[test]

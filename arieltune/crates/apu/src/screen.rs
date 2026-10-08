@@ -278,9 +278,11 @@ pub struct ApuScreen {
     core_draft: Option<[bool; 8]>,
     cores_report: Option<Vec<String>>,
     cores_verify_job: Option<JoinHandle<Result<Vec<String>>>>,
-    /// Two-step guard for the FORCED firmware unlock ([F]): the q3 0x98 write
-    /// is all-or-nothing and bypasses the 0x77 safety gate, so a warning popup
-    /// must be answered before anything is sent to the SMU.
+    /// Two-step guard for the [F] confirm popup: the q3 0x98 write is
+    /// all-or-nothing, and [F] is offered only when the live mask has no recorded
+    /// baseline, so a warning must be answered before anything reaches the SMU.
+    /// A mask matching this blade's recorded stock is not abnormal and takes the
+    /// plain [u] path instead.
     core_force_confirm: bool,
 }
 
@@ -1402,15 +1404,16 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
                     app.status = "mask already 0xFF — warm reboot needed to enumerate".into()
                 }
                 crate::cores::CoreState::Locked => {
-                    // The safe [u] unlock exists for the known stock mask; the
-                    // forced hatch is only for boards the safe path refuses.
-                    app.status = "mask is stock 0x77 — use [u] for the safe unlock".into()
+                    // The plain [u] unlock covers this blade's recorded stock,
+                    // whatever that mask is; the confirm hatch is only for a mask
+                    // we have no baseline for.
+                    app.status = "mask is this blade's recorded stock — use [u] to unlock".into()
                 }
-                crate::cores::CoreState::Abnormal(_) => {
+                crate::cores::CoreState::Abnormal(m) => {
                     app.core_force_confirm = true;
-                    app.status =
-                        "forced unlock armed — confirm [y] to write 0xFF, [esc] to cancel"
-                            .into();
+                    app.status = format!(
+                        "mask 0x{m:02X} has no recorded baseline — confirm [y] to write 0xFF, [esc] to cancel"
+                    );
                 }
             },
         },
@@ -1593,7 +1596,7 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
     // e.g. a `force` edit without committing a clock you didn't want.
     let editing = matches!(app.edit, Edit::Value(_));
     let keys: &[(&str, &str)] = if app.core_force_confirm {
-        &[("[y]", "write 0xFF (forced)"), ("[esc]", "cancel")]
+        &[("[y]", "write 0xFF"), ("[esc]", "cancel")]
     } else if app.patch_popup.is_some() {
         &[
             ("[up/dn]", "scroll"),
@@ -1842,8 +1845,9 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     lines
 }
 
-/// The [F] modal: a centered warning explaining the forced unlock before the
-/// SMU write. Renders from live state only (the current mask) — no fs reads.
+/// The [F] modal: a centered warning explaining the unlock before the SMU write,
+/// shown only when the live mask has no recorded baseline. Renders from live
+/// state only (the current mask) — no fs reads.
 fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
     let mask = app.snap.cores.as_ref().map(|c| c.mask).unwrap_or(0);
     let horiz = Layout::default()
@@ -1861,7 +1865,7 @@ fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WARN))
         .title(Span::styled(
-            " FORCED UNLOCK — EXPERIMENTAL ",
+            " UNLOCK — NO RECORDED BASELINE ",
             Style::default().fg(WARN).add_modifier(Modifier::BOLD),
         ));
     let text = vec![
@@ -1872,7 +1876,7 @@ fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
                 Style::default().fg(WARN).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " is NOT the known stock 0x77 — the safety gate",
+                " has no recorded baseline for this board — the gate",
                 Style::default().fg(DIM),
             ),
         ]),
@@ -2635,7 +2639,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] force-unlock · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] unlock (no baseline) · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists

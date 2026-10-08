@@ -550,15 +550,17 @@ fn ts(unix: u64) -> String {
 pub enum CoreCmd {
     /// Firmware mask, state, visible cores/threads, offlined threads, MCE count, boot-unit state. Read-only.
     Status,
-    /// Unlock all 8 cores now (SMU q3 msg 0x98, all-or-nothing 0x77→0xFF). Refuses abnormal masks. Root.
+    /// Unlock all 8 cores now (SMU q3 msg 0x98, all-or-nothing — it stores 0xFF). Root.
     ///
-    /// The new cores appear after a WARM reboot. A cold boot reverts the mask; the boot unit re-applies
-    /// it. Default: no reboot. See `arieltune-core.md`.
+    /// Proceeds only when the live mask is this blade's recorded stock or already 0xFF — the same
+    /// rule the boot unit uses, which is NOT the textbook 0x77: firmware masks are per-die and a
+    /// blade can legitimately ship 0xD7. The new cores appear after a WARM reboot. A cold boot
+    /// reverts the mask; the boot unit re-applies it. Default: no reboot. See `arieltune-core.md`.
     Apply {
         /// Warm-reboot immediately after a successful unlock (mask survives warm resets).
         #[arg(long)]
         reboot: bool,
-        /// Bypass the 0x77 gate: unlock even from an abnormal mask (e.g. 0xD7). EXPERIMENTAL.
+        /// Accept a live mask that has no recorded baseline (experimental escape hatch).
         #[arg(long)]
         force_abnormal: bool,
     },
