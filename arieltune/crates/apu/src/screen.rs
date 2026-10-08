@@ -1892,7 +1892,7 @@ fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WARN))
         .title(Span::styled(
-            " UNLOCK — NO RECORDED BASELINE ",
+            " FORCED UNLOCK — EXPERIMENTAL ",
             Style::default().fg(WARN).add_modifier(Modifier::BOLD),
         ));
     let text = vec![
@@ -2666,7 +2666,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] unlock (no baseline) · [s] stock · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] force-unlock · [s] stock · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists
