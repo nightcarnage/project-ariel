@@ -39,6 +39,11 @@ pub const UNIT_PATH: &str = "/etc/systemd/system/aputune-cores.service";
 pub const REBOOT_MODE_PATH: &str = "/sys/kernel/reboot/mode";
 pub const ACPI_OVERRIDE_DIR: &str = "/etc/initcpio/acpi_override";
 pub const ACPI_BACKUP_DIR: &str = "/etc/initcpio/acpi_override-backups";
+/// GRUB-prepended override cpio. A GRUB `initrd a.cpio b.img` chain does **not**
+/// appear in `/proc/cmdline`, so this is a second source of the same tables that
+/// is invisible to every cmdline-based check -- and the reason a blade can end up
+/// with each table loaded twice.
+pub const ACPI_CPIO_PATH: &str = "/boot/acpi_override.cpio";
 pub const MKINITCPIO_CONF: &str = "/etc/mkinitcpio.conf";
 pub const REPORT_DIR: &str = "/var/lib/aputune";
 pub const ACPI_TABLES: &[(&str, &str, &str)] = &[
@@ -793,24 +798,52 @@ fn processor_names(bytes: &[u8], prefix: &[u8; 2]) -> std::collections::BTreeSet
     found
 }
 
-/// How many processors the **loaded** ACPI override actually covers, and which
-/// table it came from.
+/// The OEM table id of a raw ACPI table: 8 bytes at offset 16, space padded.
 ///
-/// Reads `/sys/firmware/acpi/tables/` — what the kernel actually loaded — rather
-/// than the staged copy under [`ACPI_OVERRIDE_DIR`]. The staged directory can be
+/// This -- not the file name -- is what distinguishes `PSTATES` from `P_CST3`,
+/// and it is how the kernel reports an upgrade (`SSDT  HACK  P_CST3`).
+fn acpi_oem_table_id(bytes: &[u8]) -> Option<String> {
+    let raw = bytes.get(16..24)?;
+    Some(String::from_utf8_lossy(raw).trim().to_string())
+}
+
+/// One loaded OEM-HACK override table, as the kernel actually loaded it.
+#[derive(Debug, Clone)]
+struct LoadedOverride {
+    /// OEM table id (`PSTATES`, `P_CST3`).
+    table_id: String,
+    /// Distinct `P0xx` processor names the table declares.
+    processors: u32,
+    /// The `/sys/firmware/acpi/tables/` entry it was read from.
+    file: String,
+}
+
+/// Every loaded OEM-HACK override table.
+///
+/// Plural on purpose. The same table can be supplied by two independent sources
+/// at once: the initramfs (staged under [`ACPI_OVERRIDE_DIR`] by [`acpi_install`])
+/// and a GRUB-prepended [`ACPI_CPIO_PATH`] chained into the *same* `initrd` line.
+/// Because a GRUB `initrd` chain is invisible in `/proc/cmdline`, the only
+/// honest evidence is the loaded tables themselves: blade 115 has each table
+/// loaded twice, which is harmless only for as long as both copies agree.
+///
+/// Reads `/sys/firmware/acpi/tables/` -- what the kernel actually loaded -- not
+/// the staged copy under [`ACPI_OVERRIDE_DIR`]. The staged directory can be
 /// absent while an override is very much in force: blade 105 delivers its tables
-/// from a GRUB-prepended `/boot/acpi_override.cpio` and has no staging dir at
-/// all, so a check against the staging dir reported "none installed" on the one
-/// blade that was genuinely losing threads. Read the effect, not the intent.
+/// from the GRUB cpio and has no staging dir at all, so a check against the
+/// staging dir reported "none installed" on the one blade that was genuinely
+/// losing threads. Read the effect, not the intent.
 ///
-/// Overrides are identified by OEM id `HACK` (both SSDT-CST and SSDT-PST carry
-/// it). If no such table is loaded, `None` is returned rather than guessing at
-/// the firmware's own tables, which declare more processors than are active and
-/// would overstate coverage.
-fn override_coverage() -> Option<(u32, String)> {
+/// Overrides are identified by OEM id `HACK`. The firmware's own tables are
+/// deliberately excluded: they declare more processors than are active and would
+/// overstate coverage.
+fn loaded_overrides() -> Vec<LoadedOverride> {
     let dir = Path::new("/sys/firmware/acpi/tables");
-    let mut recorded: Option<(u32, String)> = None;
-    for e in fs::read_dir(dir).ok()?.flatten() {
+    let mut found: Vec<LoadedOverride> = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for e in entries.flatten() {
         let path = e.path();
         if !path.is_file() {
             continue; // `dynamic/`, `data/`
@@ -819,19 +852,20 @@ fn override_coverage() -> Option<(u32, String)> {
         if acpi_oem_id(&bytes).as_deref() != Some("HACK") {
             continue;
         }
-        // The table that supplies C-states is the one defining coverage; the
-        // P-state table carries the same processor list, so either will do.
-        let n = processor_names(&bytes, b"P0").len() as u32;
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        if recorded.as_ref().is_none_or(|(best, _)| n > *best) {
-            recorded = Some((n, name));
-        }
+        found.push(LoadedOverride {
+            table_id: acpi_oem_table_id(&bytes).unwrap_or_default(),
+            // The C-state table defines coverage; the P-state table carries the
+            // same processor list, so either measures the same thing.
+            processors: processor_names(&bytes, b"P0").len() as u32,
+            file: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        });
     }
-    recorded
+    found.sort_by(|a, b| (&a.table_id, &a.file).cmp(&(&b.table_id, &b.file)));
+    found
 }
 
 /// Render a cpu list compactly: `cpu12 cpu13`.
@@ -856,13 +890,68 @@ pub fn acpi_status() -> Result<()> {
     let no_idle = threads_without_idle();
     let no_freq = threads_without_freq();
 
+    // Name the board. This command answers "is my firmware supported", and that
+    // answer is a property of the BIOS version *and* the loaded tables -- so
+    // print both rather than leaving the version to be worked out from DMI
+    // somewhere else. The verified-version list lives in `bc250-board`; ask it
+    // instead of re-deriving a second opinion here.
+    let board = bc250_board::detect_bios();
+    let product = if board.product.trim().is_empty() {
+        "(unreadable)".to_string()
+    } else {
+        board.product.clone()
+    };
+    let version = if board.bios_version.trim().is_empty() {
+        "(unreadable)".to_string()
+    } else {
+        board.bios_version.clone()
+    };
+    println!(
+        "board: {product} · BIOS {version} · {}",
+        board.compat.label()
+    );
+
     println!("logical threads: {}", s.threads);
-    match override_coverage() {
-        Some((n, from)) => println!("override covers: {n} processors (OEM HACK, loaded as {from})"),
-        None => println!(
-            "override covers: none loaded — no OEM-HACK table in /sys/firmware/acpi/tables"
-        ),
+
+    // Every loaded override, not just the widest one: a stale copy or a
+    // duplicated table is invisible in a single "covers N" line, and those are
+    // the two states that actually bit us.
+    let loaded = loaded_overrides();
+    if loaded.is_empty() {
+        println!("override covers: none loaded — no OEM-HACK table in /sys/firmware/acpi/tables");
+    } else {
+        for o in &loaded {
+            let id = if o.table_id.is_empty() {
+                "<unnamed>"
+            } else {
+                o.table_id.as_str()
+            };
+            println!(
+                "override loaded: {id} declares {} processors (from {})",
+                o.processors, o.file
+            );
+        }
+        let mut ids: Vec<&str> = loaded.iter().map(|o| o.table_id.as_str()).collect();
+        ids.sort_unstable();
+        let dups: Vec<&str> = ids
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .map(|w| w[0])
+            .collect();
+        if !dups.is_empty() {
+            println!(
+                "! {} loaded twice — two sources are supplying it ({ACPI_CPIO_PATH} chained\n  \
+                 into the initrd line, plus the initramfs). If they ever differ, which one wins\n  \
+                 is undefined.",
+                dups.join(", ")
+            );
+        }
+        println!(
+            "override covers: {} processors",
+            loaded.iter().map(|o| o.processors).max().unwrap_or(0)
+        );
     }
+
     println!(
         "threads without cpuidle: {} {}",
         no_idle.len(),
@@ -970,6 +1059,43 @@ pub fn acpi_install() -> Result<()> {
             }
         }
     }
+    // The staged pair must cover at least as many processors as this box has, or
+    // the surplus threads come back with no C-states and no frequency control --
+    // silently. That is exactly how blade 105 lost cpu12-15 to an older
+    // 12-processor pair. Over-coverage is free; under-coverage is the only
+    // failure mode, so say something now rather than after the reboot.
+    let (threads, _) = thread_counts();
+    for (name, _, _) in ACPI_TABLES {
+        let path = Path::new(ACPI_OVERRIDE_DIR).join(name);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let n = processor_names(&bytes, b"P0").len() as u32;
+                if n < threads {
+                    println!(
+                        "WARNING: {name} declares {n} processors but this box has {threads} \
+                         threads — the surplus will have no C-states after the reboot"
+                    );
+                }
+            }
+            Err(e) => {
+                println!(
+                    "note: could not read {} to check coverage ({e})",
+                    path.display()
+                )
+            }
+        }
+    }
+    // A second source can shadow or duplicate these. GRUB chains the override
+    // cpio into the same initrd line, and a GRUB `initrd` chain never appears in
+    // /proc/cmdline -- so point at the check rather than letting the two copies
+    // silently disagree.
+    if Path::new(ACPI_CPIO_PATH).exists() {
+        println!(
+            "note: {ACPI_CPIO_PATH} also exists. If GRUB chains it into the initrd line, these \
+             tables load twice and precedence between the copies is undefined — check with \
+             `grep acpi_override /boot/grub/grub.cfg`."
+        );
+    }
     println!("done — reboot for the 8-core tables to take effect");
     Ok(())
 }
@@ -1025,6 +1151,20 @@ mod tests {
         let got = processor_names(b"P0ZZ P0 P000", b"P0");
         assert!(got.contains("P000"), "{got:?}");
         assert!(!got.iter().any(|s| s.contains('Z')), "{got:?}");
+    }
+
+    /// The OEM table id lives at offset 16. It is how the kernel (and this code)
+    /// tells `SSDT-CST` from `SSDT-PST` when both carry the same OEM id, and so
+    /// how a duplicated table gets noticed at all.
+    #[test]
+    fn reads_the_oem_table_id_from_a_table_header() {
+        let mut t = vec![0u8; 36];
+        t[..4].copy_from_slice(b"SSDT");
+        t[10..16].copy_from_slice(b"HACK  ");
+        t[16..24].copy_from_slice(b"P_CST3  ");
+        assert_eq!(acpi_oem_table_id(&t).as_deref(), Some("P_CST3"));
+        // Too short to hold a header: no claim, and no panic.
+        assert_eq!(acpi_oem_table_id(&t[..8]), None);
     }
 
     /// The OEM id lives at offset 10 of the ACPI header. It is how coverage gets
