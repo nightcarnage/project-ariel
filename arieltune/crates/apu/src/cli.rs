@@ -90,7 +90,8 @@ pub enum Cmd {
     ///
     /// The firmware unlock is all-or-nothing 0x77→0xFF and takes effect at the next WARM reboot; a cold
     /// boot reverts it and the boot unit re-applies it. Granular core counts are done at the OS layer
-    /// (offline/online, instant). Refuses abnormal masks. See `arieltune-core.md`.
+    /// (offline/online, instant). The gate is this blade's *recorded* stock mask, not a fixed 0x77 —
+    /// a blade that comes up 0xD7 is its own baseline, not an error. See `arieltune-core.md`.
     Cores {
         #[command(subcommand)]
         action: CoreCmd,
@@ -561,7 +562,8 @@ pub enum CoreCmd {
         #[arg(long)]
         force_abnormal: bool,
     },
-    /// Idempotent boot-time path for aputune-cores.service. Never reboots; exit 0 on refusal. Root.
+    /// Idempotent boot-time path for aputune-cores.service. Never reboots; exits NON-ZERO on a refusal
+    /// it cannot explain, so `systemctl --failed` shows a real failure instead of hiding it. Root.
     Boot,
     /// Install the boot re-apply unit (aputune-cores.service) and enable it. Root.
     Install,
@@ -696,15 +698,13 @@ fn cmd_profile(action: ProfileCmd) -> Result<()> {
             p.apply(oc.as_ref())?;
             // CU arming last (persisted/reboot action), after live actuation
             // succeeded, so an apply failure can't leave the modprobe.d changed.
+            // Persisting now *rebuilds the initramfs this machine boots* and
+            // returns a description of what it did, so print that instead of a
+            // generic "reboot to apply" — the old wording promised a change
+            // that a plain `mkinitcpio -P` could not deliver on a snapshot boot.
             match p.cu_40 {
-                Some(true) => {
-                    cu::enable_persist()?;
-                    println!("armed 40-CU: {} (reboot to apply)", cu::MODPROBE_CONF);
-                }
-                Some(false) => {
-                    cu::disable_persist()?;
-                    println!("disarmed 40-CU (reboot to apply)");
-                }
+                Some(true) => println!("{}", cu::enable_persist()?),
+                Some(false) => println!("{}", cu::disable_persist()?),
                 None => {}
             }
             println!("applied '{}'", p.name);
@@ -761,9 +761,12 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
             );
         }
         CuCmd::Enable => {
-            cu::enable_persist()?;
-            println!("persisted: {}", cu::MODPROBE_CONF);
-            println!("now run `mkinitcpio -P` (or your initramfs tool) and reboot.");
+            // Persist + rebuild + verify, in one call. The manual
+            // "now run `mkinitcpio -P`" this used to print was wrong on any
+            // blade booted from a snapshot image: no preset produces the image
+            // that boot came from, so `-P` rebuilt the *unused* presets and the
+            // change never reached the boot path (see `crate::initramfs`).
+            println!("{}", cu::enable_persist()?);
             if !detect::report()
                 .rows
                 .iter()
@@ -776,11 +779,9 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
             }
         }
         CuCmd::Disable => {
-            cu::disable_persist()?;
-            println!(
-                "removed: {} (reverts to 24 CU next boot)",
-                cu::MODPROBE_CONF
-            );
+            // Removes only our own keys (the SDMA stability parameters stay) and
+            // rebuilds the booted image; prints what was actually done.
+            println!("{}", cu::disable_persist()?);
         }
         CuCmd::RouteAll => {
             curoute::enable_all()?;

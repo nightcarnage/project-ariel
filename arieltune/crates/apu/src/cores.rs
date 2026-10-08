@@ -774,10 +774,27 @@ pub fn acpi_install() -> Result<()> {
         fs::write(MKINITCPIO_CONF, &new_conf).context("update mkinitcpio.conf")?;
         println!("added acpi_override hook to HOOKS");
     }
-    println!("rebuilding initramfs (mkinitcpio -P)...");
-    let st = Command::new("mkinitcpio").arg("-P").status()?;
-    if !st.success() {
-        bail!("mkinitcpio -P failed ({st})");
+    // Rebuild the image this machine actually boots — not `mkinitcpio -P`.
+    //
+    // Same root cause as the CU drop-in: a blade booted from a snapshot image
+    // has no preset that produces it, so `-P` reports success while leaving the
+    // booted initramfs untouched, and the SSDT override never reaches early
+    // boot. Verified on blade 115: the booted image was missing
+    // `kernel/firmware/acpi/SSDT-*.aml` that had been staged in /etc for days.
+    println!("{}", crate::initramfs::rebuild_boot_image()?);
+    // Confirm the tables really are in the image rather than assuming the hook
+    // did the right thing (the hook can legitimately change).
+    if let Some(image) = crate::initramfs::boot_initramfs() {
+        for (name, _, _) in ACPI_TABLES {
+            let inside = format!("kernel/firmware/acpi/{name}");
+            if !crate::initramfs::image_contains(&image, &inside) {
+                println!(
+                    "note: {inside} is not inside {} — check `lsinitcpio {}`",
+                    image.display(),
+                    image.display()
+                );
+            }
+        }
     }
     println!("done — reboot for the 8-core tables to take effect");
     Ok(())
@@ -802,11 +819,9 @@ pub fn acpi_revert() -> Result<()> {
         println!("no backup found — override tables removed");
     }
     if Path::new(MKINITCPIO_CONF).exists() {
-        let st = Command::new("mkinitcpio").arg("-P").status()?;
-        if !st.success() {
-            bail!("mkinitcpio -P failed ({st})");
-        }
-        println!("initramfs rebuilt");
+        // Same reason as `acpi_install`: rebuild the *booted* image, not the
+        // presets, or the removal never reaches early boot.
+        println!("{}", crate::initramfs::rebuild_boot_image()?);
     }
     Ok(())
 }

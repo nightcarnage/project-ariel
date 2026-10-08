@@ -32,6 +32,7 @@ mod cutest;
 mod detect;
 mod dpm;
 mod gpuctl;
+mod initramfs;
 mod kbuild;
 mod kernel;
 mod patches;

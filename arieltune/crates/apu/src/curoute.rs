@@ -18,7 +18,21 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 const ASIC: &str = "cyan_skillfish.gfx1013";
+/// Harvest / CC configuration register.
+///
+/// **The name is ambiguous in umr.** `mmCC_GC_SHADER_ARRAY_CONFIG` is a prefix
+/// of `mmCC_GC_SHADER_ARRAY_CONFIG_GEN0`, and `umr -r <name>` matches by prefix,
+/// so a bare query returns *both* registers. Anything that reads this register
+/// must go through [`read_bank`], whose parser now refuses a multi-register
+/// answer rather than silently reporting the other one.
+///
+/// The writes below are best-effort, and on gfx1013 they appear to be no-ops:
+/// measured on blade 115, this register reads `0xffe00000` identically whether
+/// the 40-CU liberation is armed or disarmed — including after this code has run
+/// — while `_GEN0` reads `0x00fc0001`. So the "clear the harvest mask" write is
+/// recorded here as an **open question**, not as working behaviour.
 const REG_CC: &str = "mmCC_GC_SHADER_ARRAY_CONFIG";
+/// Per-shader-array WGP dispatch mask (the live routing we actually write).
 const REG_SPI: &str = "mmSPI_PG_ENABLE_STATIC_WGP_MASK";
 const REG_RLC: &str = "mmRLC_PG_ALWAYS_ON_WGP_MASK";
 
@@ -80,6 +94,25 @@ fn run(args: &[String]) -> Result<String> {
 }
 
 /// Read a GRBM-banked register's value for shader array (se, sh).
+///
+/// ## Why the parse is strict
+///
+/// `umr -r <name>` matches register names by **prefix**, so a name that happens
+/// to be a prefix of another register silently returns *both*:
+///
+/// ```text
+///   cyan_skillfish.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG      => 0xffe00000
+///   cyan_skillfish.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG_GEN0 => 0x00fc0001
+/// ```
+///
+/// This was confirmed on blade 115 on 2026-10-07. The previous code here took
+/// `rsplit("=>").next()` — the *last* match — so a caller asking for
+/// `REG_CC` was handed the value of `_GEN0` and could not tell. Those two
+/// registers mean different things, and a wrong-but-plausible hardware reading
+/// reported as fact is worse than a failed read.
+///
+/// So: require exactly one `=>`. An ambiguous name becomes a loud error naming
+/// the register.
 fn read_bank(name: &str, se: u32, sh: u32) -> Result<u32> {
     let inst = instance();
     let out = run(&[
@@ -92,13 +125,28 @@ fn read_bank(name: &str, se: u32, sh: u32) -> Result<u32> {
         "-r".into(),
         reg(name),
     ])?;
-    // line looks like "...mmSPI_PG_ENABLE_STATIC_WGP_MASK => 0x0000001f"
-    let hex = out
-        .rsplit("=>")
-        .next()
-        .and_then(|s| s.trim().strip_prefix("0x"))
-        .context("no value in umr output")?;
-    u32::from_str_radix(hex.trim(), 16).context("parse umr hex")
+    parse_single_value(&out).with_context(|| format!("reading {} (SE{se} SH{sh})", reg(name)))
+}
+
+/// Pull the single value out of umr output, refusing an ambiguous answer.
+///
+/// Expected shape is one register line, `...regname => 0x0000001f`. Zero `=>`
+/// means the query produced nothing parseable; two or more means the name
+/// matched more than one register and we cannot say which value is which.
+fn parse_single_value(out: &str) -> Result<u32> {
+    let parts: Vec<&str> = out.split("=>").collect();
+    let [_, value] = parts.as_slice() else {
+        anyhow::bail!(
+            "expected exactly one register in umr output, got {} — the name is \
+             ambiguous (umr matches by prefix) or the read failed, so the value \
+             cannot be trusted:\n{out}",
+            parts.len().saturating_sub(1)
+        );
+    };
+    let hex = value.trim();
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
+    u32::from_str_radix(hex.trim(), 16)
+        .with_context(|| format!("not a hex value in umr output: {out:?}"))
 }
 
 fn write_bank(name: &str, val: u32, se: u32, sh: u32) -> Result<()> {
@@ -550,6 +598,41 @@ mod tests {
             let err = apply(masks).unwrap_err().to_string();
             assert!(err.contains("empty"), "masks {masks:02x?}: {err}");
         }
+    }
+
+    /// The normal case: one register line, hex value at the end.
+    #[test]
+    fn parses_a_single_register_line() {
+        let out = "[UMR] cyan_skillfish.gfx1013.mmSPI_PG_ENABLE_STATIC_WGP_MASK => 0x0000001f\n";
+        assert_eq!(parse_single_value(out).unwrap(), 0x1f);
+    }
+
+    /// The bug that motivated the strict parse: `umr -r <prefix>` returns every
+    /// register the name is a prefix of. That must be an error, never the value
+    /// of whichever register happened to be printed last.
+    #[test]
+    fn refuses_an_ambiguous_multi_register_answer() {
+        let out = concat!(
+            "cyan_skillfish.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG      => 0xffe00000\n",
+            "cyan_skillfish.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG_GEN0 => 0x00fc0001\n",
+        );
+        let err = parse_single_value(out).expect_err("ambiguous read must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ambiguous"), "unhelpful error: {msg}");
+    }
+
+    /// A read that produced nothing parseable is an error, not a silent zero.
+    #[test]
+    fn refuses_output_with_no_value() {
+        assert!(parse_single_value("[ERROR]: Path <x> not found\n").is_err());
+        assert!(parse_single_value("").is_err());
+    }
+
+    /// Values are unsigned hex; a non-hex payload is an error.
+    #[test]
+    fn refuses_a_non_hex_value() {
+        let out = "cyan_skillfish.gfx1013.mmREG => not-a-number\n";
+        assert!(parse_single_value(out).is_err());
     }
 
     #[test]
