@@ -249,27 +249,47 @@ pub fn enable_all() -> Result<()> {
     apply([FULL_MASK; 4])
 }
 
-/// Restore factory dispatch.
+/// Policy for [`factory_masks`], split out so it can be unit-tested without a
+/// `/var/lib/arieltune/stock.json` being present on the test machine.
+fn factory_masks_from(recorded: Option<[u32; 4]>) -> ([u32; 4], Option<String>) {
+    match recorded {
+        Some(masks) => (masks, None),
+        None => (
+            [FACTORY_MASK; 4],
+            Some("no recorded pre-liberation CU layout".to_string()),
+        ),
+    }
+}
+
+/// The masks a factory restore should use, plus the reason when that had to be
+/// guessed (`None` = this blade's recorded layout is known).
 ///
 /// "Factory" means THIS blade's factory, not a constant. Every array carrying
 /// 3 WGPs (`0x07` -> 24 CU) is only the textbook shape; a blade binned
 /// differently restores wrong if we assume it. The pre-liberation enumeration is
-/// recorded in the stock baseline (see `crate::stock`) and is what we restore
-/// when it is available. Falls back to `[FACTORY_MASK; 4]` when the baseline is
-/// missing or was taken while the unlock was armed -- and says which it did.
+/// recorded in the stock baseline (see `crate::stock`), and is only obtainable
+/// while the 40-CU unlock is disarmed.
+///
+/// Returned as data rather than applied, so the TUI can stage it as a draft and
+/// the CLI can apply it without either owning the policy -- and so neither can
+/// quietly reintroduce a hardcoded `0x07`.
+pub fn factory_masks() -> ([u32; 4], Option<String>) {
+    factory_masks_from(crate::stock::cu_factory_masks())
+}
+
+/// Restore factory dispatch: this blade's recorded layout when we have one, the
+/// textbook shape with a printed warning when we do not.
 pub fn factory() -> Result<()> {
-    match crate::stock::cu_factory_masks() {
-        Some(masks) => apply(masks),
-        None => {
-            eprintln!(
-                "note: no recorded pre-liberation CU layout — assuming the textbook \
-                 [{FACTORY_MASK:#04x}; 4] = {} CU. Capture it with `arieltune apu stock capture` \
-                 on a box whose 40-CU unlock is not armed.",
-                FACTORY_MASK.count_ones() * 2 * 4
-            );
-            apply([FACTORY_MASK; 4])
-        }
+    let (masks, guessed) = factory_masks();
+    if guessed.is_some() {
+        eprintln!(
+            "note: no recorded pre-liberation CU layout — assuming the textbook \
+             [{FACTORY_MASK:#04x}; 4] = {} CU. Capture it with `arieltune apu stock capture` \
+             on a box whose 40-CU unlock is not armed.",
+            FACTORY_MASK.count_ones() * 2 * 4
+        );
     }
+    apply(masks)
 }
 
 /// Toggle one WGP (array index 0..3, wgp 0..4) in the live routing. Refuses a
@@ -642,5 +662,24 @@ mod tests {
         assert!(!has_empty_array(&[FULL_MASK; 4]));
         // Only the 5 WGP bits count: 0x20 (bit 5) is not a routed WGP.
         assert!(has_empty_array(&[0x20, FULL_MASK, FULL_MASK, FULL_MASK]));
+    }
+
+    /// A recorded layout must beat the textbook shape. Restoring `0x07` over a
+    /// differently-binned die is exactly the trap this exists to prevent.
+    #[test]
+    fn factory_prefers_the_recorded_layout() {
+        let recorded = [0x07, 0x07, 0x07, 0x0f];
+        let (masks, guessed) = factory_masks_from(Some(recorded));
+        assert_eq!(masks, recorded);
+        assert_eq!(guessed, None, "a known baseline is not a guess");
+    }
+
+    /// With no baseline we still fall back to the textbook shape, but the caller
+    /// is told it was a guess so it can say so out loud.
+    #[test]
+    fn factory_reports_when_it_guesses() {
+        let (masks, guessed) = factory_masks_from(None);
+        assert_eq!(masks, [FACTORY_MASK; 4]);
+        assert!(guessed.is_some(), "a guessed layout must not be silent");
     }
 }

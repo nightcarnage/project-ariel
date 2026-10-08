@@ -1458,9 +1458,22 @@ fn cu_key(app: &mut ApuScreen, code: KeyCode) {
             app.status = "draft: all 40 CU — [a] apply".into();
         }
         KeyCode::Char('t') => {
-            app.cu_draft = [curoute::FACTORY_MASK; 4];
+            // "Factory" is this blade's recorded layout when the baseline has one,
+            // NOT the textbook 0x07 -- the same per-die trap `cores apply` had
+            // with its hardcoded stock mask. Say which of the two this was: a
+            // silently restored guess is the failure mode, not the guess itself.
+            let (masks, guessed) = curoute::factory_masks();
+            let cu = curoute::cu_count(&masks);
+            app.cu_draft = masks;
             app.cu_dirty = true;
-            app.status = "draft: factory 24 CU — [a] apply".into();
+            app.status = match guessed {
+                Some(reason) => {
+                    format!("draft: factory {cu} CU — {reason} (GUESSED) — [a] apply")
+                }
+                None => {
+                    format!("draft: factory {cu} CU (this blade's recorded layout) — [a] apply")
+                }
+            };
         }
         KeyCode::Esc => {
             app.cu_draft = app.cu_live;
