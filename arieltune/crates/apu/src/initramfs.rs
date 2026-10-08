@@ -111,26 +111,48 @@ pub fn snapshot_id_for_boot_image(boot_image: &str) -> Option<String> {
     stem.starts_with("snap-").then(|| stem.to_string())
 }
 
-/// Ask the bc-250-snapshotter whether it knows `id`.
+/// What the snapshotter was able to say about a boot's snapshot id.
 ///
-/// `None` means the tool is not installed, which is a supported configuration:
-/// the caller must say *that* rather than report the snapshot as unknown.
-/// Conflating "no tool" with "no such snapshot" would turn every blade without
-/// the snapshotter into a false alarm.
+/// Four outcomes, kept apart on purpose. "No tool here", "a tool here that is
+/// not ours", "the tool listed its ids and yours is not among them" and "your
+/// snapshot is registered" are four different facts, and collapsing any two of
+/// them produces a report that reads like a finding when it is really an
+/// artefact of the host.
 ///
-/// Only the machine-readable mode is consulted (`snapshot list --ids`). Nothing
-/// here parses a human-facing table, so a presentation change in the tool cannot
-/// break this silently.
-fn snapshotter_knows(id: &str) -> Option<bool> {
-    let out = Command::new("snapshot")
-        .args(["list", "--ids"])
-        .output()
-        .ok()?;
+/// Not hypothetical: this was written on a workstation whose `/usr/bin/snapshot`
+/// belongs to an unrelated program which answers `Unknown option --ids`. Calling
+/// that "not installed" would be a small lie inside the one command whose entire
+/// job is to say what it actually saw.
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotterVerdict {
+    /// Listed its ids, and this one is among them.
+    Known,
+    /// Listed its ids, and this one is not among them.
+    Unknown,
+    /// Something called `snapshot` is on PATH but would not list ids -- a
+    /// different program, or one whose store is unavailable.
+    Unusable,
+    /// Nothing on PATH answered as a snapshot tool at all.
+    Unavailable,
+}
+
+/// Ask the bc-250-snapshotter about `id`. Never fails, never guesses.
+///
+/// Only the machine-readable mode is consulted (`snapshot list --ids`), so a
+/// presentation change in that tool cannot break this silently.
+fn snapshotter_verdict(id: &str) -> SnapshotterVerdict {
+    let Ok(out) = Command::new("snapshot").args(["list", "--ids"]).output() else {
+        return SnapshotterVerdict::Unavailable;
+    };
     if !out.status.success() {
-        return None;
+        return SnapshotterVerdict::Unusable;
     }
     let listed = String::from_utf8_lossy(&out.stdout);
-    Some(listed.lines().map(str::trim).any(|line| line == id))
+    if listed.lines().map(str::trim).any(|line| line == id) {
+        SnapshotterVerdict::Known
+    } else {
+        SnapshotterVerdict::Unknown
+    }
 }
 
 /// Describe **which artefact** the numbers printed around it are describing.
@@ -180,10 +202,15 @@ pub fn boot_provenance() -> Vec<String> {
     }
 
     if let Some(id) = snapshot_id_for_boot_image(&image) {
-        let what = match snapshotter_knows(&id) {
-            Some(true) => "known to the bc-250-snapshotter",
-            Some(false) => "NOT known to the bc-250-snapshotter (pruned, or never registered)",
-            None => "bc-250-snapshotter not installed",
+        let what = match snapshotter_verdict(&id) {
+            SnapshotterVerdict::Known => "known to the bc-250-snapshotter",
+            SnapshotterVerdict::Unknown => {
+                "NOT known to the bc-250-snapshotter (pruned, or never registered)"
+            }
+            SnapshotterVerdict::Unusable => {
+                "a `snapshot` on PATH is not the bc-250-snapshotter (it would not list ids)"
+            }
+            SnapshotterVerdict::Unavailable => "bc-250-snapshotter not installed",
         };
         lines.push(format!("snapshot        : {id} — {what}"));
     }
@@ -362,6 +389,29 @@ mod tests {
                 !lines.iter().any(|l| l.starts_with("snapshot")),
                 "a non-snapshot boot must not be labelled with a snapshot: {lines:?}"
             );
+        }
+    }
+
+    /// Exercises the tool-facing path, and pins the distinction the verdicts
+    /// exist to preserve.
+    ///
+    /// Every other test here reaches only the no-tool case, because they run on
+    /// machines without a usable snapshotter. That leaves the interesting state
+    /// untested: a boot entry whose snapshot was pruned or never registered.
+    ///
+    /// The assertion is written against whatever this host's tool actually did,
+    /// so it holds everywhere and still exercises the real path on a blade --
+    /// where `snapshot list --ids` succeeds and the verdict must be `Unknown`.
+    #[test]
+    fn verdict_matches_what_the_tool_on_this_host_did() {
+        let listed = Command::new("snapshot").args(["list", "--ids"]).output();
+        let verdict = snapshotter_verdict("snap-ffffffff");
+        match listed {
+            // A usable tool must call a fabricated id UNKNOWN -- never KNOWN, and
+            // never confused with the tool itself being absent.
+            Ok(o) if o.status.success() => assert_eq!(verdict, SnapshotterVerdict::Unknown),
+            Ok(_) => assert_eq!(verdict, SnapshotterVerdict::Unusable),
+            Err(_) => assert_eq!(verdict, SnapshotterVerdict::Unavailable),
         }
     }
 }
