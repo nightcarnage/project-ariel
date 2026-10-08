@@ -666,51 +666,175 @@ pub fn verify(seconds: u64) -> Result<()> {
 // ACPI — 8-core SSDT-CST/PST initcpio override
 // ---------------------------------------------------------------------------
 
-fn cpus_without_idle() -> u32 {
-    let mut n = 0;
-    for (_, cpu) in core_map() {
-        let dir = format!("/sys/devices/system/cpu/cpu{cpu}/cpuidle");
-        if !Path::new(&dir).exists()
-            || fs::read_dir(&dir)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(true)
-        {
-            n += 1;
-        }
-    }
-    n
+/// Threads (`cpuN`) with no cpuidle states, i.e. no C-states bound to them.
+///
+/// This deliberately walks every `cpuN` directory instead of using [`core_map`],
+/// which yields one CPU per **core**. Counting through that reported *cores*
+/// while the surrounding text talked about *threads*: blade 105 printed
+/// "cpus without idle states: 2" directly above a hint about "threads 12-15" —
+/// the same fact stated in two different units on one screen.
+fn threads_without_idle() -> Vec<u32> {
+    threads_missing("cpuidle")
 }
 
-fn cst_objects(path: &Path) -> u32 {
-    let Ok(bytes) = fs::read(path) else { return 0 };
-    // Count distinct C0xx processor objects in the AML blob.
-    let mut found = std::collections::HashSet::new();
+/// Threads (`cpuN`) with no cpufreq policy, i.e. no P-states bound to them.
+fn threads_without_freq() -> Vec<u32> {
+    threads_missing("cpufreq")
+}
+
+/// Every `cpuN` whose `sysfs/<kind>` directory is absent or empty.
+///
+/// "Empty" counts as missing on purpose: the kernel creates `cpuidle/` before it
+/// populates the state subdirectories, so a present-but-empty directory means no
+/// states were ever bound.
+fn threads_missing(kind: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let root = Path::new("/sys/devices/system/cpu");
+    let Ok(entries) = fs::read_dir(root) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(num) = name.strip_prefix("cpu").and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let dir = root.join(&name).join(kind);
+        let empty = fs::read_dir(&dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+        if !dir.is_dir() || empty {
+            out.push(num);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The OEM id of a raw ACPI table: 6 bytes at offset 10, space padded.
+fn acpi_oem_id(bytes: &[u8]) -> Option<String> {
+    let raw = bytes.get(10..16)?;
+    Some(String::from_utf8_lossy(raw).trim().to_string())
+}
+
+/// Distinct 4-character processor names an AML blob refers to.
+///
+/// The `prefix` argument is the whole point. This firmware's DSDT declares its
+/// processors as `Processor (P000, ...)` — **`P0xx`** — while AMD's own CPU
+/// SSDT refers to `\_PR.C0xx`, which does not exist in this namespace. So a
+/// `C0xx` count measures a table that cannot attach, and a `P0xx` count measures
+/// the one that does. Counting the wrong prefix is how the old code produced a
+/// number that happened to look right on one blade and would be wrong on any
+/// correctly-built table.
+fn processor_names(bytes: &[u8], prefix: &[u8; 2]) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
     for i in 0..bytes.len().saturating_sub(3) {
-        if bytes[i] == b'C' && bytes[i + 1] == b'0' {
-            if let Ok(s) = std::str::from_utf8(&bytes[i..i + 4]) {
-                if s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    found.insert(s.to_string());
-                }
+        if bytes[i] == prefix[0] && bytes[i + 1] == prefix[1] {
+            // Only the two-character tail is hex. Validating the whole name would
+            // reject every `P0xx` object outright: `P` is not a hex digit, though
+            // `C` is — which is exactly how a `C0xx`-only counter could look
+            // plausible while being unable to see the names that matter.
+            if bytes[i + 2..i + 4].iter().all(u8::is_ascii_hexdigit) {
+                found.insert(String::from_utf8_lossy(&bytes[i..i + 4]).into_owned());
             }
         }
     }
-    found.len() as u32
+    found
 }
 
-/// `aputune cores acpi status`.
+/// How many processors the **loaded** ACPI override actually covers, and which
+/// table it came from.
+///
+/// Reads `/sys/firmware/acpi/tables/` — what the kernel actually loaded — rather
+/// than the staged copy under [`ACPI_OVERRIDE_DIR`]. The staged directory can be
+/// absent while an override is very much in force: blade 105 delivers its tables
+/// from a GRUB-prepended `/boot/acpi_override.cpio` and has no staging dir at
+/// all, so a check against the staging dir reported "none installed" on the one
+/// blade that was genuinely losing threads. Read the effect, not the intent.
+///
+/// Overrides are identified by OEM id `HACK` (both SSDT-CST and SSDT-PST carry
+/// it). If no such table is loaded, `None` is returned rather than guessing at
+/// the firmware's own tables, which declare more processors than are active and
+/// would overstate coverage.
+fn override_coverage() -> Option<(u32, String)> {
+    let dir = Path::new("/sys/firmware/acpi/tables");
+    let mut recorded: Option<(u32, String)> = None;
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let path = e.path();
+        if !path.is_file() {
+            continue; // `dynamic/`, `data/`
+        }
+        let Ok(bytes) = fs::read(&path) else { continue };
+        if acpi_oem_id(&bytes).as_deref() != Some("HACK") {
+            continue;
+        }
+        // The table that supplies C-states is the one defining coverage; the
+        // P-state table carries the same processor list, so either will do.
+        let n = processor_names(&bytes, b"P0").len() as u32;
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if recorded.as_ref().is_none_or(|(best, _)| n > *best) {
+            recorded = Some((n, name));
+        }
+    }
+    recorded
+}
+
+/// Render a cpu list compactly: `cpu12 cpu13`.
+fn fmt_cpus(list: &[u32]) -> String {
+    list.iter()
+        .map(|c| format!("cpu{c}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `aputune cores acpi status` — what the loaded tables cover, against what this
+/// box actually has.
+///
+/// States the comparison rather than two independent numbers, because that
+/// comparison *is* the failure mode: an override covering fewer processors than
+/// the box has threads leaves the surplus threads with no C-states and no
+/// frequency control, silently. Over-coverage is free — extra methods attach to
+/// processors no CPU claims and do nothing — so only under-coverage is reported
+/// as a problem.
 pub fn acpi_status() -> Result<()> {
     let s = snapshot()?;
-    let no_idle = cpus_without_idle();
-    let cst = Path::new(ACPI_OVERRIDE_DIR).join("SSDT-CST.aml");
-    let objs = if cst.exists() { cst_objects(&cst) } else { 0 };
+    let no_idle = threads_without_idle();
+    let no_freq = threads_without_freq();
+
     println!("logical threads: {}", s.threads);
-    println!("cpus without idle states: {no_idle}");
+    match override_coverage() {
+        Some((n, from)) => println!("override covers: {n} processors (OEM HACK, loaded as {from})"),
+        None => println!(
+            "override covers: none loaded — no OEM-HACK table in /sys/firmware/acpi/tables"
+        ),
+    }
     println!(
-        "installed CST processor objects: {objs} ({} installed)",
-        if cst.exists() { "override" } else { "none" }
+        "threads without cpuidle: {} {}",
+        no_idle.len(),
+        fmt_cpus(&no_idle)
     );
-    if no_idle > 0 && s.threads > 12 {
-        println!("hint: threads 12-15 lack C-states — 'aputune cores acpi install' fixes this");
+    println!(
+        "threads without cpufreq: {} {}",
+        no_freq.len(),
+        fmt_cpus(&no_freq)
+    );
+
+    if !no_idle.is_empty() || !no_freq.is_empty() {
+        println!();
+        println!(
+            "! {} thread(s) are outside the override's coverage, so the cores they belong to\n  \
+             cannot enter C-states and cannot scale frequency.",
+            no_idle.len().max(no_freq.len())
+        );
+        println!(
+            "  hint: `arieltune apu cores acpi install` stages tables covering {} processors",
+            s.threads
+        );
     }
     Ok(())
 }
@@ -829,6 +953,50 @@ pub fn acpi_revert() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name-scheme trap, in one test. This firmware's DSDT declares its
+    /// processors as `P0xx`; AMD's own CPU SSDT refers to `C0xx`, which does not
+    /// exist here and can never attach. Counting the wrong prefix measures a
+    /// table that cannot work — which is what the old `cst_objects` did.
+    #[test]
+    fn counts_only_the_prefix_that_can_attach() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"C000"); // referenced but undefined on this firmware
+        blob.extend_from_slice(b"P000"); // the name the DSDT actually declares
+        blob.extend_from_slice(b"P001");
+        blob.extend_from_slice(b"P001"); // duplicate must not double-count
+        assert_eq!(processor_names(&blob, b"P0").len(), 2);
+        assert_eq!(processor_names(&blob, b"C0").len(), 1);
+    }
+
+    /// Four hex characters are required; a near-miss is not a processor name.
+    #[test]
+    fn ignores_non_processor_names() {
+        let got = processor_names(b"P0ZZ P0 P000", b"P0");
+        assert!(got.contains("P000"), "{got:?}");
+        assert!(!got.iter().any(|s| s.contains('Z')), "{got:?}");
+    }
+
+    /// The OEM id lives at offset 10 of the ACPI header. It is how coverage gets
+    /// attributed to a real loaded override instead of the firmware's own
+    /// tables, which declare more processors than are active.
+    #[test]
+    fn reads_the_oem_id_from_a_table_header() {
+        let mut t = vec![0u8; 36];
+        t[..4].copy_from_slice(b"SSDT");
+        t[10..16].copy_from_slice(b"HACK  ");
+        assert_eq!(acpi_oem_id(&t).as_deref(), Some("HACK"));
+        // Too short to hold a header: no claim, and no panic.
+        assert_eq!(acpi_oem_id(&t[..8]), None);
+    }
+
+    /// Threads are rendered as `cpuN`, so a threaded list in the output cannot
+    /// be read as a core count — the units confusion this replaced.
+    #[test]
+    fn renders_cpu_names() {
+        assert_eq!(fmt_cpus(&[12, 13, 14, 15]), "cpu12 cpu13 cpu14 cpu15");
+        assert_eq!(fmt_cpus(&[]), "");
+    }
 
     #[test]
     fn state_machine() {
