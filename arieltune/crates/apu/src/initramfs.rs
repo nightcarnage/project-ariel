@@ -35,6 +35,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -87,6 +88,106 @@ pub fn boot_image() -> Option<String> {
 /// The initramfs this boot came from, or `None` if it cannot be determined.
 pub fn boot_initramfs() -> Option<PathBuf> {
     initramfs_for_boot_image(&boot_image()?)
+}
+
+/// The snapshot id implied by a `BOOT_IMAGE=` path, when it names one.
+///
+/// ```text
+///   /boot/vmlinuz-snap-bc0f6654       ->  Some("snap-bc0f6654")
+///   /boot/vmlinuz-linux-cachyos-bore  ->  None
+/// ```
+///
+/// The snapshotter's ids are content-addressed over the module, the initramfs
+/// and the vmlinuz, so the id *is* the provenance proof — there is no need to
+/// re-hash the image to say which artefact we are describing.
+///
+/// Pure: `BOOT_IMAGE` is bootloader-supplied text, so it is unit-tested rather
+/// than trusted.
+pub fn snapshot_id_for_boot_image(boot_image: &str) -> Option<String> {
+    let stem = Path::new(boot_image)
+        .file_name()?
+        .to_str()?
+        .strip_prefix("vmlinuz-")?;
+    stem.starts_with("snap-").then(|| stem.to_string())
+}
+
+/// Ask the bc-250-snapshotter whether it knows `id`.
+///
+/// `None` means the tool is not installed, which is a supported configuration:
+/// the caller must say *that* rather than report the snapshot as unknown.
+/// Conflating "no tool" with "no such snapshot" would turn every blade without
+/// the snapshotter into a false alarm.
+///
+/// Only the machine-readable mode is consulted (`snapshot list --ids`). Nothing
+/// here parses a human-facing table, so a presentation change in the tool cannot
+/// break this silently.
+fn snapshotter_knows(id: &str) -> Option<bool> {
+    let out = Command::new("snapshot")
+        .args(["list", "--ids"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let listed = String::from_utf8_lossy(&out.stdout);
+    Some(listed.lines().map(str::trim).any(|line| line == id))
+}
+
+/// Describe **which artefact** the numbers printed around it are describing.
+///
+/// Not decoration, and cheap. Every confusing result in the 2026-10-07/08
+/// investigation came from a report that described "the machine" while having
+/// actually read one object:
+///
+///   * blade 105's stale 12-processor ACPI tables came from its *snapshot's*
+///     initramfs, not from `/etc/initcpio/`, where they had been staged for days;
+///   * `mkinitcpio -P` reports success while leaving a snapshot image untouched;
+///   * the same ACPI tables load twice because GRUB chains a cpio onto that image
+///     as well as the image carrying its own copy.
+///
+/// Naming the booted kernel, the image it came from and the snapshot id that
+/// content-addresses both is the cheapest way to stop that class of mistake. It
+/// needs no privilege and performs no write.
+pub fn boot_provenance() -> Vec<String> {
+    let Some(image) = boot_image() else {
+        return vec!["booted image    : unknown (no BOOT_IMAGE= in /proc/cmdline)".to_string()];
+    };
+    let mut lines = vec![format!("booted kernel   : {image}")];
+
+    match boot_initramfs() {
+        Some(irf) => {
+            let described = match fs::metadata(&irf) {
+                Ok(m) => {
+                    let mib = m.len() as f64 / (1024.0 * 1024.0);
+                    // Relative age rather than an absolute date: no date library,
+                    // and "how long ago was this image built" is the question that
+                    // matters when chasing a change that never took effect.
+                    let age = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| SystemTime::now().duration_since(t).ok())
+                        .map(|d| format!("{}s ago", d.as_secs()))
+                        .unwrap_or_else(|| "age unknown".to_string());
+                    format!("{mib:.1} MiB, modified {age}")
+                }
+                Err(_) => "MISSING".to_string(),
+            };
+            lines.push(format!("booted initramfs: {} ({described})", irf.display()));
+        }
+        None => lines.push(
+            "booted initramfs: not derived (name does not follow vmlinuz-/initramfs-)".to_string(),
+        ),
+    }
+
+    if let Some(id) = snapshot_id_for_boot_image(&image) {
+        let what = match snapshotter_knows(&id) {
+            Some(true) => "known to the bc-250-snapshotter",
+            Some(false) => "NOT known to the bc-250-snapshotter (pruned, or never registered)",
+            None => "bc-250-snapshotter not installed",
+        };
+        lines.push(format!("snapshot        : {id} — {what}"));
+    }
+    lines
 }
 
 /// Run `mkinitcpio` with `args` and fail loudly with its output on error.
@@ -218,5 +319,49 @@ mod tests {
         assert_eq!(initramfs_for_boot_image("/efi/EFI/Linux/arch.efi"), None);
         // Empty stem after the prefix would name `/boot/initramfs-.img`.
         assert_eq!(initramfs_for_boot_image("/boot/vmlinuz-"), None);
+    }
+
+    /// A snapshot boot names its snapshot; anything else must not. This is what
+    /// decides whether to ask the snapshotter about this boot at all.
+    #[test]
+    fn extracts_the_snapshot_id_from_the_boot_image() {
+        assert_eq!(
+            snapshot_id_for_boot_image("/boot/vmlinuz-snap-bc0f6654").as_deref(),
+            Some("snap-bc0f6654")
+        );
+        // A preset kernel is not a snapshot and must not be labelled as one.
+        assert_eq!(
+            snapshot_id_for_boot_image("/boot/vmlinuz-linux-cachyos-bore"),
+            None
+        );
+        // Unconventional names yield nothing rather than a guess.
+        assert_eq!(snapshot_id_for_boot_image("/boot/vmlinuz"), None);
+        assert_eq!(snapshot_id_for_boot_image("/efi/EFI/Linux/arch.efi"), None);
+    }
+
+    /// Provenance must never panic and never overclaim. This runs on ordinary
+    /// developer machines with no BC-250, no snapshot image and usually no
+    /// snapshotter -- which is exactly the "say so, do not guess" path that a
+    /// blade provisioned from packages also takes.
+    #[test]
+    fn provenance_degrades_without_claiming_failure() {
+        let lines = boot_provenance();
+        assert!(
+            !lines.is_empty(),
+            "must always say something about the boot"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("booted kernel") || l.starts_with("booted image")),
+            "must name the kernel, or admit it cannot: {lines:?}"
+        );
+        // Never report a snapshot for a boot that is not one.
+        if snapshot_id_for_boot_image(&boot_image().unwrap_or_default()).is_none() {
+            assert!(
+                !lines.iter().any(|l| l.starts_with("snapshot")),
+                "a non-snapshot boot must not be labelled with a snapshot: {lines:?}"
+            );
+        }
     }
 }

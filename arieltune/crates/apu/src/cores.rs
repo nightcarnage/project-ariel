@@ -291,6 +291,14 @@ pub fn core_threads() -> Vec<(u32, Vec<(u32, bool)>)> {
 
 /// `aputune cores status`.
 pub fn status() -> Result<()> {
+    // Name the artefact first. Every number below describes THIS boot, and a
+    // snapshot boot is not the image `mkinitcpio -P` maintains -- which is how a
+    // blade ends up reporting a layout it never actually loaded.
+    for line in crate::initramfs::boot_provenance() {
+        println!("{line}");
+    }
+    println!();
+
     let s = snapshot()?;
     println!("SMN 0x115A870 = {}", describe_mask(s.mask));
     println!("state: {}", s.state.label());
@@ -935,6 +943,16 @@ fn fmt_cpus(list: &[u32]) -> String {
 /// processors no CPU claims and do nothing — so only under-coverage is reported
 /// as a problem.
 pub fn acpi_status() -> Result<()> {
+    // State the artefact *before* anything that can fail. Which boot image we are
+    // describing matters most exactly when the rest of the command cannot run --
+    // no root, no BC-250 -- and on a snapshot boot it is not the image the presets
+    // rebuild. Blade 105's stale 12-processor pair came from its snapshot
+    // initramfs while /etc/initcpio/ was empty and looked unconfigured.
+    for line in crate::initramfs::boot_provenance() {
+        println!("{line}");
+    }
+    println!();
+
     let s = snapshot()?;
     let no_idle = threads_without_idle();
     let no_freq = threads_without_freq();
