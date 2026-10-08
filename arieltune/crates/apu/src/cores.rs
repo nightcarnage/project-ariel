@@ -503,6 +503,55 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// `aputune cores stock` — put the CPU back to this blade's factory layout.
+///
+/// No software path can write the mask **back**. The q3 `0x98` write takes an
+/// *address*, not a value, and the firmware always stores `0xFF` there; a warm
+/// reboot then preserves whatever is loaded, by design. Only removing power makes
+/// the firmware re-initialise the mask from this die's own binning.
+///
+/// So this verb does the one thing software can actually do -- stop the boot unit
+/// from re-applying the unlock, which would otherwise undo the cold boot on the
+/// way back up -- and then states plainly what is left for the operator to do. It
+/// performs no SMU write at all, and it never cuts power: the mains switch is not
+/// reachable from the blade.
+pub fn restore_stock() -> Result<()> {
+    let s = snapshot()?;
+    let recorded = crate::stock::cpu_stock_mask();
+    let unit = Path::new(UNIT_PATH).exists();
+
+    println!("live mask: {}", describe_mask(s.mask));
+    match recorded {
+        Some(m) => println!("recorded stock for this blade: 0x{m:02X}"),
+        None => println!(
+            "recorded stock for this blade: unknown (no baseline captured yet). The cold boot \
+             below still restores this die's real factory mask -- the firmware re-initialises it \
+             from its own binning -- we simply cannot predict the value. `arieltune apu stock \
+             capture` afterwards records it."
+        ),
+    }
+    println!("boot unit installed: {}", if unit { "yes" } else { "no" });
+
+    if recorded == Some(s.mask) && !unit {
+        println!("already at stock on both counts — nothing to do");
+        return Ok(());
+    }
+
+    if unit {
+        // Idempotent, and reversible with `cores install`. Leaving it enabled
+        // would re-apply the unlock the moment the blade came back up.
+        uninstall()?;
+    }
+
+    println!();
+    println!("next: a COLD boot — power removed, not a warm reboot.");
+    println!("  · a warm reboot preserves the mask by design; nothing writes it back");
+    println!("  · a cold boot re-initialises it to this die's factory value");
+    println!("  · from the workstation: scripts/bc250-power coldcycle <blade>");
+    println!("  · afterwards `arieltune apu cores status` should report the stock mask");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // OS layer — live per-core offline/online
 // ---------------------------------------------------------------------------

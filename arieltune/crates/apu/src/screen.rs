@@ -1426,6 +1426,20 @@ fn cores_key(app: &mut ApuScreen, code: KeyCode) {
                 Err(e) => format!("install failed: {e}"),
             };
         }
+        KeyCode::Char('s') => {
+            // Restore-stock is deliberately not a hardware action: nothing can
+            // write the mask back (q3 0x98 stores a hardcoded 0xFF and warm
+            // reboots preserve it). This stops the unit re-applying the unlock
+            // and says a cold boot is what is left. Nothing is powered off here.
+            app.status = match crate::cores::restore_stock() {
+                Ok(()) => {
+                    app.snap = gather();
+                    "stock: boot unit removed — a COLD boot (power removed) is needed to revert"
+                        .into()
+                }
+                Err(e) => format!("stock failed: {e}"),
+            };
+        }
         KeyCode::Char('v') => {
             if app.cores_verify_job.is_none() {
                 app.cores_verify_job =
@@ -2652,7 +2666,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     ]);
 
     let keys = Line::from(Span::styled(
-        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] unlock (no baseline) · [i] unit · [v] verify",
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] unlock (no baseline) · [s] stock · [i] unit · [v] verify",
         Style::default().fg(DIM),
     ));
     // The last line carries the verify verdict while a sweep report exists

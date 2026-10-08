@@ -571,6 +571,13 @@ pub enum CoreCmd {
     Install,
     /// Remove the boot unit. Cores stay unlocked until the next cold boot. Root.
     Uninstall,
+    /// Revert the CPU to this blade's factory core layout. Root.
+    ///
+    /// No software path writes the mask back — the q3 0x98 write takes an address, not a value, and
+    /// stores 0xFF; a warm reboot preserves it by design. So this stops the boot unit re-applying
+    /// the unlock and then requires a COLD boot (power removed). Nothing is powered off by this
+    /// command, and no SMU write is performed.
+    Stock,
     /// Advisory per-core health sweep: stress-ng --verify pinned per physical core + MCE grep. Root.
     ///
     /// The report is for records only — it NEVER gates anything (fleet images are cloned across
@@ -1695,6 +1702,7 @@ fn cmd_cores(action: CoreCmd) -> Result<()> {
         CoreCmd::Boot => crate::cores::boot(),
         CoreCmd::Install => crate::cores::install(),
         CoreCmd::Uninstall => crate::cores::uninstall(),
+        CoreCmd::Stock => crate::cores::restore_stock(),
         CoreCmd::Verify { seconds } => crate::cores::verify(seconds),
         CoreCmd::Acpi { action } => match action {
             AcpiCmd::Status => crate::cores::acpi_status(),
