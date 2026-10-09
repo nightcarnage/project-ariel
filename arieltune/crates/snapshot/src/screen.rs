@@ -26,6 +26,19 @@
 //! `1`-`5` and anything with Ctrl/Alt are handed back to the shell, so switching
 //! tabs works here as it does everywhere else.
 //!
+//! `i` opens the patches popup: the same key APU uses for its patch list, and the one
+//! place in this pane that answers "which patches is *this* snapshot carrying" rather
+//! than "which patches exist". It is deliberately not `p` — here `p` pins, and the two
+//! were never the same question.
+//!
+//! The popup reads the snapshot's **stored module** when it opens, once, and holds what
+//! it found. That is what makes the answer about the snapshot rather than about this
+//! machine: a snapshot exists to be booted later, elsewhere, so asking the running
+//! kernel about it would answer a different question. A tell a built module can be
+//! asked about — a debugfs node name, a module parameter — is looked for in the
+//! module's strings; a tell only a running kernel shows is reported as unprovable,
+//! never as absent.
+//!
 //! ## Why the logic is not in `draw`
 //!
 //! Selection, filtering and the pending-action state are plain data with plain
@@ -38,11 +51,13 @@ use std::time::Duration;
 use arieltune_tui_kit::{theme, widgets, Outcome, Screen};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::dev;
+use crate::register;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write::{self, Plan, Runner, System};
 
@@ -119,6 +134,139 @@ pub struct SeriesEntry {
     pub title: String,
     /// The kernel source files it touches, as the series records them.
     pub touches: String,
+    /// How this patch can be proved present in a *built module*.
+    pub tell: Tell,
+}
+
+/// How a patch can be proved present in a built module.
+///
+/// The series owns the tells: each patch carries the fingerprint that proves it live on
+/// a *running* kernel. Two of those fingerprints are string literals in the object the
+/// kernel was built from — a debugfs node name and a module parameter name both end up
+/// in the module's `.rodata` — so they can be looked for in a snapshot's **stored
+/// module**, which is what makes "is this patch in this snapshot" answerable without
+/// booting it.
+///
+/// The others cannot be. A clock ceiling or a CU count only exists on a running kernel,
+/// and a `Bundled` patch has no fingerprint of its own by definition. Those are reported
+/// as unprovable, never as absent: "I cannot tell from here" and "it is not there" are
+/// different answers and only one of them is true.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Tell {
+    /// A debugfs node basename — a string literal in the module.
+    Debugfs(String),
+    /// A module parameter name — likewise.
+    ModParam(String),
+    /// Real, but only observable on a running kernel.
+    Runtime(String),
+    /// No fingerprint of its own; the series infers presence from its neighbours.
+    #[default]
+    Bundled,
+}
+
+impl Tell {
+    /// The string to look for in the module, when this tell can be proved from a file.
+    fn needle(&self) -> Option<&str> {
+        match self {
+            Tell::Debugfs(name) | Tell::ModParam(name) => Some(name),
+            Tell::Runtime(_) | Tell::Bundled => None,
+        }
+    }
+
+    /// How the tell reads in the popup, in the same words APU's patch popup uses.
+    fn label(&self) -> String {
+        match self {
+            Tell::Debugfs(name) => format!("debugfs node {name}"),
+            Tell::ModParam(name) => format!("module param amdgpu.{name}"),
+            Tell::Runtime(what) => what.clone(),
+            Tell::Bundled => "inferred (no unique tell)".to_string(),
+        }
+    }
+}
+
+/// What the popup can say about one patch's tell, given this snapshot's module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Present,
+    Absent,
+    /// The tell exists but cannot be seen in a file, so nothing is claimed either way.
+    Unprovable,
+    /// The module could not be read, so no tell can be judged at all.
+    Unread,
+}
+
+impl Verdict {
+    fn glyph(self) -> &'static str {
+        match self {
+            Verdict::Present => "\u{2714}",
+            Verdict::Absent => "\u{2718}",
+            Verdict::Unprovable => "\u{b7}",
+            Verdict::Unread => "?",
+        }
+    }
+
+    fn colour(self) -> Color {
+        match self {
+            Verdict::Present => theme::GOOD,
+            Verdict::Absent => theme::BAD,
+            Verdict::Unprovable => theme::DIM,
+            Verdict::Unread => theme::WARN,
+        }
+    }
+}
+
+/// What could be found out about a snapshot's stored module.
+///
+/// Read **once** when the popup opens and held for its lifetime: a decompressed
+/// `amdgpu` is tens of megabytes and `draw` runs every frame, so this is not something
+/// the renderer may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModuleScan {
+    /// Every printable string in the module.
+    Strings(Vec<String>),
+    /// Why it could not be read. Kept as a reason rather than an empty list, because a
+    /// failed read must not look like a module that contains nothing.
+    Unavailable(String),
+}
+
+impl ModuleScan {
+    fn verdict(&self, tell: &Tell) -> Verdict {
+        let Some(needle) = tell.needle() else {
+            return Verdict::Unprovable;
+        };
+        match self {
+            ModuleScan::Unavailable(_) => Verdict::Unread,
+            ModuleScan::Strings(strings) => {
+                if strings.iter().any(|s| s.contains(needle)) {
+                    Verdict::Present
+                } else {
+                    Verdict::Absent
+                }
+            }
+        }
+    }
+
+    /// The one-line summary above the list.
+    fn headline(&self, found: usize, checkable: usize, total: usize) -> String {
+        match self {
+            ModuleScan::Unavailable(why) => format!(
+                " This snapshot's module could not be read, so no tell can be checked:\n \
+                 {why}"
+            ),
+            ModuleScan::Strings(_) => {
+                let rest = total - checkable;
+                let tail = if rest == 0 {
+                    String::new()
+                } else {
+                    format!(" The other {rest} carry no tell a file could hold.")
+                };
+                format!(
+                    " {found} of {checkable} checkable tells are in this snapshot's \
+                     module.{tail}"
+                )
+            }
+        }
+    }
 }
 
 /// The liberation series belonging to one kernel release.
@@ -140,6 +288,14 @@ pub struct KernelSeries {
 #[derive(Debug, Clone, Default)]
 struct PatchPopup {
     scroll: usize,
+    /// What the snapshot's module had to say, read once when this opened.
+    scan: ModuleScan,
+}
+
+impl Default for ModuleScan {
+    fn default() -> Self {
+        ModuleScan::Unavailable("not read yet".to_string())
+    }
 }
 
 /// The `i` popup's body: the selected kernel's series, with the entries this
@@ -157,6 +313,7 @@ fn patch_popup_lines(
     kernel: &str,
     series: Option<&KernelSeries>,
     changed: &[String],
+    scan: &ModuleScan,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -233,26 +390,77 @@ fn patch_popup_lines(
         format!(" {} patches in this kernel's series.", series.entries.len()),
         theme::dim(),
     )));
+
+    // What is *in this snapshot* — the question the series list alone cannot answer.
+    // Checked against the snapshot's own stored module rather than the running kernel,
+    // because a snapshot's whole purpose is to be booted later, somewhere else.
+    let checkable = series
+        .entries
+        .iter()
+        .filter(|entry| entry.tell.needle().is_some())
+        .count();
+    let found = series
+        .entries
+        .iter()
+        .filter(|entry| scan.verdict(&entry.tell) == Verdict::Present)
+        .count();
+    lines.push(Line::from(Span::styled(
+        scan.headline(found, checkable, series.entries.len()),
+        theme::header(),
+    )));
+    lines.push(Line::from(Span::styled(
+        " \u{2714} tell found in the module \u{b7} \u{2718} not found \u{b7} \
+         \u{b7} no tell a file could hold \u{b7} * your edit touched it",
+        theme::dim(),
+    )));
     lines.push(Line::from(""));
 
     for entry in &series.entries {
         let hit = entry_touches(entry, changed);
-        let marker = if hit { "*" } else { " " };
-        let style = if hit {
-            theme::header()
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!(" {marker} {}  {}", entry.id, entry.title),
-            style,
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("      {}", entry.touches),
-            theme::dim(),
-        )));
+        let verdict = scan.verdict(&entry.tell);
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {}{} ", if hit { "*" } else { " " }, verdict.glyph()),
+                Style::default()
+                    .fg(verdict.colour())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}  {}", entry.id, entry.title),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("        touches: ", theme::dim()),
+            Span::styled(entry.touches.clone(), Style::default().fg(theme::ACCENT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("        tell:    ", theme::dim()),
+            Span::styled(
+                tell_line(&entry.tell, verdict),
+                match verdict {
+                    // Only the two verdicts that say something about *this* snapshot
+                    // get a colour; "cannot be seen in a file" is not a problem.
+                    Verdict::Present => Style::default().fg(theme::GOOD),
+                    Verdict::Absent => Style::default().fg(theme::BAD),
+                    _ => Style::default(),
+                },
+            ),
+        ]));
     }
     lines
+}
+
+/// One patch's tell, with what this snapshot's module had to say about it.
+fn tell_line(tell: &Tell, verdict: Verdict) -> String {
+    let base = tell.label();
+    match verdict {
+        Verdict::Present => format!("{base} — found in this snapshot's module"),
+        Verdict::Absent => format!("{base} — NOT in this snapshot's module"),
+        Verdict::Unprovable => format!("{base} — not visible in a file"),
+        Verdict::Unread => format!("{base} — the module could not be read"),
+    }
 }
 
 /// Whether a patch touches any of the changed files, by basename.
@@ -637,12 +845,13 @@ impl Screen for SnapshotScreen {
         // Describes the region that currently has focus, so the keys on screen are
         // the ones that will actually do something.
         Some(match self.focus {
-            Focus::List => {
-                "list: ↑↓ move · tab provenance · p/P pin · h/H hide · R reboot into · x prune"
-                    .to_string()
-            }
+            Focus::List => "list: ↑↓ move · tab provenance · i patches in this snapshot · \
+                 p/P pin · h/H hide · R reboot into · x prune"
+                .to_string(),
             Focus::Provenance => {
-                "provenance: ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · tab list".to_string()
+                "provenance: ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · i patches · \
+                 tab list"
+                    .to_string()
             }
         })
     }
@@ -772,9 +981,23 @@ impl Screen for SnapshotScreen {
             }
 
             KeyCode::Char('i') => {
-                if self.selected().is_some() {
-                    self.patch_popup = Some(PatchPopup::default());
-                    self.status = "series: ↑↓ scroll · i, q or esc close".to_string();
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    // The read happens here, once, and never in `draw`. `status` says
+                    // which of the two it was, so "no tells found" can never be mistaken
+                    // for "nothing ran".
+                    let scan = self.scan_module(&id);
+                    self.status = match &scan {
+                        ModuleScan::Strings(strings) => format!(
+                            "patches: {} strings read from {id}'s module · ↑↓ \
+                             scroll · i, q or esc close",
+                            strings.len()
+                        ),
+                        ModuleScan::Unavailable(_) => {
+                            "patches: this snapshot's module could not be read".to_string()
+                        }
+                    };
+                    self.patch_popup = Some(PatchPopup { scroll: 0, scan });
                 }
             }
 
@@ -886,6 +1109,11 @@ impl SnapshotScreen {
 
     /// The popup's body for the current selection.
     fn series_lines(&self) -> Vec<Line<'static>> {
+        let scan = self
+            .patch_popup
+            .as_ref()
+            .map(|popup| popup.scan.clone())
+            .unwrap_or_default();
         let Some(snapshot) = self.selected() else {
             return vec![Line::from(Span::styled(
                 "no snapshot selected",
@@ -895,7 +1123,26 @@ impl SnapshotScreen {
         let kernel = snapshot.kernel_version().unwrap_or_else(|| "?".to_string());
         let series = self.series_for(&kernel);
         let changed = Self::recorded_changes(snapshot);
-        patch_popup_lines(&snapshot.id, &kernel, series, &changed)
+        patch_popup_lines(&snapshot.id, &kernel, series, &changed, &scan)
+    }
+
+    /// Read the selected snapshot's stored module, so the popup can say which of the
+    /// series' tells are actually in it.
+    ///
+    /// Once, when the popup opens — not in `draw`. A decompressed `amdgpu` is tens of
+    /// megabytes and the renderer runs every frame.
+    fn scan_module(&self, id: &str) -> ModuleScan {
+        let Some(module) = register::stored_module(&self.paths.root, id) else {
+            return ModuleScan::Unavailable(format!(
+                "nothing is stored at {}/modules/",
+                self.paths.root.join(id).display()
+            ));
+        };
+        let work = std::env::temp_dir().join(format!("snap-tells-{}", std::process::id()));
+        match dev::module_strings(&module, self.runner.as_ref(), &work) {
+            Ok(strings) => ModuleScan::Strings(strings),
+            Err(why) => ModuleScan::Unavailable(format!("{why:#}")),
+        }
     }
 
     /// The list: markers, id, date, status, kernel, description.
@@ -1629,6 +1876,7 @@ mod tests {
                 id: "07".to_string(),
                 title: "CAC weight + sendraw debugfs".to_string(),
                 touches: "cyan_skillfish_ppt.c".to_string(),
+                tell: Tell::Debugfs("cyan_skillfish_gfx_cac_weight".to_string()),
             }],
         }]);
 
@@ -1678,6 +1926,7 @@ mod tests {
             title: "map 23 msgids".to_string(),
             // Two files, as the series sometimes records.
             touches: "cyan_skillfish_ppt.c, amdgpu_smu.c".to_string(),
+            tell: Tell::Bundled,
         };
         assert!(entry_touches(
             &entry,
@@ -1702,14 +1951,136 @@ mod tests {
                     id: "07".to_string(),
                     title: "CAC weight + sendraw debugfs".to_string(),
                     touches: "cyan_skillfish_ppt.c".to_string(),
+                    tell: Tell::Debugfs("cyan_skillfish_gfx_cac_weight".to_string()),
                 },
                 SeriesEntry {
                     id: "08".to_string(),
                     title: "CMN send-raw definitions".to_string(),
                     touches: "cyan_skillfish_ppt.c".to_string(),
+                    // A patch with no tell of its own: the series infers it.
+                    tell: Tell::Bundled,
                 },
             ],
         }
+    }
+
+    /// The verdict is a lookup against strings read out of the module. Each of the
+    /// four answers is a different claim, and three of them are easy to conflate.
+    #[test]
+    fn a_tell_is_judged_only_against_what_the_module_can_say() {
+        let scan = scan_with(&["cyan_skillfish_gfx_cac_weight", "bc250_flush_by_runlist"]);
+
+        assert_eq!(
+            scan.verdict(&Tell::Debugfs("cyan_skillfish_gfx_cac_weight".into())),
+            Verdict::Present
+        );
+        assert_eq!(
+            scan.verdict(&Tell::ModParam("bc250_flush_by_runlist".into())),
+            Verdict::Present
+        );
+        // Not in the module: a real finding, and the one this whole popup exists for.
+        assert_eq!(
+            scan.verdict(&Tell::ModParam("bc250_fault_probe".into())),
+            Verdict::Absent
+        );
+        // A tell a running kernel would show but a file cannot.
+        assert_eq!(
+            scan.verdict(&Tell::Runtime("pp_dpm_sclk >= 2500 MHz".into())),
+            Verdict::Unprovable
+        );
+        assert_eq!(scan.verdict(&Tell::Bundled), Verdict::Unprovable);
+    }
+
+    /// The property the rest of this tool keeps having to restate: a read that failed
+    /// is not a module with nothing in it. Every checkable tell reads `Unread`, never
+    /// `Absent`, because "I could not look" and "it is not there" are different answers
+    /// and only one of them is true.
+    #[test]
+    fn a_module_that_could_not_be_read_is_never_reported_as_missing_patches() {
+        let scan = scan_unread();
+        let tell = Tell::ModParam("bc250_flush_by_runlist".into());
+        assert_eq!(scan.verdict(&tell), Verdict::Unread);
+
+        let series = one_patch_series();
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &[],
+            &scan,
+        ));
+        assert!(
+            text.contains("could not be read"),
+            "the reason is on screen:\n{text}"
+        );
+        assert!(
+            !text.contains("NOT in this snapshot's module"),
+            "and nothing claims a patch is missing:\n{text}"
+        );
+        assert!(text.contains("? 07"), "the verdict reads unread:\n{text}");
+    }
+
+    /// The summary answers the question the series list alone cannot: how many of the
+    /// patches are *provably in this snapshot*.
+    #[test]
+    fn the_summary_counts_what_is_in_this_snapshot() {
+        let series = one_patch_series();
+        // 07 has a debugfs tell and it is in the module; 08 has none to check.
+        let scan = scan_with(&["cyan_skillfish_gfx_cac_weight"]);
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &[],
+            &scan,
+        ));
+        assert!(text.contains("1 of 1 checkable tells"), "{text}");
+        assert!(
+            text.contains("The other 1 carry no tell a file could hold"),
+            "the unprovable ones are accounted for, not hidden:\n{text}"
+        );
+
+        // Now with the tell missing from the module: the count is the finding.
+        let scan = scan_with(&["something_else_entirely"]);
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &[],
+            &scan,
+        ));
+        assert!(text.contains("0 of 1 checkable tells"), "{text}");
+        assert!(text.contains("\u{2718} 07"), "marked absent:\n{text}");
+        assert!(
+            text.contains("NOT in this snapshot's module"),
+            "and said in words:\n{text}"
+        );
+    }
+
+    /// The key that opens the patches popup was bound but never advertised, which is
+    /// why it read as a feature that had not been built. Both focus states offer it.
+    #[test]
+    fn the_footer_says_which_key_shows_the_patches() {
+        for focus in [Focus::List, Focus::Provenance] {
+            let (mut s, _root) = screen("patch-hint");
+            s.focus = focus;
+            let hint = s.status_hint().expect("both regions have a hint");
+            assert!(
+                hint.contains("i patches"),
+                "{focus:?} must advertise the patches key: {hint}"
+            );
+        }
+    }
+
+    /// A module that carries one debugfs tell and one parameter, for the tell tests.
+    fn scan_with(strings: &[&str]) -> ModuleScan {
+        ModuleScan::Strings(strings.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// The state a test gets when nothing has been read: every checkable tell is
+    /// unread, which is deliberately *not* the same as absent.
+    fn scan_unread() -> ModuleScan {
+        ModuleScan::Unavailable("the test read nothing".to_string())
     }
 
     fn popup_text(lines: &[Line<'static>]) -> String {
@@ -1731,18 +2102,26 @@ mod tests {
     fn the_edit_is_attributed_to_the_patches_it_landed_in() {
         let series = one_patch_series();
         let changed = vec!["drivers/gpu/drm/amd/amdgpu/cyan_skillfish_ppt.c".to_string()];
+        // Both patches touch that file, so both are `*`. Patch 07's debugfs tell is in
+        // the module and 08 has no tell of its own, so the two rows carry the two
+        // different verdict glyphs — which is the pair of facts a row now states.
+        let scan = scan_with(&["cyan_skillfish_gfx_cac_weight", "amdgpu", "smu"]);
         let text = popup_text(&patch_popup_lines(
             "snap-3f9a1c2b",
             "7.2.9-1-cachyos-bore",
             Some(&series),
             &changed,
+            &scan,
         ));
 
         assert!(
-            text.contains("* 07"),
-            "the touched patch is marked:\n{text}"
+            text.contains("*\u{2714} 07"),
+            "touched, and its tell is in the module:\n{text}"
         );
-        assert!(text.contains("* 08"), "both touch that file:\n{text}");
+        assert!(
+            text.contains("*\u{b7} 08"),
+            "touched, but it has no tell of its own:\n{text}"
+        );
         assert!(text.contains("cyan_skillfish_ppt.c"), "{text}");
         assert!(text.contains("2 patch(es)"), "{text}");
     }
@@ -1758,6 +2137,7 @@ mod tests {
             "7.2.9-1-cachyos-bore",
             Some(&series),
             &changed,
+            &scan_unread(),
         ));
         assert!(text.contains("beside the series"), "{text}");
         assert!(!text.contains("* 07"), "nothing should be marked:\n{text}");
@@ -1774,6 +2154,7 @@ mod tests {
             "7.2.9-1-cachyos-bore",
             Some(&series),
             &[],
+            &scan_unread(),
         ));
         assert!(
             text.contains("does not record which files changed"),
@@ -1792,6 +2173,7 @@ mod tests {
             "6.18-1-cachyos",
             None,
             &[],
+            &scan_unread(),
         ));
         assert!(text.contains("No curated series is known"), "{text}");
         assert!(

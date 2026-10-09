@@ -95,10 +95,34 @@ fn kernel_series() -> Vec<snapshot::screen::KernelSeries> {
                     id: patch.id.to_string(),
                     title: patch.title.to_string(),
                     touches: patch.touches.to_string(),
+                    tell: tell_of(patch.tell),
                 })
                 .collect(),
         })
         .collect()
+}
+
+/// Translate a patch's runtime tell into the form the SNAP pane can check against a
+/// *stored module*.
+///
+/// APU's tells are about a running kernel; a snapshot has no running kernel, so what
+/// crosses the boundary is only what a built module can still be asked about — a
+/// debugfs node name and a module parameter are string literals in the object, and the
+/// clock and CU-count tells are not answerable from a file at all.
+///
+/// **Exhaustive, with no `_` arm.** A new tell in APU's series must stop this
+/// compiling, because the alternative is that it arrives here as "no tell" and every
+/// patch using it silently shows as unprovable when it is not.
+fn tell_of(tell: apu::patches::Tell) -> snapshot::screen::Tell {
+    use apu::patches::Tell as Apu;
+    use snapshot::screen::Tell as Snap;
+    match tell {
+        Apu::Debugfs(name) => Snap::Debugfs(name.to_string()),
+        Apu::ModParam(name) => Snap::ModParam(name.to_string()),
+        Apu::SclkMax(mhz) => Snap::Runtime(format!("pp_dpm_sclk >= {mhz} MHz")),
+        Apu::CuCount(cus) => Snap::Runtime(format!(">= {cus} active CUs")),
+        Apu::Bundled => Snap::Bundled,
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +158,63 @@ mod tests {
                 assert!(!entry.touches.is_empty());
             }
         }
+    }
+
+    /// The boundary this injection sits on: the series is the *applied* series, not
+    /// every patch on disk. Patch 19 was retired from it by 26+27 and its module
+    /// parameter is deliberately absent from every module built since, so listing it
+    /// would put a permanent red `NOT in this snapshot's module` against a patch that
+    /// is not supposed to be there.
+    #[test]
+    fn the_series_handed_over_is_the_applied_one_not_every_patch_on_disk() {
+        let series = kernel_series();
+        let v729 = series
+            .iter()
+            .find(|s| s.release == apu::kernel::Kernel::Bore729.release())
+            .expect("7.2.9 has a series");
+
+        assert!(
+            !v729.entries.iter().any(|e| e.id == "19"),
+            "retired patch 19 must not be offered as part of the series: {:?}",
+            v729.entries.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            v729.entries.len(),
+            apu::patches::count(apu::kernel::Kernel::Bore729),
+            "the injected list is the same list the CLI counts"
+        );
+    }
+
+    /// Every patch's tell must arrive as one of the four forms, and a tell that can be
+    /// seen in a file must arrive as one this tool can look for. A tell that silently
+    /// became `Bundled` would show as unprovable when it is in fact checkable.
+    #[test]
+    fn every_tell_crosses_the_boundary_as_the_right_kind() {
+        let mut checkable = 0;
+        for kernel in apu::kernel::Kernel::ALL {
+            for patch in apu::patches::series(kernel) {
+                let crossed = tell_of(patch.tell);
+                match (patch.tell, &crossed) {
+                    (apu::patches::Tell::Debugfs(n), snapshot::screen::Tell::Debugfs(m)) => {
+                        assert_eq!(n, m, "patch {}", patch.id);
+                        checkable += 1;
+                    }
+                    (apu::patches::Tell::ModParam(n), snapshot::screen::Tell::ModParam(m)) => {
+                        assert_eq!(n, m, "patch {}", patch.id);
+                        checkable += 1;
+                    }
+                    (apu::patches::Tell::SclkMax(_), snapshot::screen::Tell::Runtime(_)) => {}
+                    (apu::patches::Tell::CuCount(_), snapshot::screen::Tell::Runtime(_)) => {}
+                    (apu::patches::Tell::Bundled, snapshot::screen::Tell::Bundled) => {}
+                    (from, to) => panic!("patch {} crossed as {to:?}, not from {from:?}", patch.id),
+                }
+            }
+        }
+        assert!(
+            checkable > 0,
+            "no patch has a tell a module could be asked about, which would make the \
+             popup's whole count meaningless"
+        );
     }
 
     /// The suite builds the SNAP pane with the series attached; the standalone binary

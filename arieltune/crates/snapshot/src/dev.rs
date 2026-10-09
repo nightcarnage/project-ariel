@@ -409,11 +409,26 @@ pub fn marker_strings(data: &[u8], needle: &str) -> Vec<String> {
         .collect()
 }
 
-/// The marker strings in a compressed module.
-pub fn module_markers(module: &Path, runner: &dyn Runner, work: &Path) -> Result<Vec<String>> {
+/// Every printable string in a compressed module.
+///
+/// The general form of [`module_markers`], and the reason a *snapshot* can be asked
+/// which patches it carries without booting it: a patch's tell is a string literal in
+/// the object it was built from — a debugfs node name, a module parameter — so it is
+/// still in the module's `.rodata` long after the source tree is gone. Same evidence
+/// `validate` uses for the `BC-250` markers, without the marker filter.
+pub fn module_strings(module: &Path, runner: &dyn Runner, work: &Path) -> Result<Vec<String>> {
+    Ok(printable_strings(&module_bytes(module, runner, work)?))
+}
+
+/// A compressed module's bytes, decompressed into `work`.
+///
+/// Refuses rather than returning empty: a module that could not be read must not be
+/// mistaken for one with nothing in it, which is the confusion this whole file exists
+/// to avoid.
+fn module_bytes(module: &Path, runner: &dyn Runner, work: &Path) -> Result<Vec<u8>> {
     std::fs::create_dir_all(work)
         .with_context(|| format!("creating scratch space {}", work.display()))?;
-    let dest = work.join("markers.ko");
+    let dest = work.join("module.ko");
     runner.run(&[
         "zstd".to_string(),
         "-d".to_string(),
@@ -422,8 +437,12 @@ pub fn module_markers(module: &Path, runner: &dyn Runner, work: &Path) -> Result
         "-o".to_string(),
         dest.display().to_string(),
     ])?;
-    let bytes = std::fs::read(&dest).with_context(|| format!("reading {}", dest.display()))?;
-    Ok(marker_strings(&bytes, MARKER))
+    std::fs::read(&dest).with_context(|| format!("reading {}", dest.display()))
+}
+
+/// The marker strings in a compressed module.
+pub fn module_markers(module: &Path, runner: &dyn Runner, work: &Path) -> Result<Vec<String>> {
+    Ok(marker_strings(&module_bytes(module, runner, work)?, MARKER))
 }
 
 /// Marker lines in a tree's module sources, and how many there are.
@@ -969,6 +988,69 @@ mod tests {
             .success();
         assert!(ok, "zstd failed");
         let _ = std::fs::remove_file(&src);
+    }
+
+    /// The SNAP popup asks a *stored module* which patches it carries, and it does it
+    /// by reading the module's strings. This runs that whole chain — decompress, scan,
+    /// match — against a real `.ko.zst` rather than a `Vec<u8>`, because the part that
+    /// can go wrong in the field is the read, not the comparison.
+    #[test]
+    fn a_stored_module_can_be_asked_which_tells_it_carries() {
+        if !have_zstd() {
+            eprintln!("skipping: no zstd");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("snap-strings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A module with three string literals in it, the way a real one has a debugfs
+        // node name and a parameter name, and NUL separators between them.
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(b"\x7fELF\x02\x01\x01\x00");
+        payload.extend_from_slice(b"cyan_skillfish_telemetry\0");
+        payload.extend_from_slice(&[0x01, 0x02]);
+        payload.extend_from_slice(b"bc250_flush_by_runlist\0");
+        payload.extend_from_slice(b"parm=bc250_flush_by_runlist\0"); // also, prefixed
+        payload.extend_from_slice(b"abc\0"); // too short to be a string
+
+        let module = dir.join("amdgpu.ko.zst");
+        zstd_to(&payload, &module);
+
+        let work = dir.join("work");
+        let strings = module_strings(&module, &crate::write::System::default(), &work)
+            .expect("read the module");
+
+        for wanted in ["cyan_skillfish_telemetry", "bc250_flush_by_runlist"] {
+            assert!(
+                strings.iter().any(|s| s.contains(wanted)),
+                "{wanted} should be in there: {strings:?}"
+            );
+        }
+        // The prefixed spelling matches by `contains`, which is what the popup's check
+        // relies on — a parameter name can share a run with the prefix in front of it.
+        assert!(strings.iter().any(|s| s.contains("bc250_flush_by_runlist")));
+        // A tell this module does not carry is simply not found, which is the answer
+        // the popup turns into "NOT in this snapshot's module".
+        assert!(!strings.iter().any(|s| s.contains("bc250_fault_probe")));
+        assert!(
+            !strings.iter().any(|s| s == "abc"),
+            "3 chars is not a string"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A module that cannot be read must be an error, not an empty list — the popup
+    /// distinguishes "no tells found" from "could not look", and that distinction starts
+    /// here.
+    #[test]
+    fn a_module_that_cannot_be_read_is_an_error_rather_than_empty() {
+        let dir = std::env::temp_dir().join(format!("snap-strings-missing-{}", std::process::id()));
+        let missing = dir.join("not-there.ko.zst");
+        let work = dir.join("work");
+        let out = module_strings(&missing, &crate::write::System::default(), &work);
+        assert!(out.is_err(), "a missing module must refuse: {out:?}");
     }
 
     fn tree(dirty: &[&str]) -> Tree {
