@@ -52,6 +52,15 @@ pub const KIND_CREATED: &str = "created";
 /// `kind` decides; see [`id_is_content_addressed`].
 pub const KIND_REBUILT: &str = "rebuilt";
 
+/// `snapshot.kind: "registered"` — artefacts built elsewhere were handed over.
+///
+/// The id is still content-addressed (§3.1's F3), and the shell tool's `register`
+/// used the same formula — so a snapshot registered here gets the *same id* the
+/// shell would give it. That is the one kind where the two tools agree by
+/// construction rather than by coincidence, and it is why `verify` can re-derive
+/// these.
+pub const KIND_REGISTERED: &str = "registered";
+
 /// Whether this `kind` names an id this tool computes.
 ///
 /// `kind` earns its place by deciding whether an id can be recomputed from the
@@ -67,7 +76,10 @@ pub const KIND_REBUILT: &str = "rebuilt";
 /// `snap-0848359a` (`register`ed) hold byte-identical content and carry different
 /// ids — the same bytes, two formulas, no drift.
 pub fn id_is_content_addressed(kind: &str) -> bool {
-    matches!(kind, KIND_DEV | KIND_CREATED | KIND_REBUILT)
+    matches!(
+        kind,
+        KIND_DEV | KIND_CREATED | KIND_REBUILT | KIND_REGISTERED
+    )
 }
 
 /// Flatten a YAML tree into `(dotted path, scalar)` pairs.
