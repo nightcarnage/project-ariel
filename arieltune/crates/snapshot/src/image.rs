@@ -190,6 +190,30 @@ pub fn has_member(image: &Path, member: &str) -> bool {
     verify_member(image, member).is_ok()
 }
 
+/// The full path of the member whose path ends in `suffix`, from the early archive.
+///
+/// Taken from the parent image rather than constructed from the kernel release:
+/// the path inside an initramfs is mkinitcpio's business, and assembling it from
+/// a version string is how you end up replacing a file that is not the one the
+/// machine boots.
+pub fn find_member(image: &Path, suffix: &str) -> Result<String> {
+    let bytes =
+        std::fs::read(image).with_context(|| format!("reading the image {}", image.display()))?;
+    let at = cpio::compressed_at(&bytes)?;
+    // The early archive is where the modules are; see `derive`.
+    let early = cpio::parse(&bytes[..at])?;
+    early
+        .iter()
+        .find(|m| m.name.ends_with(suffix))
+        .map(|m| m.name.clone())
+        .with_context(|| {
+            format!(
+                "no member ending in {suffix:?} in the early archive of {}",
+                image.display()
+            )
+        })
+}
+
 fn decompress(input: &[u8], dest: &Path) -> Result<()> {
     let out = run_zstd(&["-d"], input, dest)?;
     if !out {

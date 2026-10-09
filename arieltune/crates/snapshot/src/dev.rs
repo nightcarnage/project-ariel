@@ -40,7 +40,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+
+use crate::write::Runner;
 
 /// A kernel source tree, as it stands right now.
 #[derive(Debug, Clone)]
@@ -161,6 +163,136 @@ pub fn running_release() -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A module built from the tree and prepared for insertion into an image.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    /// The compressed module: exactly the bytes that go into the image.
+    pub bytes: Vec<u8>,
+    /// The uncompressed `.ko` the build produced.
+    pub source: PathBuf,
+    /// Size of the uncompressed module, for reporting.
+    pub raw_bytes: u64,
+}
+
+/// Build the module directories the tree has changed, and compress the result.
+///
+/// The commands go through [`Runner`] so the argument vector is testable without
+/// a kernel tree: this is the step that spends real time, and a wrong `M=` is not
+/// something to discover after thirty seconds of compiling.
+///
+/// `make M=<dir> modules` is incremental by nature — it relinks only the objects
+/// whose sources changed — which is what makes the loop fast. It is *not* a kernel
+/// build, and nothing here runs `modules_prepare` or touches the package: if the
+/// tree is configured, this is seconds.
+pub fn build(tree: &Tree, runner: &dyn Runner, work: &Path) -> Result<Prepared> {
+    let (modules, _elsewhere) = tree.build_set();
+    if modules.is_empty() {
+        bail!("nothing to build: no changed file under drivers/");
+    }
+    std::fs::create_dir_all(work)
+        .with_context(|| format!("creating scratch space {}", work.display()))?;
+
+    for dir in &modules {
+        // `-C` rather than a working directory, so the same argument vector works
+        // through any Runner implementation.
+        let argv: Vec<String> = vec![
+            "make".to_string(),
+            "-C".to_string(),
+            tree.path.display().to_string(),
+            format!("M={dir}"),
+            "modules".to_string(),
+        ];
+        runner.run(&argv)?;
+    }
+
+    // Locate what the build produced rather than assuming a filename: the module
+    // is `amdgpu.ko` today, and hard-coding that would be the thing to break the
+    // day the series grows a second one.
+    let ko = newest_ko(&tree.path, &modules)
+        .with_context(|| format!("no .ko produced under any of {modules:?}"))?;
+
+    let stripped = work.join("module.ko");
+    runner.run(&[
+        "strip".to_string(),
+        "--strip-debug".to_string(),
+        ko.display().to_string(),
+        "-o".to_string(),
+        stripped.display().to_string(),
+    ])?;
+
+    let raw_bytes = std::fs::metadata(&stripped)
+        .with_context(|| format!("stat {}", stripped.display()))?
+        .len();
+    let compressed = work.join("module.ko.zst");
+    runner.run(&[
+        "zstd".to_string(),
+        "-q".to_string(),
+        "-f".to_string(),
+        stripped.display().to_string(),
+        "-o".to_string(),
+        compressed.display().to_string(),
+    ])?;
+
+    Ok(Prepared {
+        bytes: std::fs::read(&compressed)
+            .with_context(|| format!("reading {}", compressed.display()))?,
+        source: ko,
+        raw_bytes,
+    })
+}
+
+/// The most recently modified `.ko` under any of `dirs`.
+///
+/// Newest rather than first: an incremental build leaves older objects behind, and
+/// picking one of those would quietly snapshot the previous iteration.
+fn newest_ko(tree: &Path, dirs: &[String]) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(tree.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ko") {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(when, _)| modified > *when) {
+                best = Some((modified, path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Derive the dev image from the parent image, with the built module in it.
+///
+/// Returns the member path and the report. The member is located **in the parent
+/// image** rather than constructed from a version string: the path inside an
+/// initramfs is mkinitcpio's business, and building it by hand is how you replace
+/// a file that is not the one the machine boots. The suffix comes from the module
+/// the build actually produced.
+pub fn assemble(
+    parent_image: &Path,
+    prepared: &Prepared,
+    dest: &Path,
+    work: &Path,
+) -> Result<(String, crate::image::Derived)> {
+    if prepared.bytes.is_empty() {
+        bail!("the built module is empty; refusing to derive an image from it");
+    }
+    let stem = prepared
+        .source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("the built module has no file name")?;
+    let member = crate::image::find_member(parent_image, &format!("{stem}.zst"))?;
+    let derived = crate::image::derive(parent_image, &member, &prepared.bytes, dest, work)?;
+    Ok((member, derived))
 }
 
 /// What a dev snapshot from this tree would involve.
@@ -424,5 +556,144 @@ mod tests {
             text.contains("live module tree is not written"),
             "the plan should say what it will not touch: {text}"
         );
+    }
+
+    // ---- the build step ----------------------------------------------------
+
+    /// A tree on disk with one changed driver directory and a stub `.ko`.
+    fn tree_dir(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("snap-dev-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("drivers/gpu/drm/amd/amdgpu");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".config"), b"CONFIG_FOO=y\n").unwrap();
+        std::fs::write(dir.join("amdgpu.ko"), vec![0u8; 128]).unwrap();
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        root
+    }
+
+    fn dirty_tree(root: &Path, dirty: &[&str]) -> Tree {
+        Tree {
+            path: root.to_path_buf(),
+            release: Some("7.0.9-1-cachyos-bore".to_string()),
+            revision: Some("a3f19c2".to_string()),
+            dirty: dirty.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The argument vector is the thing worth pinning: a wrong `M=` is not
+    /// something to discover thirty seconds into a compile.
+    #[test]
+    fn build_invokes_make_per_module_and_compresses_the_result() {
+        let root = tree_dir("build");
+        let t = dirty_tree(&root, &["drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c"]);
+        let work = root.join("work");
+        // The runner records instead of running, so stage what the post-processing
+        // steps would have produced.
+        std::fs::write(work.join("module.ko"), vec![0u8; 96]).unwrap();
+        std::fs::write(work.join("module.ko.zst"), b"compressed module").unwrap();
+
+        let runner = crate::write::Recording::default();
+        let prepared = build(&t, &runner, &work).unwrap();
+
+        let calls = runner.calls.borrow().clone();
+        let makes: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "make").collect();
+        assert_eq!(makes.len(), 1, "one make per changed module directory");
+        assert!(
+            makes[0].contains(&"M=drivers/gpu/drm/amd/amdgpu".to_string()),
+            "{:?}",
+            makes[0]
+        );
+        assert!(
+            makes[0].contains(&"modules".to_string()),
+            "it must be a modules build, not a full build: {:?}",
+            makes[0]
+        );
+        assert!(
+            calls.iter().any(|c| c[0] == "zstd"),
+            "the module has to be compressed before it can go in an image"
+        );
+        assert!(calls.iter().any(|c| c[0] == "strip"), "and stripped first");
+        assert_eq!(prepared.bytes, b"compressed module");
+        assert_eq!(
+            prepared.raw_bytes, 96,
+            "the stripped size is what is reported"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two changed directories must produce two `M=` invocations, not one.
+    #[test]
+    fn build_covers_every_changed_module_directory() {
+        let root = tree_dir("build-multi");
+        let other = root.join("drivers/gpu/drm/amdkfd");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("kfd.ko"), vec![0u8; 64]).unwrap();
+        std::fs::write(root.join("work/module.ko"), vec![0u8; 64]).unwrap();
+        std::fs::write(root.join("work/module.ko.zst"), b"x").unwrap();
+
+        let t = dirty_tree(
+            &root,
+            &[
+                "drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c",
+                "drivers/gpu/drm/amdkfd/kfd_chardev.c",
+            ],
+        );
+        let runner = crate::write::Recording::default();
+        build(&t, &runner, &root.join("work")).unwrap();
+
+        let calls = runner.calls.borrow().clone();
+        let makes: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "make").collect();
+        assert_eq!(makes.len(), 2, "{makes:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_refuses_a_tree_with_nothing_changed() {
+        let root = tree_dir("build-clean");
+        let t = dirty_tree(&root, &[]);
+        let runner = crate::write::Recording::default();
+
+        let err = build(&t, &runner, &root.join("work")).unwrap_err();
+        assert!(err.to_string().contains("nothing to build"), "{err}");
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "refusing must not have run anything"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A build that produces no module must not proceed to make an image out of
+    /// nothing — that is how a snapshot ends up silently identical to its parent.
+    #[test]
+    fn build_fails_when_the_build_produced_no_module() {
+        let root = tree_dir("build-noout");
+        std::fs::remove_file(root.join("drivers/gpu/drm/amd/amdgpu/amdgpu.ko")).unwrap();
+        let t = dirty_tree(&root, &["drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c"]);
+        let runner = crate::write::Recording::default();
+
+        let err = build(&t, &runner, &root.join("work")).unwrap_err();
+        assert!(format!("{err:#}").contains("no .ko produced"), "{err:#}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Newest rather than first: an incremental build leaves older objects behind,
+    /// and picking one of those would quietly snapshot the previous iteration.
+    #[test]
+    fn the_newest_module_wins_over_an_older_one() {
+        let root = tree_dir("build-newest");
+        let dir = root.join("drivers/gpu/drm/amd/amdgpu");
+        std::fs::write(dir.join("stale.ko"), vec![0u8; 16]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("fresh.ko"), vec![0u8; 16]).unwrap();
+
+        let found = newest_ko(&root, &["drivers/gpu/drm/amd/amdgpu".to_string()]).unwrap();
+        assert_eq!(found.file_name().unwrap(), "fresh.ko");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

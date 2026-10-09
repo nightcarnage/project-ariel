@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::dev;
 use crate::grub;
+use crate::image;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
 
@@ -136,6 +137,21 @@ pub enum Cmd {
         /// Kernel source tree (or set SNAPSHOT_TREE).
         #[arg(long, value_name = "DIR", env = "SNAPSHOT_TREE")]
         tree: Option<PathBuf>,
+        /// Actually build the module and derive the image. Without it, only the
+        /// plan is printed and nothing runs.
+        #[arg(long)]
+        run: bool,
+        /// Parent snapshot whose image the dev image is derived from. Default: the
+        /// booted snapshot.
+        #[arg(long, value_name = "SNAP-ID")]
+        parent: Option<String>,
+        /// Derive from this image directly, instead of a snapshot's.
+        #[arg(long, value_name = "IMAGE", conflicts_with = "parent")]
+        from: Option<PathBuf>,
+        /// Where to write the derived image. Default: scratch space, reported so
+        /// the result can be inspected.
+        #[arg(long, value_name = "IMAGE")]
+        out: Option<PathBuf>,
     },
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
@@ -249,7 +265,25 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::GrubList => cmd_grub_list(&store, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
         Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
-        Cmd::Dev { description, tree } => cmd_dev(&description, tree.as_deref(), json),
+        Cmd::Dev {
+            description,
+            tree,
+            run,
+            parent,
+            from,
+            out,
+        } => cmd_dev(
+            &store,
+            &description,
+            tree.as_deref(),
+            DevTargets {
+                run,
+                parent,
+                from,
+                out,
+            },
+            json,
+        ),
         Cmd::Pin { id, dry_run } => cmd_pin(&store.paths, &id, dry_run),
         Cmd::Unpin { dry_run } => cmd_unpin(&store.paths, dry_run),
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
@@ -364,7 +398,25 @@ fn cmd_golden(paths: &Paths, id: Option<&str>, dry_run: bool, json: bool) -> Res
     Ok(0)
 }
 
-fn cmd_dev(description: &str, tree: Option<&std::path::Path>, json: bool) -> Result<i32> {
+/// Which image a dev snapshot derives from, and where the result goes.
+///
+/// Grouped rather than passed as four positional arguments: three of them are
+/// optional paths, and mistaking one for another is the kind of thing that looks
+/// fine until the image comes out containing the wrong parent's contents.
+struct DevTargets {
+    run: bool,
+    parent: Option<String>,
+    from: Option<PathBuf>,
+    out: Option<PathBuf>,
+}
+
+fn cmd_dev(
+    store: &Store,
+    description: &str,
+    tree: Option<&std::path::Path>,
+    targets: DevTargets,
+    json: bool,
+) -> Result<i32> {
     let Some(path) = tree else {
         anyhow::bail!(
             "no source tree given.\n\
@@ -375,35 +427,130 @@ fn cmd_dev(description: &str, tree: Option<&std::path::Path>, json: bool) -> Res
 
     let plan = dev::plan(dev::inspect_tree(path)?, dev::running_release());
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "description": description,
-                "tree": plan.tree.path,
-                "release": plan.tree.release,
-                "running": plan.running,
-                "revision": plan.tree.revision,
-                "changed": plan.tree.dirty,
-                "modules": plan.modules,
-                "elsewhere": plan.elsewhere,
-                "blockers": plan.blockers,
-                "buildable": plan.can_build(),
-            }))?
-        );
-    } else {
+    if !json {
         println!("dev plan — {description}");
         println!();
         for line in plan.describe() {
             println!("{line}");
         }
         println!();
-        println!("Nothing was built and nothing was written.");
     }
 
-    // Non-zero when the tree cannot produce a module, so an agent can gate on the
-    // exit code instead of parsing prose — the `doctor --verify` convention.
-    Ok(if plan.can_build() { 0 } else { 2 })
+    if !plan.can_build() {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "description": description,
+                    "buildable": false,
+                    "blockers": plan.blockers,
+                }))?
+            );
+        } else {
+            println!("Nothing was built and nothing was written.");
+        }
+        return Ok(2);
+    }
+
+    if !targets.run {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "description": description,
+                    "buildable": true,
+                    "modules": plan.modules,
+                    "ran": false,
+                }))?
+            );
+        } else {
+            println!("Nothing was built and nothing was written. Pass --run to build.");
+        }
+        return Ok(0);
+    }
+
+    // The image this derives from. Everything the dev image is not explicitly told
+    // to replace comes from here, so getting it wrong means shipping the parent's
+    // contents under a new name.
+    let parent_image = match targets.from.as_deref() {
+        Some(image) => image.to_path_buf(),
+        None => {
+            let id = match targets.parent.as_deref() {
+                Some(id) => id.to_string(),
+                None => store
+                    .booted_id()
+                    .context("not booted from a snapshot; pass --parent <id> or --from <image>")?,
+            };
+            store.paths.boot.join(format!("initramfs-{id}.img"))
+        }
+    };
+    if !parent_image.is_file() {
+        anyhow::bail!(
+            "no parent image at {} — it is root-readable only, or the snapshot has \
+             no image. Pass --from <image> to name one.",
+            parent_image.display()
+        );
+    }
+
+    let work = std::env::temp_dir().join(format!("snapdev-{}", std::process::id()));
+    let prepared = dev::build(&plan.tree, &write::System, &work)?;
+    println!(
+        "built       {} ({} bytes, stripped)",
+        prepared.source.display(),
+        prepared.raw_bytes
+    );
+
+    let dest = match targets.out.as_deref() {
+        Some(path) => path.to_path_buf(),
+        None => work.join("dev.img"),
+    };
+    let (member, derived) = dev::assemble(&parent_image, &prepared, &dest, &work)?;
+
+    // Verify with the independent oracle, not our own parser: this is the check
+    // that distinguishes "the image carries the module we built" from "the image
+    // looks plausible".
+    let got = image::verify_member(&dest, &member)
+        .with_context(|| format!("verifying {member} in the derived image"))?;
+    if got != prepared.bytes {
+        anyhow::bail!(
+            "the derived image does not carry the module we built \
+             ({} bytes in the image, {} bytes built) — refusing to call this a success",
+            got.len(),
+            prepared.bytes.len()
+        );
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "description": description,
+                "buildable": true,
+                "ran": true,
+                "module": prepared.source,
+                "module_bytes": prepared.bytes.len(),
+                "member": member,
+                "parent_image": parent_image,
+                "image": dest,
+                "image_bytes": derived.image_bytes,
+                "delta": derived.delta(),
+                "verified": true,
+            }))?
+        );
+    } else {
+        println!("replaced    {member}");
+        println!(
+            "image       {} -> {} bytes (delta {})",
+            derived.parent_bytes,
+            derived.image_bytes,
+            derived.delta()
+        );
+        println!("wrote       {}", dest.display());
+        println!();
+        println!("Verified: that member in the new image is byte-identical to the module built.");
+        println!("The live module tree was not written and the base kernel is untouched.");
+    }
+    Ok(0)
 }
 
 /// One field that differs between two snapshots.
