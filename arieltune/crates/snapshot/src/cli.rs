@@ -602,6 +602,7 @@ fn cmd_dev(
             target_release.as_deref(),
             &targets,
             &plan.tree,
+            &plan.modules,
         )?)
     } else {
         None
@@ -661,6 +662,7 @@ fn register_dev(
     target_release: Option<&str>,
     targets: &DevTargets,
     tree: &dev::Tree,
+    rebuilt_modules: &[String],
 ) -> Result<String> {
     let kernel_version = target_release
         .context(
@@ -703,6 +705,10 @@ fn register_dev(
             .clone()
             .or_else(|| Some(register::parent_of(parent_image))),
         tree: Some(tree.path.clone()),
+        // What the build actually relinked. `changed_files` below is the stronger
+        // claim but only a checkout of its own can make it; this one is knowable
+        // either way, and it is what answers "did my edit get picked up?".
+        rebuilt_modules: rebuilt_modules.to_vec(),
         // Only a tree that is its own checkout can say what changed. Handing over
         // an empty list from a tree that cannot tell would record "nothing
         // changed", which is a different and false claim.

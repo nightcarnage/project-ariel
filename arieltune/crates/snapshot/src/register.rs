@@ -72,6 +72,15 @@ pub struct Request {
     /// what an extracted source tree with no VCS of its own answers. Recording an
     /// empty list there would be a claim, and a false one.
     pub changed_files: Option<Vec<String>>,
+    /// The module directories the build actually relinked.
+    ///
+    /// Knowable even when the tree cannot diff itself, and it is the *useful*
+    /// half of the answer: `changed_files: unknown` says nothing about whether the
+    /// build picked the edit up, while this says exactly which module was rebuilt.
+    /// An extracted source tree with no VCS of its own falls back to a default
+    /// directory, so recording it is how a reader can tell a real diff from a
+    /// fallback.
+    pub rebuilt_modules: Vec<String>,
     /// MD5 of the compressed module, all 32 hex characters.
     pub module_md5: String,
     /// Size of the compressed module.
@@ -220,6 +229,14 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     }
     out.push_str("\nbuild:\n");
     out.push_str("  initramfs: \"derived from parent, one member replaced\"\n");
+    if !req.rebuilt_modules.is_empty() {
+        // Comma-joined rather than a list: it is a handful of directory paths, and
+        // one line keeps the SNAP pane readable.
+        out.push_str(&format!(
+            "  rebuilt: \"{}\"\n",
+            req.rebuilt_modules.join(", ")
+        ));
+    }
     if req.changed_files.is_none() {
         out.push_str("  changed_files: \"unknown - this tree is not a checkout of its own\"\n");
     }
@@ -612,6 +629,7 @@ mod tests {
             root_uuid: "757f018a-71b0-44fc-aac8-c5b2ed165923".to_string(),
             parent: Some("linux-cachyos-bore".to_string()),
             tree: Some(PathBuf::from("/home/nightcarnage/tree")),
+            rebuilt_modules: vec!["drivers/gpu/drm/amd/amdgpu".to_string()],
             changed_files: Some(vec!["drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c".to_string()]),
             module_md5: "ecdb619e5bddacf7ab37be0c563043a5".to_string(),
             module_size: 7357845,
@@ -621,6 +639,29 @@ mod tests {
             boot: PathBuf::from("/boot"),
             acpi_override: false,
         }
+    }
+
+    /// "Which module did this actually rebuild?" is answerable even when the tree
+    /// cannot say which *files* changed, and it is the question that catches a
+    /// build that quietly did nothing useful.
+    #[test]
+    fn the_manifest_records_what_the_build_rebuilt() {
+        let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("rebuilt: \"drivers/gpu/drm/amd/amdgpu\""),
+            "{text}"
+        );
+    }
+
+    /// An empty list is omitted rather than written as a claim: "nothing was
+    /// rebuilt" and "we did not look" are opposites, and only one of them is true
+    /// here.
+    #[test]
+    fn an_empty_rebuild_list_is_omitted_rather_than_claimed() {
+        let mut req = request();
+        req.rebuilt_modules.clear();
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(!text.contains("rebuilt:"), "{text}");
     }
 
     /// The manifest has to carry everything the entry builder reads, or the plan

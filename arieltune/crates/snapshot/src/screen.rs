@@ -1488,6 +1488,7 @@ mod tests {
             root_uuid: "757f018a-71b0-44fc-aac8-c5b2ed165923".to_string(),
             parent: Some("linux-cachyos-bore".to_string()),
             tree: Some(PathBuf::from("/home/nightcarnage/tree")),
+            rebuilt_modules: vec!["drivers/gpu/drm/amd/amdgpu".to_string()],
             changed_files: None,
             module_md5: "016a410f8b86e1b5d10efbaa856ce22f".to_string(),
             module_size: 7358583,
