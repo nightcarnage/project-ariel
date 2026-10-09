@@ -197,21 +197,35 @@ pub fn has_member(image: &Path, member: &str) -> bool {
 /// a version string is how you end up replacing a file that is not the one the
 /// machine boots.
 pub fn find_member(image: &Path, suffix: &str) -> Result<String> {
+    let names = members_ending(image, suffix)?;
+    match names.len() {
+        1 => Ok(names.into_iter().next().expect("checked")),
+        0 => bail!(
+            "no member ending in {suffix:?} in the early archive of {}",
+            image.display()
+        ),
+        _ => bail!(
+            "{} members of {} end in {suffix:?} ({names:?}) — refusing to guess which \
+             one is the module the machine boots",
+            names.len(),
+            image.display()
+        ),
+    }
+}
+
+/// Every member of the early archive whose path ends in `suffix`.
+///
+/// The early archive is where the modules are; see [`derive`].
+pub fn members_ending(image: &Path, suffix: &str) -> Result<Vec<String>> {
     let bytes =
         std::fs::read(image).with_context(|| format!("reading the image {}", image.display()))?;
     let at = cpio::compressed_at(&bytes)?;
-    // The early archive is where the modules are; see `derive`.
     let early = cpio::parse(&bytes[..at])?;
-    early
+    Ok(early
         .iter()
-        .find(|m| m.name.ends_with(suffix))
+        .filter(|m| m.name.ends_with(suffix))
         .map(|m| m.name.clone())
-        .with_context(|| {
-            format!(
-                "no member ending in {suffix:?} in the early archive of {}",
-                image.display()
-            )
-        })
+        .collect())
 }
 
 fn decompress(input: &[u8], dest: &Path) -> Result<()> {

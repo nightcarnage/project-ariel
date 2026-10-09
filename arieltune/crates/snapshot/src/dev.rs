@@ -588,9 +588,48 @@ pub fn assemble(
         .file_name()
         .and_then(|name| name.to_str())
         .context("the built module has no file name")?;
-    let member = crate::image::find_member(parent_image, &format!("{stem}.zst"))?;
+    let member = module_member(parent_image, stem)?;
     let derived = crate::image::derive(parent_image, &member, &prepared.bytes, dest, work)?;
     Ok((member, derived))
+}
+
+/// Which member of an image holds the `amdgpu` module.
+///
+/// The module's own name is the preferred answer, because the image names the
+/// member after the installed module. But it cannot be the *only* answer: a module
+/// handed to `create --module` may have been renamed on the way here, and this
+/// store's own dev path stores it as `module.ko.zst` regardless of what it is.
+/// Renaming a copy must not decide which file in someone's kernel gets replaced.
+///
+/// So the fallback locates it the way the image does — by the directory the kernel
+/// package puts the module in — and refuses when that is not unambiguous. Refusing
+/// is the point: replacing the wrong member of a boot image produces a machine that
+/// boots and is not the one that was asked for.
+fn module_member(image: &Path, stem: &str) -> Result<String> {
+    let exact = crate::image::members_ending(image, &format!("{stem}.zst"))?;
+    if exact.len() == 1 {
+        return Ok(exact.into_iter().next().expect("checked"));
+    }
+
+    let candidates: Vec<String> = crate::image::members_ending(image, ".ko.zst")?
+        .into_iter()
+        .filter(|name| name.contains(DEFAULT_MODULE_DIR))
+        .collect();
+    match candidates.len() {
+        1 => Ok(candidates.into_iter().next().expect("checked")),
+        0 => bail!(
+            "no member under {DEFAULT_MODULE_DIR} ending in .ko.zst in the early archive of \
+             {} — this image does not carry the module",
+            image.display()
+        ),
+        _ => bail!(
+            "{} members under {DEFAULT_MODULE_DIR} in {} ({candidates:?}) and the module to \
+             place is {stem:?}, which matches none of them — refusing to guess which one the \
+             machine boots",
+            candidates.len(),
+            image.display()
+        ),
+    }
 }
 
 /// The kernel release a module inside an image is built for.
