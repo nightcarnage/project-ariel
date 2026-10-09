@@ -10,7 +10,7 @@
 //!   Ctrl-Q          -> quit the whole suite
 //! Bare `Tab`/`Shift-Tab`/`q` are left to the panes, which bind them internally.
 //! A pane that itself needs a digit (a value edit, a search box) reports
-//! `modal()`, which suppresses the global 1-4 so the digit reaches the pane.
+//! `modal()`, which suppresses the shell's own keys so they reach the pane instead.
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -85,6 +85,28 @@ impl Shell {
     /// `Ignored` and is not modal, the shell tries its global bindings.
     fn route_key(&mut self, k: KeyEvent) -> Flow {
         let modal = self.screens[self.active].modal();
+
+        // The shell's own keys go first when the pane is not modal.
+        //
+        // Pane-first is still the rule for anything a pane may bind: bare `Tab`,
+        // `Shift-Tab`, `Shift` and `q` belong to the panes, and the shell must not
+        // take them. But the shell's globals are digits, function keys and modifier
+        // chords, and no pane uses any of those — a pane can only *forget* to hand one
+        // back, and forgetting is silent. The APU pane does exactly that: it consumes
+        // every key it is given, and its whitelist of the shell's keys read
+        // `'1'..='4'`, written when the suite had four tabs. So `5` from APU did
+        // nothing, while every other pair of tabs worked.
+        //
+        // Asking is not knowing: the shell is the only thing that can say which keys
+        // are its own, so it says so by acting on them rather than by trusting each
+        // pane to remember. `modal()` still wins, because a popup or a field edit owns
+        // the whole keyboard.
+        if !modal {
+            if let Some(flow) = self.global_key(k) {
+                return flow;
+            }
+        }
+
         match self.screens[self.active].on_key(k) {
             Outcome::Consumed => Flow::Continue,
             Outcome::Quit => Flow::Quit,
@@ -103,10 +125,11 @@ impl Shell {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         match k.code {
-            // Bare 1-5 jump directly to a tab. The shell only sees these when the
-            // active pane returned Ignored (i.e. it is not modal and does not want
-            // the digit), so a pane's own number use is never stolen. The `Char`
-            // arms also match Alt-1..5, and F1-F5 stay as aliases.
+            // Bare 1-5 jump directly to a tab, and they are the shell's own: it acts
+            // on them before the pane unless the pane is modal. The `Char` arms also
+            // match Alt-1..5, and F1-F5 stay as aliases. **A sixth tab means a sixth
+            // arm here** — `src/tabs.rs` has a test that presses a digit for every tab
+            // there is, so a tab added without one fails rather than going quiet.
             KeyCode::Char('1') => self.switch_to(0),
             KeyCode::Char('2') => self.switch_to(1),
             KeyCode::Char('3') => self.switch_to(2),
@@ -227,13 +250,36 @@ mod tests {
 
     // Hermetic doubles: every stub returns Ignored, so these tests exercise the
     // shell's global routing regardless of the real tab set.
+    //
+    // **Five**, matching the real suite. With four, `5` resolved to an index that did
+    // not exist and `switch_to` returned early — so every digit test here passed while
+    // `5` could not have worked, which is how a stale `1'..='4'` survived in the APU
+    // pane long enough for a human to find it.
     fn shell() -> Shell {
-        let screens: Vec<Box<dyn Screen>> = vec![
-            Box::new(StubScreen::new("WIKI", "", "")),
-            Box::new(StubScreen::new("BIOS", "", "")),
-            Box::new(StubScreen::new("APU", "", "")),
-            Box::new(StubScreen::new("MEM", "", "")),
-        ];
+        let screens: Vec<Box<dyn Screen>> = (0..5)
+            .map(|_| Box::new(StubScreen::new("STUB", "", "")) as Box<dyn Screen>)
+            .collect();
+        Shell::new(screens, 0)
+    }
+
+    /// A pane that consumes every key it is given, the way APU does. It recognises few
+    /// keys, so it has to be *handed* the shell's keys or it keeps them.
+    struct Greedy;
+
+    impl Screen for Greedy {
+        fn title(&self) -> &'static str {
+            "GREEDY"
+        }
+        fn draw(&mut self, _f: &mut Frame, _area: ratatui::layout::Rect) {}
+        fn on_key(&mut self, _key: KeyEvent) -> Outcome {
+            Outcome::Consumed
+        }
+    }
+
+    fn greedy_shell() -> Shell {
+        let screens: Vec<Box<dyn Screen>> = (0..5)
+            .map(|_| Box::new(Greedy) as Box<dyn Screen>)
+            .collect();
         Shell::new(screens, 0)
     }
 
@@ -244,13 +290,16 @@ mod tests {
     #[test]
     fn cycle_wraps_both_ways() {
         let mut s = shell();
+        // Derived, not hardcoded: this test used to assert index 3 as "the last tab"
+        // and went stale the moment SNAP was added.
+        let last = s.screens.len() - 1;
         assert_eq!(s.active, 0);
         s.cycle(1);
         assert_eq!(s.active, 1);
         s.cycle(-1);
         assert_eq!(s.active, 0);
         s.cycle(-1); // wrap to last
-        assert_eq!(s.active, 3);
+        assert_eq!(s.active, last);
         s.cycle(1); // wrap to first
         assert_eq!(s.active, 0);
     }
@@ -281,13 +330,15 @@ mod tests {
     #[test]
     fn bare_numbers_jump() {
         let mut s = shell();
-        // Stubs return Ignored, so bare 1-4 fall through to the global tab switch.
+        // Stubs return Ignored, so bare 1-5 fall through to the global tab switch.
         s.route_key(key(KeyCode::Char('3'), KeyModifiers::NONE));
         assert_eq!(s.active, 2); // 3 -> APU
         s.route_key(key(KeyCode::Char('1'), KeyModifiers::NONE));
         assert_eq!(s.active, 0); // 1 -> WIKI
         s.route_key(key(KeyCode::Char('4'), KeyModifiers::NONE));
         assert_eq!(s.active, 3); // 4 -> MEM
+        s.route_key(key(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(s.active, 4); // 5 -> SNAP
     }
 
     #[test]
@@ -321,5 +372,73 @@ mod tests {
             Flow::Continue
         ));
         assert_eq!(s.active, 0);
+    }
+
+    /// **The reported bug.** APU consumes every key it is given, and its list of the
+    /// shell's keys read `1`-`4` from when the suite had four tabs — so pressing `3`
+    /// then `5` did nothing, while `1`-`5`, `2`-`5` and `4`-`5` all worked. Wiki, BIOS
+    /// and MEM each end in `_ => Outcome::Ignored`, so they were never affected.
+    ///
+    /// A pane cannot hide a tab jump: the shell acts on its own keys before offering
+    /// them, so a pane that recognises nothing is harmless rather than dangerous.
+    #[test]
+    fn a_pane_that_consumes_every_key_cannot_hide_a_tab_jump() {
+        // The exact sequence from the report: WIKI -> APU -> (nothing happened).
+        let mut s = greedy_shell();
+        s.route_key(key(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(s.active, 2, "3 is APU");
+        s.route_key(key(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(s.active, 4, "and 3 then 5 must reach SNAP");
+
+        // Every digit from every tab, and the function keys too, so the one pair that
+        // failed is not the only pair tested.
+        for from in 0..5usize {
+            for to in 0..5usize {
+                let digit = char::from_digit((to + 1) as u32, 10).unwrap();
+
+                let mut s = greedy_shell();
+                s.active = from;
+                s.route_key(key(KeyCode::Char(digit), KeyModifiers::NONE));
+                assert_eq!(s.active, to, "'{digit}' from tab {}", from + 1);
+
+                let mut s = greedy_shell();
+                s.active = from;
+                s.route_key(key(KeyCode::Char(digit), KeyModifiers::ALT));
+                assert_eq!(s.active, to, "Alt-'{digit}' from tab {}", from + 1);
+
+                let mut s = greedy_shell();
+                s.active = from;
+                s.route_key(key(KeyCode::F((to + 1) as u8), KeyModifiers::NONE));
+                assert_eq!(s.active, to, "F{} from tab {}", to + 1, from + 1);
+            }
+        }
+    }
+
+    /// The other half of the contract, and the reason routing is still pane-first: a
+    /// modal pane owns the keyboard, so the shell must not jump out from under a popup
+    /// or a field edit. Asking is not taking.
+    #[test]
+    fn a_modal_pane_keeps_the_keyboard() {
+        struct Modal(Greedy);
+        impl Screen for Modal {
+            fn title(&self) -> &'static str {
+                "MODAL"
+            }
+            fn draw(&mut self, _f: &mut Frame, _area: ratatui::layout::Rect) {}
+            fn on_key(&mut self, _key: KeyEvent) -> Outcome {
+                Outcome::Consumed
+            }
+            fn modal(&self) -> bool {
+                true
+            }
+        }
+        let screens: Vec<Box<dyn Screen>> = (0..5)
+            .map(|_| Box::new(Modal(Greedy)) as Box<dyn Screen>)
+            .collect();
+        let mut s = Shell::new(screens, 0);
+        s.route_key(key(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(s.active, 0, "a modal pane decides its own keys");
+        s.route_key(key(KeyCode::F(3), KeyModifiers::NONE));
+        assert_eq!(s.active, 0, "including the function keys");
     }
 }

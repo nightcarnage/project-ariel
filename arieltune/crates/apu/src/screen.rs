@@ -769,16 +769,23 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
     let is_modal =
         app.patch_popup.is_some() || app.core_force_confirm || matches!(app.edit, Edit::Value(_));
     if !is_modal {
-        // The shell's global keys reach it only via Ignored: modified keys
-        // (Ctrl-Q quit, Ctrl-Tab cycle, Alt-1..4 jump), the function keys (F1-F4),
-        // and bare 1-4 (the suite's tab-switch shortcut). Panels are reached via
-        // bare Tab/BackTab; the pane uses only the remaining UNMODIFIED keys, so
-        // hand anything modified / function-key / a bare tab-digit back.
+        // The shell's global keys: modified keys (Ctrl-Q quit, Ctrl-Tab cycle, Alt-1..5
+        // jump), the function keys (F1-F5), and bare 1-5 (the suite's tab-switch
+        // shortcut). Panels are reached via bare Tab/BackTab; the pane uses only the
+        // remaining UNMODIFIED keys, so hand anything modified / function-key / a bare
+        // tab-digit back.
+        //
+        // **This list said `1'..='4'` until 2026-10-09**, written when the suite had
+        // four tabs, so this pane swallowed `5` and pressing 3 then 5 did nothing while
+        // every other pair worked. The shell now takes its own keys before offering
+        // them here (see `arieltune_tui_kit`'s routing note), so this hand-back is the
+        // second line rather than the first — but it has to be right either way, which
+        // is why it now names the same range the shell binds.
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
             || matches!(code, KeyCode::F(_))
-            || matches!(code, KeyCode::Char('1'..='4'))
+            || matches!(code, KeyCode::Char('1'..='5'))
         {
             return Outcome::Ignored;
         }

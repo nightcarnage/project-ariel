@@ -234,7 +234,11 @@ impl Screen for WikiScreen {
             KeyCode::Char('q') => Outcome::Quit,
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => Outcome::Quit,
             KeyCode::Esc => Outcome::Quit,
-            KeyCode::Tab => {
+            // Unmodified only: Ctrl-Tab / Ctrl-Shift-Tab cycle the *suite's* tabs, and
+            // without this guard they arrived here as a bare Tab and swapped focus
+            // instead. A pane has no way to know which chords belong to the shell, so
+            // it must not claim a modified key it has no binding for.
+            KeyCode::Tab if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.focus = if self.focus == Focus::Nav {
                     Focus::Content
                 } else {

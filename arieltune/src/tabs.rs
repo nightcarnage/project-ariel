@@ -128,6 +128,7 @@ fn tell_of(tell: apu::patches::Tell) -> snapshot::screen::Tell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     /// The injection is the one thing here that can fail silently: if it produced an
     /// empty series, the pane would say "no curated series is known for this kernel"
@@ -219,6 +220,80 @@ mod tests {
 
     /// The suite builds the SNAP pane with the series attached; the standalone binary
     /// builds it without. This is the suite's, so it must have them.
+    /// Every pane must hand back the shell's keys when asked directly.
+    ///
+    /// This is the test that was missing, and it is why the APU pane swallowed `5` from
+    /// the day SNAP became a tab: the shell's own tests use stubs that all return
+    /// `Ignored`, so they cannot see a greedy pane, and the APU pane's tests asserted
+    /// its own (wrong) range against itself. Nothing asked the *real* screens the
+    /// question, so nothing could notice that one of them answered it wrongly.
+    ///
+    /// It asks every pane for every shell key and reports all of them together, so a
+    /// sixth tab fails here rather than going quiet.
+    ///
+    /// A pane may answer a quit chord with `Outcome::Quit` — wiki's `Char('q')` arm has
+    /// no modifier guard, so Ctrl-Q quits there, which is what the shell would do
+    /// anyway. What no pane may do is *silently consume* a key it does not act on: that
+    /// is the failure mode that hides a tab jump, and it is invisible from inside the
+    /// pane.
+    #[test]
+    fn no_pane_swallows_a_shell_key() {
+        let mut swallowed: Vec<String> = Vec::new();
+
+        for (i, mut screen) in screens().into_iter().enumerate() {
+            let title = screen.title();
+            let tab = i + 1;
+
+            // Tab jumps: answered only by jumping. A pane that returns anything but
+            // Ignored here has taken a key it has no business taking.
+            for n in 1..=5u32 {
+                let digit = char::from_digit(n, 10).unwrap();
+                let keys = [
+                    (
+                        KeyCode::Char(digit),
+                        KeyModifiers::NONE,
+                        format!("'{digit}'"),
+                    ),
+                    (
+                        KeyCode::Char(digit),
+                        KeyModifiers::ALT,
+                        format!("Alt-'{digit}'"),
+                    ),
+                    (KeyCode::F(n as u8), KeyModifiers::NONE, format!("F{n}")),
+                ];
+                for (code, mods, what) in keys {
+                    if !matches!(screen.on_key(KeyEvent::new(code, mods)), Outcome::Ignored) {
+                        swallowed.push(format!("tab {tab} ({title}) took {what}"));
+                    }
+                }
+            }
+
+            // The shell's own chords: quitting or cycling are fine answers, silence is
+            // not.
+            let chords = [
+                (KeyCode::Char('q'), KeyModifiers::CONTROL, "Ctrl-Q"),
+                (KeyCode::Tab, KeyModifiers::CONTROL, "Ctrl-Tab"),
+                (KeyCode::BackTab, KeyModifiers::CONTROL, "Ctrl-Shift-Tab"),
+                (
+                    KeyCode::BackTab,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                    "Ctrl-BackTab",
+                ),
+            ];
+            for (code, mods, what) in chords {
+                if matches!(screen.on_key(KeyEvent::new(code, mods)), Outcome::Consumed) {
+                    swallowed.push(format!("tab {tab} ({title}) took {what}"));
+                }
+            }
+        }
+
+        assert!(
+            swallowed.is_empty(),
+            "the shell's keys must not be swallowed:\n  {}",
+            swallowed.join("\n  ")
+        );
+    }
+
     #[test]
     fn the_snap_pane_is_built_with_the_series() {
         let pane = snapshot::screen().with_series(kernel_series());

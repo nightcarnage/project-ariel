@@ -578,6 +578,18 @@ impl Screen for MemScreen {
             return Outcome::Consumed;
         }
 
+        // Only the unmodified keyboard is ours here. The shell's bindings are the
+        // modifier chords (Ctrl-Q, Ctrl-Tab, Alt-1..5) and this pane has no modified
+        // bindings of its own -- `big` above is SHIFT, which is how the steppers take a
+        // bigger step. `tune_key` dispatches on the code alone, so without this Ctrl-Tab
+        // arrived as a bare `Tab` and swapped focus instead of cycling tabs, and Ctrl-B
+        // would have started a benchmark.
+        if k.modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return Outcome::Ignored;
+        }
+
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => return Outcome::Quit,
             KeyCode::Char('b') => {

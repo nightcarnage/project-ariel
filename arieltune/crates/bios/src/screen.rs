@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arieltune_tui_kit::{Outcome, Screen};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
@@ -428,7 +428,9 @@ impl Screen for BiosScreen {
                 self.mode = Mode::Search(String::new());
                 self.status = "search: type to filter, Enter to keep, Esc to clear".into();
             }
-            KeyCode::Tab | KeyCode::BackTab => {
+            // Unmodified only -- see the note in the WIKI pane: Ctrl-Tab and
+            // Ctrl-Shift-Tab belong to the shell.
+            KeyCode::Tab | KeyCode::BackTab if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.focus = if self.focus == Focus::Nav {
                     Focus::Settings
                 } else {
