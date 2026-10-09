@@ -77,6 +77,10 @@ pub enum Focus {
 /// Matches WIKI's page step so paging feels the same in both.
 const PAGE: i32 = 15;
 
+/// Panel height the list will not give up: two border rows, the header, and at
+/// least three rows of data to choose from.
+const MIN_LIST_ROWS: u16 = 6;
+
 /// The pane's whole state.
 pub struct SnapshotScreen {
     pub paths: Paths,
@@ -90,6 +94,10 @@ pub struct SnapshotScreen {
     /// is read once per refresh and compared per row.
     pinned: Option<String>,
     selection: usize,
+    /// First list row drawn. Kept in step with `selection` by the renderer, which
+    /// is the only place that knows how many rows fit — without it the selection
+    /// walks off the bottom of the panel and the arrow keys look dead.
+    list_off: usize,
     /// Which region the arrows act on. Shown in the panel titles, so `Tab` never
     /// looks like it did nothing.
     focus: Focus,
@@ -127,6 +135,7 @@ impl SnapshotScreen {
             snapshots: Vec::new(),
             pinned: None,
             selection: 0,
+            list_off: 0,
             focus: Focus::List,
             // Provenance is the reason to look at a snapshot, so it starts up.
             detail: true,
@@ -471,8 +480,14 @@ impl Screen for SnapshotScreen {
 
         // Provenance is the point of this pane, so the panel is on by default and
         // `enter` grows it for reading a long manifest.
+        //
+        // Bounded, though: the panel asks for 55% of whatever is left, and on a
+        // short terminal that leaves the list one or two data rows. The list is how
+        // you choose what the panel describes, so it keeps a floor.
         let provenance = if self.detail {
-            (area.height * 55 / 100).max(6)
+            let wanted = (area.height * 55 / 100).max(6);
+            let ceiling = area.height.saturating_sub(MIN_LIST_ROWS + 3);
+            wanted.min(ceiling).max(4)
         } else {
             4
         };
@@ -508,7 +523,7 @@ impl SnapshotScreen {
     /// A table rather than a column of ids. The description is how a human
     /// recognises a snapshot and the date is how they place it; showing either
     /// only on demand means scrolling through hashes to find the one you mean.
-    fn draw_list(&self, f: &mut Frame, area: Rect) {
+    fn draw_list(&mut self, f: &mut Frame, area: Rect) {
         let id_w = self
             .snapshots
             .iter()
@@ -519,6 +534,11 @@ impl SnapshotScreen {
         let kernel_w = 21; // "7.2.9-1-cachyos-bore"
                            // The kernel column only earns its place when a description still fits.
         let show_kernel = area.width as usize >= 100;
+
+        // Two border rows plus the header line are not rows of data.
+        let visible = area.height.saturating_sub(3) as usize;
+        self.follow_selection(visible);
+        let total = self.snapshots.len();
 
         let mut lines: Vec<Line> = Vec::new();
         if self.snapshots.is_empty() {
@@ -541,7 +561,15 @@ impl SnapshotScreen {
             lines.push(Line::from(Span::styled(header, theme::dim())));
         }
 
-        for (index, snap) in self.snapshots.iter().enumerate() {
+        // The header stays put and only the rows scroll, so the columns keep their
+        // labels while the list moves.
+        for (index, snap) in self
+            .snapshots
+            .iter()
+            .enumerate()
+            .skip(self.list_off)
+            .take(visible)
+        {
             let selected = index == self.selection;
             let style = if selected {
                 theme::header()
@@ -588,9 +616,21 @@ impl SnapshotScreen {
             lines.push(Line::from(spans));
         }
 
+        // A scrolled list says where it is, so it cannot be mistaken for the whole
+        // short list. Same shape as the provenance panel's title.
+        let title = if visible > 0 && total > visible {
+            format!(
+                "{}  {}-{} of {}",
+                self.list_title(),
+                self.list_off + 1,
+                (self.list_off + visible).min(total),
+                total
+            )
+        } else {
+            self.list_title().to_string()
+        };
         f.render_widget(
-            Paragraph::new(lines)
-                .block(widgets::panel(self.list_title(), self.focus == Focus::List)),
+            Paragraph::new(lines).block(widgets::panel(&title, self.focus == Focus::List)),
             area,
         );
     }
@@ -743,6 +783,28 @@ impl SnapshotScreen {
         lines
     }
 
+    /// Move the selected row into the window, scrolling as little as possible.
+    ///
+    /// Called from the renderer because the panel height is only known there. The
+    /// alternative — a fixed page size in the selection code — would scroll by the
+    /// wrong amount on every terminal that is not the one it was written on.
+    fn follow_selection(&mut self, visible: usize) {
+        if self.snapshots.is_empty() || visible == 0 {
+            self.list_off = 0;
+            return;
+        }
+        if self.selection < self.list_off {
+            self.list_off = self.selection;
+        } else if self.selection >= self.list_off + visible {
+            self.list_off = self.selection + 1 - visible;
+        }
+        // Never leave a gap at the bottom: if the last row is on screen, the
+        // window is flush with the end of the list.
+        self.list_off = self
+            .list_off
+            .min(self.snapshots.len().saturating_sub(visible));
+    }
+
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let line = match &self.error {
             Some(err) => Line::from(Span::styled(format!("! {err}"), theme::header())),
@@ -878,11 +940,26 @@ mod tests {
 
     /// Two snapshots, neither booted, golden nor pinned, so actions are allowed.
     fn fixture(tag: &str) -> PathBuf {
+        fixture_ids(
+            tag,
+            &[
+                ("snap-aaaaaaaa", "2026-10-08"),
+                ("snap-bbbbbbbb", "2026-08-25"),
+            ],
+        )
+    }
+
+    /// The same shape with `n` snapshots, for testing a list longer than the panel.
+    fn fixture_many(tag: &str, n: usize) -> PathBuf {
+        let ids: Vec<String> = (0..n).map(|i| format!("snap-{i:08x}")).collect();
+        let pairs: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "2026-01-01")).collect();
+        fixture_ids(tag, &pairs)
+    }
+
+    fn fixture_ids(tag: &str, snapshots: &[(&str, &str)]) -> PathBuf {
         let root = temp_root(tag);
-        for (id, date) in [
-            ("snap-aaaaaaaa", "2026-10-08"),
-            ("snap-bbbbbbbb", "2026-08-25"),
-        ] {
+        for (id, date) in snapshots {
+            let (id, date) = (*id, *date);
             let snap = root.join(id);
             std::fs::create_dir_all(&snap).unwrap();
             // Modelled on a real manifest rather than the minimum: this pane's job
@@ -907,7 +984,7 @@ mod tests {
         // Real artefacts, so the pane shows a healthy snapshot as well as a
         // damaged one: a fixture where everything is missing only ever proves the
         // warnings render.
-        for id in ["snap-aaaaaaaa", "snap-bbbbbbbb"] {
+        for (id, _) in snapshots {
             std::fs::write(root.join(format!("boot/vmlinuz-{id}")), vec![0u8; 1024]).unwrap();
             std::fs::write(
                 root.join(format!("boot/initramfs-{id}.img")),
@@ -923,11 +1000,16 @@ mod tests {
             "BOOT_IMAGE=/boot/vmlinuz-linux-cachyos\n",
         )
         .unwrap();
+        // Only the first gets a menu entry, so the rest carry the "no GRUB entry"
+        // warning — one healthy snapshot is what the panel needs to show both.
+        let first = snapshots.first().map(|(id, _)| *id).unwrap_or("snap-none");
         std::fs::write(
             root.join("etc/grub.d/40_custom"),
-            "#!/bin/sh\nexec tail -n +3 $0\n\
-             # === snap-aaaaaaaa: snap-aaaaaaaa desc ===\n\
-             menuentry 'x' --id 'snap-aaaaaaaa' {\n}\n",
+            format!(
+                "#!/bin/sh\nexec tail -n +3 $0\n\
+                 # === {first}: {first} desc ===\n\
+                 menuentry 'x' --id '{first}' {{\n}}\n"
+            ),
         )
         .unwrap();
         root
@@ -997,6 +1079,85 @@ mod tests {
         s.select_next();
         s.select_next();
         assert_eq!(s.selection, 1, "cannot go past the last row");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The list has to scroll. With more rows than fit, moving down must bring the
+    /// selected row into view — otherwise the arrows silently highlight a row that
+    /// is not on screen, which is what the archive blade looks like (26 rows in a
+    /// panel that holds ten).
+    #[test]
+    fn the_list_scrolls_to_follow_the_selection() {
+        let root = fixture_many("overflow", 30);
+        let paths = Paths::under(&root);
+        let mut s = SnapshotScreen::with_runner(paths, Box::new(write::Recording::default()));
+        assert_eq!(s.snapshots.len(), 30);
+
+        // Taken from the model rather than hardcoded: `discover()` sorts newest
+        // first, so with equal timestamps the ids run descending and guessing
+        // which end is which is how this test was wrong the first time.
+        let first = s.snapshots.first().unwrap().id.clone();
+        let last = s.snapshots.last().unwrap().id.clone();
+
+        let text = render(&mut s, 100, 24);
+        assert!(text.contains(&first), "the top row starts visible");
+
+        // Every single step must leave the selection on screen, not just the last.
+        for _ in 0..29 {
+            s.on_key(key(KeyCode::Down));
+            let text = render(&mut s, 100, 24);
+            let id = s.selected_id().unwrap().to_string();
+            assert!(text.contains(&id), "the selected row {id} is off-screen");
+        }
+
+        assert_eq!(s.selected_id(), Some(last.as_str()), "at the end");
+        let text = render(&mut s, 100, 24);
+        assert!(
+            !text.contains(&first),
+            "the first row should have scrolled away"
+        );
+        // A scrolled list says so, or it looks like the whole store.
+        assert!(text.contains("of 30"), "the title should give the range");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Scrolling back up has to work too, and land flush at the top.
+    #[test]
+    fn the_list_scrolls_back_to_the_top() {
+        let root = fixture_many("scroll-back", 30);
+        let paths = Paths::under(&root);
+        let mut s = SnapshotScreen::with_runner(paths, Box::new(write::Recording::default()));
+        let first = s.snapshots.first().unwrap().id.clone();
+        let last = s.snapshots.last().unwrap().id.clone();
+
+        s.on_key(key(KeyCode::End));
+        assert_eq!(s.selected_id(), Some(last.as_str()));
+        assert!(render(&mut s, 100, 24).contains(&last));
+
+        s.on_key(key(KeyCode::Home));
+        let text = render(&mut s, 100, 24);
+        assert_eq!(s.selected_id(), Some(first.as_str()));
+        assert!(text.contains(&first), "back at the top");
+        assert_eq!(s.list_off, 0, "the window scrolled back to the start");
+        // The range stays — there are still 25 rows below — but it must start at
+        // the first row again. Only a list that fits drops the range entirely.
+        assert!(
+            text.contains("SNAPTUNE  1-"),
+            "the range should start at the first row again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A list that fits must not scroll at all, and must not claim a range.
+    #[test]
+    fn a_short_list_does_not_scroll() {
+        let (mut s, root) = screen("no-scroll");
+        s.on_key(key(KeyCode::End));
+        let text = render(&mut s, 120, 30);
+        assert!(text.contains("snap-aaaaaaaa"), "no scrolling was needed");
+        assert!(text.contains("snap-bbbbbbbb"));
+        assert!(text.contains("SNAPTUNE─"), "no range on a short list");
+        assert_eq!(s.list_off, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1342,6 +1503,34 @@ mod tests {
         s.select_next();
         println!("\n{}", render(&mut s, 120, 30));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The overflowing case, which the two-snapshot fixture cannot show.
+    ///
+    /// Worth having as a review aid: the whole point of the viewport is that the
+    /// selected row is on screen, and that is easier to see than to assert.
+    #[test]
+    #[ignore = "prints the pane for review; run with --ignored --nocapture"]
+    fn dump_scrolled_pane() {
+        let root = fixture_many("dump-scroll", 26);
+        let paths = Paths::under(&root);
+        let mut s = SnapshotScreen::with_runner(paths, Box::new(write::Recording::default()));
+        printed(
+            "a fresh pane -- the top of the list, and the range in the title",
+            &mut s,
+        );
+        for _ in 0..12 {
+            s.on_key(key(KeyCode::Down));
+        }
+        printed(
+            "after twelve downs -- the window has followed the selection",
+            &mut s,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn printed(what: &str, s: &mut SnapshotScreen) {
+        println!("\n--- {what} ---\n{}", render(s, 120, 30));
     }
 
     // ---- rendering ---------------------------------------------------------
