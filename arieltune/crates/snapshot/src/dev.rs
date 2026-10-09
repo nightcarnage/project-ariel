@@ -664,7 +664,14 @@ pub fn kver_from_member(member: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct DevPlan {
     pub tree: Tree,
-    pub running: Option<String>,
+    /// The kernel release the module must match.
+    ///
+    /// Not necessarily this machine's. `dev` reads it from the parent image and
+    /// `rebuild` from the snapshot being rebuilt, because the normal case is
+    /// building for a blade you are not standing on. Calling it "the target" and
+    /// saying so in the messages is what keeps that from reading as a claim about
+    /// the machine running the command.
+    pub target: Option<String>,
     /// `M=` targets, and the files that forced them.
     pub modules: Vec<String>,
     /// Changed files that a module rebuild would not capture.
@@ -674,14 +681,14 @@ pub struct DevPlan {
 }
 
 /// Work out the plan. Pure given an inspected tree.
-pub fn plan(tree: Tree, running: Option<String>) -> DevPlan {
+pub fn plan(tree: Tree, target: Option<String>) -> DevPlan {
     let (modules, elsewhere) = tree.build_set();
     let mut blockers = Vec::new();
 
-    match (&tree.release, &running) {
-        (Some(release), Some(running)) if release != running => blockers.push(format!(
-            "tree builds {release} but this machine runs {running} — \
-             the kernel would refuse the module (vermagic mismatch)"
+    match (&tree.release, &target) {
+        (Some(release), Some(target)) if release != target => blockers.push(format!(
+            "tree builds {release} but the module is wanted for {target} — \
+             that kernel would refuse it (vermagic mismatch)"
         )),
         // Equal releases: the normal case, nothing to say.
         (Some(_), Some(_)) => {}
@@ -713,7 +720,7 @@ pub fn plan(tree: Tree, running: Option<String>) -> DevPlan {
 
     DevPlan {
         tree,
-        running,
+        target,
         modules,
         elsewhere,
         blockers,
@@ -755,8 +762,8 @@ impl DevPlan {
                 self.tree.release.as_deref().unwrap_or("unknown")
             ),
             format!(
-                "running     {}",
-                self.running.as_deref().unwrap_or("unknown")
+                "target      {}",
+                self.target.as_deref().unwrap_or("unknown")
             ),
             format!("revision    {}", self.revision_line()),
         ];

@@ -515,6 +515,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             tree.as_deref(),
             description.as_deref(),
             dry_run,
+            json,
         ),
         Cmd::Create {
             description,
@@ -531,6 +532,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             from.as_deref(),
             for_release.as_deref(),
             dry_run,
+            json,
         ),
     }
 }
@@ -1222,12 +1224,14 @@ fn cmd_verify(store: &Store, id: Option<&str>, json: bool) -> Result<i32> {
 /// answering it against the running kernel would silently build for the wrong
 /// one whenever you are standing on a different snapshot — which, on a blade you
 /// are bisecting patches on, is most of the time.
+#[allow(clippy::too_many_arguments)]
 fn cmd_rebuild(
     store: &Store,
     id: &str,
     tree: Option<&Path>,
     description: Option<&str>,
     dry_run: bool,
+    json: bool,
 ) -> Result<i32> {
     let Some(snapshot) = store.get(id)? else {
         eprintln!("snapshot {id} not found in {}", store.paths.root.display());
@@ -1289,22 +1293,47 @@ fn cmd_rebuild(
 
     let plan = dev::plan(dev::inspect_tree(&tree_path)?, Some(release.clone()));
 
-    println!("rebuild plan — {id} (kernel {release})");
-    // The tree, release and revision come from `describe()` below; what only this
-    // verb knows is which image the rebuild derives from, so that is what the
-    // header says rather than repeating them.
-    println!("  derives from {}", parent_image.display());
-    for line in plan.describe() {
-        println!("{line}");
+    // One object on stdout and nothing else, the contract every other verb's
+    // `--json` keeps. Filled in as the run learns things, so each exit point below
+    // reports what it actually did rather than leaving the caller to infer it.
+    let mut out = serde_json::json!({
+        "id": id,
+        "release": release,
+        "tree": plan.tree.path,
+        "parent_image": parent_image,
+        "dry_run": dry_run,
+    });
+
+    if !json {
+        println!("rebuild plan — {id} (kernel {release})");
+        // The tree, release and revision come from `describe()` below; what only this
+        // verb knows is which image the rebuild derives from, so that is what the
+        // header says rather than repeating them.
+        println!("  derives from {}", parent_image.display());
+        for line in plan.describe() {
+            println!("{line}");
+        }
     }
 
     if !plan.can_build() {
-        println!("\nNothing was built and nothing was written.");
+        if json {
+            out["buildable"] = serde_json::json!(false);
+            out["blockers"] = serde_json::json!(plan.blockers);
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("\nNothing was built and nothing was written.");
+        }
         return Ok(2);
     }
 
     if dry_run {
-        println!("\n--dry-run: nothing was built and nothing was written.");
+        if json {
+            out["buildable"] = serde_json::json!(true);
+            out["built"] = serde_json::json!(false);
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("\n--dry-run: nothing was built and nothing was written.");
+        }
         return Ok(0);
     }
 
@@ -1323,28 +1352,43 @@ fn cmd_rebuild(
     };
 
     let prepared = dev::build(&plan.tree, &build_runner, &work)?;
-    println!(
-        "built       {} ({} bytes, stripped)",
-        prepared.source.display(),
-        prepared.raw_bytes
-    );
+    out["module"] = serde_json::json!(prepared.source);
+    out["module_md5"] = serde_json::json!(prepared.md5);
+    out["module_bytes"] = serde_json::json!(prepared.bytes.len());
+    if !json {
+        println!(
+            "built       {} ({} bytes, stripped)",
+            prepared.source.display(),
+            prepared.raw_bytes
+        );
+    }
 
     // Compared *before* deriving, and before anything is written: an unchanged
     // tree means there is nothing to rebuild, and the answer to "did my edit land"
     // is more useful as a sentence than as a second snapshot with the same
     // contents (which the content-addressed id would refuse as a duplicate).
+    out["previous_module_md5"] = serde_json::json!(manifest.module_md5());
     if let Some(recorded_md5) = manifest.module_md5() {
         if recorded_md5 == prepared.md5 {
-            println!();
-            println!(
-                "Nothing to rebuild: this tree already produces the module {id} holds \
-                 (md5 {recorded_md5})."
-            );
-            println!("{id} is unchanged, and no new snapshot was registered.");
+            if json {
+                out["built"] = serde_json::json!(true);
+                out["changed"] = serde_json::json!(false);
+                out["registered"] = serde_json::json!(null);
+                println!("{}", serde_json::to_string(&out)?);
+            } else {
+                println!();
+                println!(
+                    "Nothing to rebuild: this tree already produces the module {id} holds \
+                     (md5 {recorded_md5})."
+                );
+                println!("{id} is unchanged, and no new snapshot was registered.");
+            }
             return Ok(0);
         }
-        println!("module      {recorded_md5} -> {}", prepared.md5);
-    } else {
+        if !json {
+            println!("module      {recorded_md5} -> {}", prepared.md5);
+        }
+    } else if !json {
         println!(
             "module      {} (nothing recorded to compare against)",
             prepared.md5
@@ -1366,8 +1410,14 @@ fn cmd_rebuild(
             prepared.bytes.len()
         );
     }
-    println!("replaced    {member}");
-    println!("wrote       {}", dest.display());
+    out["member"] = serde_json::json!(member);
+    out["image"] = serde_json::json!(dest);
+    out["verified"] = serde_json::json!(true);
+    out["changed"] = serde_json::json!(true);
+    if !json {
+        println!("replaced    {member}");
+        println!("wrote       {}", dest.display());
+    }
 
     let description =
         description
@@ -1405,10 +1455,15 @@ fn cmd_rebuild(
         },
     )?;
 
-    println!();
-    println!("Registered: {new_id}");
-    println!("{id} was not modified; its module and image are as they were.");
-    println!("`snaptune boot {new_id}` tests it once. `snaptune verify {new_id}` checks it.");
+    out["registered"] = serde_json::json!(new_id);
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!();
+        println!("Registered: {new_id}");
+        println!("{id} was not modified; its module and image are as they were.");
+        println!("`snaptune boot {new_id}` tests it once. `snaptune verify {new_id}` checks it.");
+    }
     Ok(0)
 }
 
@@ -1418,6 +1473,7 @@ fn cmd_rebuild(
 /// different default parent: where the dev loop always derives from a snapshot or an
 /// image you name, this derives from the running kernel's own initramfs and can take
 /// the module straight off the installed system.
+#[allow(clippy::too_many_arguments)]
 fn cmd_create(
     store: &Store,
     description: &str,
@@ -1426,6 +1482,7 @@ fn cmd_create(
     from: Option<&Path>,
     for_release: Option<&str>,
     dry_run: bool,
+    json: bool,
 ) -> Result<i32> {
     // An explicit `--for` wins; otherwise this machine's kernel, which is the right
     // answer exactly when you are standing on the machine you are snapshotting —
@@ -1477,27 +1534,53 @@ fn cmd_create(
         }
     };
 
-    println!("create plan — {description}");
-    println!("  release     {release}");
-    println!("  derives     {}", base.display());
-    match &source {
-        ModuleSource::Tree(_) => println!("  module      built from the tree below"),
-        ModuleSource::Adopted(path) => {
-            println!("  module      {} (adopted byte-for-byte)", path.display());
+    // One object on stdout and nothing else when `--json` is asked for, the same
+    // contract the other verbs keep. Filled in as the run learns things.
+    let mut out = serde_json::json!({
+        "description": description,
+        "release": release,
+        "base_image": base,
+        "module_source": source.kind(),
+        "dry_run": dry_run,
+    });
+
+    if !json {
+        println!("create plan — {description}");
+        println!("  release     {release}");
+        println!("  derives     {}", base.display());
+        match &source {
+            ModuleSource::Tree(_) => println!("  module      built from the tree below"),
+            ModuleSource::Adopted(path) => {
+                println!("  module      {} (adopted byte-for-byte)", path.display());
+            }
+        }
+        if let ModuleSource::Tree(plan) = &source {
+            for line in plan.describe() {
+                println!("{line}");
+            }
         }
     }
+
     if let ModuleSource::Tree(plan) = &source {
-        for line in plan.describe() {
-            println!("{line}");
-        }
         if !plan.can_build() {
-            println!("\nNothing was built and nothing was written.");
+            if json {
+                out["buildable"] = serde_json::json!(false);
+                out["blockers"] = serde_json::json!(plan.blockers);
+                println!("{}", serde_json::to_string(&out)?);
+            } else {
+                println!("\nNothing was built and nothing was written.");
+            }
             return Ok(2);
         }
     }
 
     if dry_run {
-        println!("\n--dry-run: nothing was built and nothing was written.");
+        if json {
+            out["built"] = serde_json::json!(false);
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("\n--dry-run: nothing was built and nothing was written.");
+        }
         return Ok(0);
     }
 
@@ -1524,11 +1607,15 @@ fn cmd_create(
             Vec::new(),
         ),
     };
-    println!(
-        "module      {} ({} bytes compressed)",
-        prepared.md5,
-        prepared.bytes.len()
-    );
+    out["module_md5"] = serde_json::json!(prepared.md5);
+    out["module_bytes"] = serde_json::json!(prepared.bytes.len());
+    if !json {
+        println!(
+            "module      {} ({} bytes compressed)",
+            prepared.md5,
+            prepared.bytes.len()
+        );
+    }
 
     let dest = work.join("created.img");
     let (member, _derived) = dev::assemble(&base, &prepared, &dest, &work)?;
@@ -1549,8 +1636,13 @@ fn cmd_create(
             prepared.bytes.len()
         );
     }
-    println!("replaced    {member}");
-    println!("wrote       {}", dest.display());
+    out["member"] = serde_json::json!(member);
+    out["image"] = serde_json::json!(dest);
+    out["verified"] = serde_json::json!(true);
+    if !json {
+        println!("replaced    {member}");
+        println!("wrote       {}", dest.display());
+    }
 
     // The shell marks the first snapshot a store ever holds as its baseline. A store
     // with no marker is one whose baseline is undecided, and `list` shows the column.
@@ -1560,7 +1652,7 @@ fn cmd_create(
     } else {
         register::STATUS_ACTIVE
     };
-    if golden {
+    if golden && !json {
         println!("golden      this is the first snapshot in the store, so it becomes the baseline");
     }
 
@@ -1592,12 +1684,18 @@ fn cmd_create(
         },
     )?;
 
-    println!();
-    println!("Created: {id}");
-    println!("This is NOT the GRUB default.");
-    println!("  `snaptune boot {id}`   tests it once, reverting by itself");
-    println!("  `snaptune verify {id}` checks it against what is on disk");
-    println!("  `snaptune pin {id}`    makes it the permanent default");
+    out["golden"] = serde_json::json!(golden);
+    out["registered"] = serde_json::json!(id);
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!();
+        println!("Created: {id}");
+        println!("This is NOT the GRUB default.");
+        println!("  `snaptune boot {id}`   tests it once, reverting by itself");
+        println!("  `snaptune verify {id}` checks it against what is on disk");
+        println!("  `snaptune pin {id}`    makes it the permanent default");
+    }
     Ok(0)
 }
 
@@ -1607,6 +1705,17 @@ enum ModuleSource {
     Tree(dev::DevPlan),
     /// Taken as it stands: the installed module, or one named with `--module`.
     Adopted(PathBuf),
+}
+
+impl ModuleSource {
+    /// The value `--json` reports. A stable word rather than the path, because what a
+    /// caller needs to know is which of the three routes was taken.
+    fn kind(&self) -> &'static str {
+        match self {
+            ModuleSource::Tree(_) => "tree",
+            ModuleSource::Adopted(_) => "adopted",
+        }
+    }
 }
 
 /// One field that differs between two snapshots.
@@ -2290,7 +2399,7 @@ mod tests {
             &manifest_no_tree("snap-aaaaaaaa"),
             false,
         );
-        let rc = cmd_rebuild(&store, "snap-bbbbbbbb", None, None, false).unwrap();
+        let rc = cmd_rebuild(&store, "snap-bbbbbbbb", None, None, false, false).unwrap();
         assert_eq!(rc, 1);
     }
 
@@ -2305,7 +2414,7 @@ mod tests {
             &manifest_no_tree("snap-aaaaaaaa"),
             false,
         );
-        let err = cmd_rebuild(&store, "snap-aaaaaaaa", None, None, false).unwrap_err();
+        let err = cmd_rebuild(&store, "snap-aaaaaaaa", None, None, false, false).unwrap_err();
         let text = format!("{err}");
         assert!(text.contains("does not record a source tree"), "{text}");
         assert!(text.contains("--tree"), "it must say how to fix it: {text}");
@@ -2323,7 +2432,8 @@ mod tests {
         );
         let missing = std::env::temp_dir().join("snapcli-no-such-tree");
         let _ = std::fs::remove_dir_all(&missing);
-        let err = cmd_rebuild(&store, "snap-aaaaaaaa", Some(&missing), None, false).unwrap_err();
+        let err =
+            cmd_rebuild(&store, "snap-aaaaaaaa", Some(&missing), None, false, false).unwrap_err();
         let text = format!("{err}");
         assert!(text.contains("not there"), "{text}");
         assert!(text.contains("Nothing was built"), "{text}");
@@ -2362,7 +2472,7 @@ mod tests {
         std::fs::create_dir_all(tree.join("include/config")).unwrap();
         std::fs::write(tree.join("include/config/kernel.release"), b"9.9.9-nope\n").unwrap();
 
-        let rc = cmd_rebuild(&store, id, Some(&tree), None, false).unwrap();
+        let rc = cmd_rebuild(&store, id, Some(&tree), None, false, false).unwrap();
 
         assert_eq!(rc, 2, "a tree built for another kernel is a refusal");
         let after = std::fs::read_dir(&store.paths.root).unwrap().count();
@@ -2396,7 +2506,7 @@ mod tests {
         );
         let before = std::fs::read_dir(&store.paths.root).unwrap().count();
 
-        let err = cmd_rebuild(&store, id, Some(&tree), None, false).unwrap_err();
+        let err = cmd_rebuild(&store, id, Some(&tree), None, false, false).unwrap_err();
         let text = format!("{err}");
         assert!(text.contains(".config"), "{text}");
 
@@ -2524,6 +2634,7 @@ mod tests {
             Some(&missing),
             Some("7.2.9-1-cachyos-bore"),
             false,
+            false,
         )
         .unwrap_err();
         let text = format!("{err}");
@@ -2552,6 +2663,7 @@ mod tests {
             None,
             Some(&base),
             Some("9.9.9-no-such-kernel"),
+            false,
             false,
         )
         .unwrap_err();
@@ -2585,6 +2697,7 @@ mod tests {
             Some(&dir.join("whatever.img")),
             Some("7.2.9-1-cachyos-bore"),
             true,
+            false,
         );
 
         assert!(
