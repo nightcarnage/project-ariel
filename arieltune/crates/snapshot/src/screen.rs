@@ -13,6 +13,16 @@
 //! shows the plan in a confirmation popup before anything is written. The
 //! destructive verbs stay in the CLI.
 //!
+//! ## Keys
+//!
+//! Deliberately the same vocabulary as every other pane, because a tab that
+//! answers to its own private keys is a tab people stop visiting. Bare `q` (or
+//! `Esc`, or Ctrl-C) leaves the suite, exactly as WIKI and MEM behave. `Tab`
+//! moves focus between the list and the provenance panel, and the navigation keys
+//! act on whichever one holds focus — the habit APU and WIKI establish. Digits
+//! `1`-`5` and anything with Ctrl/Alt are handed back to the shell, so switching
+//! tabs works here as it does everywhere else.
+//!
 //! ## Why the logic is not in `draw`
 //!
 //! Selection, filtering and the pending-action state are plain data with plain
@@ -23,7 +33,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use arieltune_tui_kit::{theme, widgets, Outcome, Screen};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
@@ -52,6 +62,21 @@ impl Pending {
     }
 }
 
+/// Which of the pane's two regions the navigation keys act on.
+///
+/// The suite's panes all work this way — WIKI toggles `Nav`/`Content`, APU cycles
+/// five panels — so `Tab` then arrows is one habit across every tab rather than a
+/// separate one to learn here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    Provenance,
+}
+
+/// Rows the list moves, and lines the panel scrolls, for one `PgUp`/`PgDn`.
+/// Matches WIKI's page step so paging feels the same in both.
+const PAGE: i32 = 15;
+
 /// The pane's whole state.
 pub struct SnapshotScreen {
     pub paths: Paths,
@@ -65,6 +90,9 @@ pub struct SnapshotScreen {
     /// is read once per refresh and compared per row.
     pinned: Option<String>,
     selection: usize,
+    /// Which region the arrows act on. Shown in the panel titles, so `Tab` never
+    /// looks like it did nothing.
+    focus: Focus,
     /// `enter` grows the provenance panel; while it is up, PgUp/PgDn read it.
     detail: bool,
     /// First provenance line shown, so a manifest longer than the panel is still
@@ -99,6 +127,7 @@ impl SnapshotScreen {
             snapshots: Vec::new(),
             pinned: None,
             selection: 0,
+            focus: Focus::List,
             // Provenance is the reason to look at a snapshot, so it starts up.
             detail: true,
             detail_scroll: 0,
@@ -159,14 +188,20 @@ impl SnapshotScreen {
     }
 
     pub fn select_next(&mut self) {
-        if !self.snapshots.is_empty() {
-            self.selection = (self.selection + 1).min(self.snapshots.len() - 1);
-            self.detail_scroll = 0;
-        }
+        self.move_selection(1);
     }
 
     pub fn select_prev(&mut self) {
-        self.selection = self.selection.saturating_sub(1);
+        self.move_selection(-1);
+    }
+
+    /// Move the selection by `delta` rows, clamped to the list.
+    pub fn move_selection(&mut self, delta: i32) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        let last = (self.snapshots.len() - 1) as i32;
+        self.selection = (self.selection as i32 + delta).clamp(0, last) as usize;
         // A scroll offset from the previous snapshot would open the new one
         // half-read, which looks like missing data.
         self.detail_scroll = 0;
@@ -179,9 +214,63 @@ impl SnapshotScreen {
         self.detail_scroll = next.max(0) as usize;
     }
 
+    /// Which region has focus.
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// Move focus to the other region.
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::List => Focus::Provenance,
+            Focus::Provenance => Focus::List,
+        };
+    }
+
+    /// Navigate whichever region has focus. One entry point, so `Tab` is the only
+    /// thing that decides where an arrow goes.
+    pub fn step(&mut self, delta: i32) {
+        match self.focus {
+            Focus::List => self.move_selection(delta),
+            Focus::Provenance => self.scroll_detail(delta),
+        }
+    }
+
+    /// `Home`/`g`: the top of the focused region.
+    pub fn to_start(&mut self) {
+        match self.focus {
+            Focus::List => {
+                self.selection = 0;
+                self.detail_scroll = 0;
+            }
+            Focus::Provenance => self.detail_scroll = 0,
+        }
+    }
+
+    /// `End`/`G`: the bottom of the focused region.
+    pub fn to_end(&mut self) {
+        match self.focus {
+            Focus::List => {
+                self.selection = self.snapshots.len().saturating_sub(1);
+                self.detail_scroll = 0;
+            }
+            // Aim past the end and let the renderer clamp, rather than guessing
+            // the panel height here. `usize::MAX` would overflow the arithmetic
+            // in `scroll_detail`, so aim at the real line count.
+            Focus::Provenance => self.detail_scroll = self.provenance_lines().len(),
+        }
+    }
+
     pub fn toggle_detail(&mut self) {
         self.detail = !self.detail;
         self.detail_scroll = 0;
+        // Expanding the panel is a request to read it, so focus follows the
+        // intent — the same move WIKI makes when `Enter` jumps to the content.
+        self.focus = if self.detail {
+            Focus::Provenance
+        } else {
+            Focus::List
+        };
     }
 
     /// Ask for an action. Nothing is written until [`SnapshotScreen::confirm`].
@@ -251,7 +340,7 @@ impl SnapshotScreen {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "y to apply, n or Esc to cancel",
+            "y to apply · n, q or Esc to cancel",
             theme::dim(),
         )));
         lines
@@ -277,81 +366,98 @@ impl Screen for SnapshotScreen {
     }
 
     fn status_hint(&self) -> Option<String> {
-        Some(
-            "↑↓ move · enter detail · PgUp/PgDn scroll · p/P pin/unpin · h/H hide/unhide · r refresh"
-                .to_string(),
-        )
+        // Describes the region that currently has focus, so the keys on screen are
+        // the ones that will actually do something.
+        Some(match self.focus {
+            Focus::List => {
+                "list: ↑↓ move · tab provenance · enter detail · p/P pin/unpin · h/H hide/unhide · r refresh"
+                    .to_string()
+            }
+            Focus::Provenance => {
+                "provenance: ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · tab list".to_string()
+            }
+        })
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Outcome {
         // While confirming, the popup owns the keyboard — including digits and
-        // q, which is why `modal()` also reports true.
+        // `q`, which is why `modal()` also reports true.
         if self.is_confirming() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm();
-                    Outcome::Consumed
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(),
+                // `q` backs out here as it does in APU's and MEM's popups. Without
+                // it, the key that quits every other screen would do nothing at
+                // all on the one screen that writes to /boot.
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
+                    self.cancel()
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.cancel();
-                    Outcome::Consumed
-                }
-                _ => Outcome::Consumed,
+                // Anything else is swallowed rather than acted on: a stray key
+                // must not answer a question about writing to /boot.
+                _ => {}
             }
-        } else {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.select_prev();
-                    Outcome::Consumed
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.select_next();
-                    Outcome::Consumed
-                }
-                KeyCode::Enter => {
-                    self.toggle_detail();
-                    Outcome::Consumed
-                }
-                KeyCode::Char('r') => {
-                    self.refresh();
-                    Outcome::Consumed
-                }
-                KeyCode::PageDown => {
-                    self.scroll_detail(5);
-                    Outcome::Consumed
-                }
-                KeyCode::PageUp => {
-                    self.scroll_detail(-5);
-                    Outcome::Consumed
-                }
-                KeyCode::Char('p') => {
-                    if let Some(id) = self.selected_id() {
-                        let id = id.to_string();
-                        self.request(Pending::Pin(id));
-                    }
-                    Outcome::Consumed
-                }
-                KeyCode::Char('P') => {
-                    self.request(Pending::Unpin);
-                    Outcome::Consumed
-                }
-                KeyCode::Char('h') => {
-                    if let Some(id) = self.selected_id() {
-                        let id = id.to_string();
-                        self.request(Pending::Hide(id));
-                    }
-                    Outcome::Consumed
-                }
-                KeyCode::Char('H') => {
-                    if let Some(id) = self.selected_id() {
-                        let id = id.to_string();
-                        self.request(Pending::Unhide(id));
-                    }
-                    Outcome::Consumed
-                }
-                _ => Outcome::Ignored,
-            }
+            return Outcome::Consumed;
         }
+
+        // Ctrl-C quits, as it does in WIKI. Checked before the hand-back below,
+        // which would otherwise give it to the shell, where nothing is bound.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Outcome::Quit;
+        }
+
+        // Hand the shell's globals back untouched: modified keys (Ctrl-Q quit,
+        // Ctrl-Tab cycle, Alt-1..5), the function keys, and bare 1-5. This check
+        // has to come first — `Char('p')` matches Ctrl-P too, and arming a pin
+        // from a stray chord is exactly the accident the ordering prevents.
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            || matches!(key.code, KeyCode::F(_))
+            || matches!(key.code, KeyCode::Char('1'..='5'))
+        {
+            return Outcome::Ignored;
+        }
+
+        match key.code {
+            // Bare `q` or `Esc` leaves the suite, the way WIKI and MEM do. The
+            // shell's Ctrl-Q remains the always-available alternative.
+            KeyCode::Char('q') | KeyCode::Esc => return Outcome::Quit,
+
+            // Focus first, then navigate the focused region.
+            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
+            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.step(1),
+            KeyCode::PageUp => self.step(-PAGE),
+            KeyCode::PageDown => self.step(PAGE),
+            KeyCode::Home | KeyCode::Char('g') => self.to_start(),
+            KeyCode::End | KeyCode::Char('G') => self.to_end(),
+
+            // This pane's own verbs.
+            KeyCode::Enter => self.toggle_detail(),
+            KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('p') => {
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    self.request(Pending::Pin(id));
+                }
+            }
+            KeyCode::Char('P') => self.request(Pending::Unpin),
+            KeyCode::Char('h') => {
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    self.request(Pending::Hide(id));
+                }
+            }
+            KeyCode::Char('H') => {
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    self.request(Pending::Unhide(id));
+                }
+            }
+
+            // Anything else falls through so the shell can switch tabs / quit.
+            _ => return Outcome::Ignored,
+        }
+        Outcome::Consumed
     }
 
     fn draw(&mut self, f: &mut Frame, area: Rect) {
@@ -483,9 +589,31 @@ impl SnapshotScreen {
         }
 
         f.render_widget(
-            Paragraph::new(lines).block(widgets::panel("SNAPTUNE", true)),
+            Paragraph::new(lines)
+                .block(widgets::panel(self.list_title(), self.focus == Focus::List)),
             area,
         );
+    }
+
+    /// The list panel's title, marked when it holds focus.
+    ///
+    /// The `▸` is APU's convention for the focused panel; without some mark, `Tab`
+    /// only changes a colour and looks like it did nothing.
+    fn list_title(&self) -> &'static str {
+        if self.focus == Focus::List {
+            "▸ SNAPTUNE"
+        } else {
+            "SNAPTUNE"
+        }
+    }
+
+    /// The provenance panel's title, marked when it holds focus.
+    fn provenance_title(&self, base: &str) -> String {
+        if self.focus == Focus::Provenance {
+            format!("▸ {base}")
+        } else {
+            base.to_string()
+        }
     }
 
     /// The provenance panel for the selected snapshot.
@@ -515,7 +643,10 @@ impl SnapshotScreen {
         };
 
         f.render_widget(
-            Paragraph::new(shown).block(widgets::panel(&title, false)),
+            Paragraph::new(shown).block(widgets::panel(
+                &self.provenance_title(&title),
+                self.focus == Focus::Provenance,
+            )),
             area,
         );
     }
@@ -726,6 +857,14 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "snapshot-screen-test-{}-{}",
@@ -932,6 +1071,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The popup swallows everything it does not act on — a stray key must never
+    /// answer a question about writing to /boot — but `q` backs out, like APU's
+    /// and MEM's popups.
+    #[test]
+    fn a_popup_swallows_stray_keys_but_q_cancels() {
+        let (mut s, root) = screen("popup-keys");
+        let id = s.selected_id().unwrap().to_string();
+        s.on_key(key(KeyCode::Char('h')));
+        assert!(s.is_confirming());
+
+        // A stray digit must not switch tabs out from under the question.
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('3'))),
+            Outcome::Consumed
+        ));
+        assert!(s.is_confirming(), "still asking");
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('q'))),
+            Outcome::Consumed
+        ));
+        assert!(!s.is_confirming(), "q cancels");
+        assert!(
+            root.join(&id).join("manifest.yaml").is_file(),
+            "nothing written"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn unrelated_keys_are_left_for_the_shell() {
         let (mut s, root) = screen("ignored");
@@ -939,7 +1106,156 @@ mod tests {
             s.on_key(key(KeyCode::Char('9'))),
             Outcome::Ignored
         ));
-        assert!(matches!(s.on_key(key(KeyCode::Tab)), Outcome::Ignored));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every other pane quits on a bare `q`. This one used to answer only to
+    /// Ctrl-Q, which made the last tab the odd one out.
+    #[test]
+    fn bare_q_quits_like_the_other_tabs() {
+        let (mut s, root) = screen("quit-q");
+        assert!(matches!(s.on_key(key(KeyCode::Char('q'))), Outcome::Quit));
+        assert!(matches!(s.on_key(key(KeyCode::Esc)), Outcome::Quit));
+        assert!(matches!(s.on_key(ctrl('c')), Outcome::Quit));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shell's globals must still get through: tab switching, F-keys, and
+    /// Ctrl/Alt chords — including Ctrl-Q, the always-available quit.
+    #[test]
+    fn the_shell_keeps_its_global_keys() {
+        let (mut s, root) = screen("handback");
+        for k in [
+            ctrl('q'),
+            ctrl('1'),
+            alt('5'),
+            key(KeyCode::F(5)),
+            key(KeyCode::Char('1')),
+            key(KeyCode::Char('5')),
+            ctrl('p'),
+            ctrl('h'),
+        ] {
+            assert!(
+                matches!(s.on_key(k), Outcome::Ignored),
+                "the shell should have seen {k:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The reason modified keys are handed back *before* the pane's own bindings:
+    /// `Char('p')` matches Ctrl-P too, and arming a pin from a stray chord would
+    /// put a write-to-/boot confirmation in front of someone who pressed Ctrl-P.
+    #[test]
+    fn a_modified_letter_does_not_arm_an_action() {
+        let (mut s, root) = screen("chord");
+        for k in [ctrl('p'), ctrl('h'), alt('p'), alt('H')] {
+            s.on_key(k);
+            assert!(!s.is_confirming(), "{k:?} armed a confirmation");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tab_moves_focus_between_the_two_regions() {
+        let (mut s, root) = screen("focus");
+        assert_eq!(s.focus(), Focus::List);
+        assert!(matches!(s.on_key(key(KeyCode::Tab)), Outcome::Consumed));
+        assert_eq!(s.focus(), Focus::Provenance);
+        s.on_key(key(KeyCode::BackTab));
+        assert_eq!(s.focus(), Focus::List);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Tab` only changes a colour unless the pane says which region has focus, so
+    /// the marker has to actually appear.
+    #[test]
+    fn the_focused_panel_is_marked() {
+        let (mut s, root) = screen("marker");
+        let text = render(&mut s, 120, 30);
+        assert!(text.contains("▸ SNAPTUNE"), "the list should be marked");
+
+        s.on_key(key(KeyCode::Tab));
+        let text = render(&mut s, 120, 30);
+        assert!(!text.contains("▸ SNAPTUNE"), "the list gave up focus");
+        assert!(text.contains("▸ provenance"), "the panel should be marked");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The arrows act on whichever region has focus — the WIKI/APU habit.
+    #[test]
+    fn arrows_navigate_the_focused_region() {
+        let (mut s, root) = screen("navigate");
+
+        // List focused: the arrows move the selection, not the panel.
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.selected_id(), Some("snap-bbbbbbbb"));
+        assert_eq!(s.detail_scroll, 0);
+
+        // Panel focused: the same key scrolls instead.
+        s.on_key(key(KeyCode::Tab));
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.detail_scroll, 1);
+        assert_eq!(s.selected_id(), Some("snap-bbbbbbbb"), "selection held");
+
+        // `k`/`j` are the same keys as the arrows, everywhere in the suite.
+        s.on_key(key(KeyCode::Char('k')));
+        assert_eq!(s.detail_scroll, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paging_moves_by_a_page_in_the_focused_region() {
+        let (mut s, root) = screen("page");
+        s.on_key(key(KeyCode::PageDown));
+        assert_eq!(s.selected_id(), Some("snap-bbbbbbbb"), "one row is the end");
+
+        s.on_key(key(KeyCode::Tab));
+        s.on_key(key(KeyCode::PageDown));
+        assert_eq!(s.detail_scroll, PAGE as usize);
+        s.on_key(key(KeyCode::PageUp));
+        assert_eq!(s.detail_scroll, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn home_and_end_jump_the_list() {
+        let (mut s, root) = screen("jump");
+        s.on_key(key(KeyCode::End));
+        assert_eq!(s.selected_id(), Some("snap-bbbbbbbb"));
+        s.on_key(key(KeyCode::Home));
+        assert_eq!(s.selected_id(), Some("snap-aaaaaaaa"));
+        // `g`/`G` are the same jumps, as in APU's popup.
+        s.on_key(key(KeyCode::Char('G')));
+        assert_eq!(s.selected_id(), Some("snap-bbbbbbbb"));
+        s.on_key(key(KeyCode::Char('g')));
+        assert_eq!(s.selected_id(), Some("snap-aaaaaaaa"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `End` in the panel must not overflow the scroll arithmetic on the way back.
+    #[test]
+    fn jumping_to_the_end_of_the_panel_is_reversible() {
+        let (mut s, root) = screen("panel-end");
+        s.on_key(key(KeyCode::Tab));
+        s.on_key(key(KeyCode::End));
+        s.on_key(key(KeyCode::Up));
+        assert!(s.detail_scroll > 0, "still near the bottom");
+        s.on_key(key(KeyCode::Home));
+        assert_eq!(s.detail_scroll, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enter_expands_the_panel_and_focuses_it() {
+        let (mut s, root) = screen("enter");
+        assert_eq!(s.focus(), Focus::List);
+        s.on_key(key(KeyCode::Enter));
+        assert!(!s.detail, "enter collapsed the panel");
+        assert_eq!(s.focus(), Focus::List, "collapsing returns to the list");
+        s.on_key(key(KeyCode::Enter));
+        assert!(s.detail, "enter expands it again");
+        assert_eq!(s.focus(), Focus::Provenance, "expanding means reading it");
         let _ = std::fs::remove_dir_all(&root);
     }
 
