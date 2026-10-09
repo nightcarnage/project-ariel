@@ -243,7 +243,7 @@ porting before that step is safe.
 | `preserve [label]` (`save`, `backup`) | copy the current initramfs aside as a rescue image | `/boot` | yes |
 | `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
 | `boot --entry <grub-id>` | the same, into *any* GRUB entry — the distro's kernel, LTS, rescue | grubenv | yes |
-| `grub-flatten` | a flat, unthemed menu; re-lists and counts what is left | `grub_defaults` + `grub_cfg` | yes |
+| `grub-flatten` / `--restore` | a flat, unthemed menu — or the distro's submenus back | `grub_defaults` + `grub_cfg` | yes |
 | `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
 | `hide <id>` / `unhide <id>` | off/on the list and the menu; files kept | manifest rename | yes |
 | `prune <id>` (`delete`, `rm`) | delete files, directory and entry | everything | yes |
@@ -569,7 +569,7 @@ recollection of it. This is the table to work from before retiring `snapshot`.
 | `diff` | same | reads the manifests, so it works with no source tree |
 | `boot`, `reboot <id>` | `boot <id> [--reboot]` | **differs**: see below |
 | `boot --entry <grub-id>` | same | nested entries by path, which the shell refused |
-| `grub-flatten` | same | re-reads `grub.cfg` and counts what is left |
+| `grub-flatten` | same (+ `--restore`) | re-reads `grub.cfg` and counts what is left |
 | `grub-list`, `grublist`, `grub-entries`, `grub` | same, all four | |
 | `pin`, `default`, `set-default` | same, all three | |
 | `unpin` | same | |
@@ -592,9 +592,10 @@ Environment, from the shell's own help and its `README.md`:
 |---|---|
 | `SOURCE_TREE=<path>` | still honoured, and `SNAPSHOT_TREE` is the name to prefer. An empty value is ignored, because `bootstrap.sh` sets `SOURCE_TREE=""` before filling it in |
 | `SNAPSHOT_KEEP_THEME=1` | same |
+| `SNAPSHOT_KEEP_FLAT=1` | **no equivalent, and no need** — see below |
 | `PINNED_VMLINUZ=<path>` | **no equivalent** — see below |
 
-Three verbs are ported but **deliberately not identical**, and none of the three is a
+Four verbs are ported but **deliberately not identical**, and none of the four is a
 gap:
 
 - **`boot` does not reboot.** The shell's `boot` and `reboot` both arm *and* restart.
@@ -606,6 +607,20 @@ gap:
   rather than regenerated. Same tree, same toolchain, same config, one member changed.
 - **`rebuild` does not overwrite** (§6.2): it registers a new snapshot and leaves the
   original alone, so the id keeps describing the content.
+- **Nothing here changes the menu's shape on its own.** The shell's `pin` also restores
+  the distro's GRUB submenus and comments out the theme, as a side effect of pinning.
+  Those are `grub-flatten` and `grub-flatten --restore` here, so a pin pins. That is
+  also why `SNAPSHOT_KEEP_FLAT=1` has no meaning: it exists to stop the shell's implicit
+  un-flattening, and there is no implicit un-flattening to stop.
+
+  Flattening deserves the warning the shell learned the hard way: `10_linux` enumerates
+  every `/boot/vmlinuz-*` with no exclusion list, so it emits an entry for each
+  `vmlinuz-snap-*` as well, and those live inside the distro's "Advanced options"
+  submenu. Flattening promotes all of them to the top level — on a store with 26
+  snapshots that is 26 extra rows, and the `10_linux` twin of each snapshot is the
+  *worse* of the pair, with no `--id` and no `BOOT_IMAGE=`. Blade 115's menu is
+  already in that state, which is why it lists each snapshot twice. `--restore` is the
+  way back.
 
 `PINNED_VMLINUZ` is the one environment variable with no home here. It names the
 kernel image a snapshot boots; the kernel is derived from the release's `pkgbase`,

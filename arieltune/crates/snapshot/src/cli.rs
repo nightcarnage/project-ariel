@@ -566,19 +566,33 @@ pub enum Cmd {
         dry_run: bool,
     },
 
-    /// Flatten the GRUB menu, and drop the theme.
+    /// Flatten the GRUB menu, and drop the theme — or put the submenus back.
     ///
     /// Sets `GRUB_DISABLE_SUBMENU='true'` so every entry sits at the top level, and
-    /// comments out `GRUB_THEME` — a themed menu shows about seven rows at 720p,
-    /// which is not enough to see the entries you are choosing between. Set
-    /// `SNAPSHOT_KEEP_THEME=1` to keep the theme.
+    /// comments out `GRUB_THEME`: the stock theme's boot menu leaves about seven
+    /// visible rows at 1280x720, which is not enough to see the entries you are
+    /// choosing between. `SNAPSHOT_KEEP_THEME=1` keeps the theme.
     ///
-    /// Regenerates `grub.cfg` and then **reads it back** to report how many submenus
-    /// are actually left, because writing the setting is not the menu changing.
-    /// Flattening is also what makes `boot --entry` accept a bare nested id: once an
-    /// entry is top level there is no submenu path to need.
+    /// **Flattening costs more than it looks.** `10_linux` enumerates every
+    /// `/boot/vmlinuz-*` with no exclusion list, so it emits an entry for each
+    /// `vmlinuz-snap-*` too — and those entries sit inside the distro's "Advanced
+    /// options" submenu. Flattening promotes all of them to the top level: a store with
+    /// 26 snapshots gains 26 rows, and the `10_linux` twin of each snapshot is the
+    /// *worse* of the pair, carrying no `--id` and no `BOOT_IMAGE=`. That is why the
+    /// shell tool made flattening opt-in and otherwise restored the submenus;
+    /// `--restore` is that direction. Nothing here changes the menu's shape on its own —
+    /// not `pin`, not `create`.
+    ///
+    /// What flattening buys is that `boot --entry` then takes a bare id for every entry.
+    ///
+    /// Regenerates `grub.cfg` and then **reads it back** to report how many submenus are
+    /// actually left, because writing the setting is not the menu changing.
     #[command(name = "grub-flatten", alias = "flatten")]
     GrubFlatten {
+        /// Put the distro's submenus back instead of flattening. The theme stays
+        /// commented either way: a themed menu is one you cannot read at 720p.
+        #[arg(long)]
+        restore: bool,
         /// Print the settings that would change and change nothing.
         #[arg(long)]
         dry_run: bool,
@@ -681,7 +695,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Current => cmd_current(&store, json),
         Cmd::Lineage => cmd_lineage(&store, json),
         Cmd::GrubList => cmd_grub_list(&store, json),
-        Cmd::GrubFlatten { dry_run } => cmd_grub_flatten(&store, dry_run, json),
+        Cmd::GrubFlatten { restore, dry_run } => cmd_grub_flatten(&store, restore, dry_run, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
         Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
         Cmd::Dev {
@@ -1918,16 +1932,23 @@ const THEME_NOTE: &str = "disabled by snaptune: a themed menu shows ~7 rows at 7
 /// The settings `grub-flatten` cares about, in the order they are reported.
 const FLATTEN_KEYS: [&str; 3] = ["GRUB_DEFAULT", "GRUB_DISABLE_SUBMENU", "GRUB_THEME"];
 
-/// Flatten the GRUB menu, and drop the theme.
-fn cmd_grub_flatten(store: &Store, dry_run: bool, json: bool) -> Result<i32> {
+/// Flatten the GRUB menu and drop the theme — or put the submenus back.
+fn cmd_grub_flatten(store: &Store, restore: bool, dry_run: bool, json: bool) -> Result<i32> {
     let defaults = &store.paths.grub_defaults;
     let before = std::fs::read_to_string(defaults)
         .with_context(|| format!("reading {}", defaults.display()))?;
 
     let keep_theme = std::env::var("SNAPSHOT_KEEP_THEME").is_ok_and(|v| v == "1");
 
-    let (text, flatten_changed) = grub::set_grub_default(&before, "GRUB_DISABLE_SUBMENU", "true");
-    let (text, theme_changed) = if keep_theme {
+    // `--restore` only undoes the flattening. The theme is left commented there too:
+    // the shell tool never restored it, and a themed menu is one you cannot read at
+    // 720p.
+    let (text, flatten_changed) = grub::set_grub_default(
+        &before,
+        "GRUB_DISABLE_SUBMENU",
+        if restore { "false" } else { "true" },
+    );
+    let (text, theme_changed) = if keep_theme || restore {
         (text, false)
     } else {
         grub::comment_grub_default(&text, "GRUB_THEME", THEME_NOTE)
@@ -1955,11 +1976,13 @@ fn cmd_grub_flatten(store: &Store, dry_run: bool, json: bool) -> Result<i32> {
     });
 
     let plan = write::Plan {
-        summary: if changed {
-            "flatten the GRUB menu and regenerate grub.cfg".to_string()
-        } else {
-            "regenerate grub.cfg (the menu is already flat)".to_string()
-        },
+        summary: match (restore, changed) {
+            (true, true) => "restore the distro's GRUB submenus and regenerate grub.cfg",
+            (true, false) => "regenerate grub.cfg (the submenus are already there)",
+            (false, true) => "flatten the GRUB menu and regenerate grub.cfg",
+            (false, false) => "regenerate grub.cfg (the menu is already flat)",
+        }
+        .to_string(),
         actions,
     };
 
@@ -2015,14 +2038,26 @@ fn cmd_grub_flatten(store: &Store, dry_run: bool, json: bool) -> Result<i32> {
         println!("  {key}={value}");
     }
     println!("  submenu blocks in grub.cfg: {blocks}, nested entries: {nested}");
-    if nested > 0 {
-        println!(
+    match (restore, nested > 0) {
+        (true, true) => println!(
+            "\n  The distro's submenus are back, which is where 10_linux meant them to be.\n  \
+             `grub-list` prints the `Parent>Child` path `boot --entry` needs for a nested\n  \
+             entry."
+        ),
+        (true, false) => {
+            println!("\n  No submenus to restore — this menu is already flat by the distro's own configuration.")
+        }
+        (false, true) => println!(
             "\n  Submenus are still there. This can only set the setting — something else\n  \
              may be writing them back — and until they go, `boot --entry` needs the full\n  \
              `Parent>Child` path for a nested entry."
-        );
-    } else {
-        println!("\n  No nested entries left: `boot --entry` takes a bare id for every entry now.");
+        ),
+        (false, false) => println!(
+            "\n  Flat: `boot --entry` takes a bare id for every entry now. Note that\n  \
+             10_linux also emits one entry per `vmlinuz-snap-*`, and flattening has\n  \
+             promoted all of them to the top level — the twin of each snapshot carries no\n  \
+             `--id` and no `BOOT_IMAGE=`. `grub-flatten --restore` puts them back."
+        ),
     }
 
     println!();
@@ -3379,11 +3414,22 @@ mod tests {
     fn grub_flatten_parses_and_takes_the_shell_s_aliases() {
         let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--dry-run"]).expect("parse");
         match cmd.cmd {
-            Cmd::GrubFlatten { dry_run } => assert!(dry_run),
+            Cmd::GrubFlatten { restore, dry_run } => {
+                assert!(dry_run);
+                assert!(!restore, "flat is the verb; --restore is the way back");
+            }
             other => panic!("expected grub-flatten, got {other:?}"),
         }
         let cmd = Cli::try_parse_from(["snaptune", "grub-flatten"]).expect("parse");
-        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { dry_run: false }));
+        assert!(matches!(
+            cmd.cmd,
+            Cmd::GrubFlatten {
+                restore: false,
+                dry_run: false
+            }
+        ));
+        let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--restore"]).expect("parse");
+        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { restore: true, .. }));
         let cmd = Cli::try_parse_from(["snaptune", "flatten"]).expect("the short spelling");
         assert!(matches!(cmd.cmd, Cmd::GrubFlatten { .. }));
     }
