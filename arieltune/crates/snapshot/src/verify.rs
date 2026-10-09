@@ -32,14 +32,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::manifest;
 use crate::report::{Report, Severity};
 use crate::store::{Paths, Snapshot, Store};
 use crate::{grub, id};
-
-/// How this tool's own ids are computed. A snapshot carrying any other `kind` came
-/// from a writer with a different formula, and re-deriving it here would only prove
-/// that the formulas differ.
-const OUR_KIND: &str = "dev-build";
 
 /// Verify one snapshot. Read-only.
 pub fn one(paths: &Paths, snapshot: &Snapshot) -> Report {
@@ -150,7 +146,7 @@ pub fn one(paths: &Paths, snapshot: &Snapshot) -> Report {
     // the module being quietly swapped for another one: the id is a hash of the
     // module, the image and the kernel, so it can simply be recomputed.
     match get("snapshot.kind").as_deref() {
-        Some(OUR_KIND) => {
+        Some(kind) if manifest::id_is_content_addressed(kind) => {
             report_identity(&mut report, paths, sid, &get, module_path.as_deref());
         }
         Some(other) => report.note(
@@ -423,9 +419,10 @@ mod tests {
             real_dir.join("manifest.yaml"),
             format!(
                 "snapshot:\n  id: \"{expected}\"\n  timestamp: \"2026-10-09T00:00:00Z\"\n  \
-                 description: \"verify fixture\"\n  kind: \"{OUR_KIND}\"\n\
+                 description: \"verify fixture\"\n  kind: \"{}\"\n\
                  boot_files:\n  vmlinuz: \"{}\"\n  initramfs: \"{}\"\n  cmdline_file: \"{}\"\n\
                  module:\n  path: {}\n  md5: \"{md5}\"\n",
+                manifest::KIND_DEV,
                 boot.join(format!("vmlinuz-{expected}")).display(),
                 boot.join(format!("initramfs-{expected}.img")).display(),
                 boot.join(format!("{expected}.cmdline")).display(),
@@ -589,7 +586,7 @@ mod tests {
         let (paths, snapshot) = good("foreign");
         let manifest = paths.root.join(&snapshot.id).join("manifest.yaml");
         let text = std::fs::read_to_string(&manifest).unwrap().replace(
-            &format!("kind: \"{OUR_KIND}\""),
+            &format!("kind: \"{}\"", manifest::KIND_DEV),
             "kind: \"created-from-running\"",
         );
         std::fs::write(&manifest, text).unwrap();
@@ -679,6 +676,8 @@ mod tests {
         let req = register::Request {
             id: id.clone(),
             description: "roundtrip".to_string(),
+            status: "dev".to_string(),
+            kind: manifest::KIND_DEV.to_string(),
             module: module.clone(),
             initramfs: initramfs.clone(),
             vmlinuz_source: vmlinuz_source.clone(),

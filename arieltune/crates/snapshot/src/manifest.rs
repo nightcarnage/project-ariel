@@ -32,6 +32,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_yaml::Value;
 
+/// `snapshot.kind: "dev-build"` — the incremental dev loop made this.
+pub const KIND_DEV: &str = "dev-build";
+
+/// `snapshot.kind: "created"` — the running system (or a tree) was snapshotted.
+///
+/// Distinct from [`KIND_DEV`] because a reader wants to know how a snapshot was
+/// made, and the two verbs answer different questions about it. They share an id
+/// *formula*, which is the other thing `kind` decides — see
+/// [`id_is_content_addressed`].
+pub const KIND_CREATED: &str = "created";
+
+/// Whether this `kind` names an id this tool computes.
+///
+/// `kind` earns its place by deciding whether an id can be recomputed from the
+/// snapshot's own bytes, because that is what makes verification possible: the id
+/// is a hash of the module, the image and the kernel, so a matching id is proof
+/// that the artefact is the one the name claims.
+///
+/// The shell tool writes **no** `kind`, and its ids come from a different formula
+/// — `create` hashes the *source files* and `Module.symvers`, not the built
+/// module. Recomputing one of those with this tool's formula yields a different
+/// id which says nothing about whether anything is wrong, so `verify` declines
+/// instead. Observed on blade 115: `snap-11e61755` (`create`d) and blade 104's
+/// `snap-0848359a` (`register`ed) hold byte-identical content and carry different
+/// ids — the same bytes, two formulas, no drift.
+pub fn id_is_content_addressed(kind: &str) -> bool {
+    matches!(kind, KIND_DEV | KIND_CREATED)
+}
+
 /// Flatten a YAML tree into `(dotted path, scalar)` pairs.
 ///
 /// Mapping keys join with `.`, sequence indices append `[0]`, so a patch list

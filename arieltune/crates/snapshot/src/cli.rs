@@ -25,6 +25,7 @@ use crate::doctor;
 use crate::grub;
 use crate::id;
 use crate::image;
+use crate::manifest;
 use crate::register;
 use crate::report;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
@@ -562,6 +563,27 @@ struct DevTargets {
     dry_run: bool,
 }
 
+/// What to *record* about how a snapshot came to be.
+///
+/// [`DevTargets`] says where the bytes come from; this says what the manifest
+/// should claim about them. They are different questions — the dev loop and
+/// `create` can derive from the same parent image but must not describe
+/// themselves identically, and a reader deciding whether an id can be recomputed
+/// is reading exactly this.
+struct Provenance<'a> {
+    /// `snapshot.kind` — which id formula applies. See
+    /// [`crate::manifest::id_is_content_addressed`].
+    kind: &'a str,
+    /// `snapshot.status` — `dev` for a loop iteration, `active` for a snapshot in
+    /// its own right, `golden` for the store's baseline.
+    status: &'a str,
+    /// The tree it was built in, when there was one. `None` for a snapshot taken
+    /// of the running module, which was never built here.
+    tree: Option<&'a dev::Tree>,
+    /// The module directories the build relinked.
+    rebuilt_modules: &'a [String],
+}
+
 /// Which kernel release a dev build is for.
 ///
 /// The order matters. An explicit `--for` wins; otherwise the parent image is
@@ -728,7 +750,7 @@ fn cmd_dev(
     // that failed the oracle check into a boot menu entry is exactly the silent
     // wrong-image boot the whole check exists to prevent.
     let registered_id = if targets.register {
-        Some(register_dev(
+        Some(register_build(
             store,
             description,
             &prepared,
@@ -736,8 +758,12 @@ fn cmd_dev(
             &parent_image,
             target_release.as_deref(),
             &targets,
-            &plan.tree,
-            &plan.modules,
+            &Provenance {
+                kind: manifest::KIND_DEV,
+                status: "dev",
+                tree: Some(&plan.tree),
+                rebuilt_modules: &plan.modules,
+            },
         )?)
     } else {
         None
@@ -788,7 +814,7 @@ fn cmd_dev(
 /// pairing a snapshot with a kernel it was not built for is a mistake that only
 /// shows up as a hang at boot.
 #[allow(clippy::too_many_arguments)]
-fn register_dev(
+fn register_build(
     store: &Store,
     description: &str,
     prepared: &dev::Prepared,
@@ -796,8 +822,7 @@ fn register_dev(
     parent_image: &Path,
     target_release: Option<&str>,
     targets: &DevTargets,
-    tree: &dev::Tree,
-    rebuilt_modules: &[String],
+    provenance: &Provenance<'_>,
 ) -> Result<String> {
     let kernel_version = target_release
         .context(
@@ -834,6 +859,8 @@ fn register_dev(
     let req = register::Request {
         id: id.clone(),
         description: description.to_string(),
+        status: provenance.status.to_string(),
+        kind: provenance.kind.to_string(),
         module: prepared.compressed.clone(),
         initramfs: image.to_path_buf(),
         vmlinuz_source: vmlinuz,
@@ -841,11 +868,11 @@ fn register_dev(
         cmdline,
         root_uuid: register::root_uuid()?,
         parent: Some(parent_label.clone()),
-        tree: Some(tree.path.clone()),
+        tree: provenance.tree.map(|t| t.path.clone()),
         // What the build actually relinked. `changed_files` below is the stronger
         // claim but only a checkout of its own can make it; this one is knowable
         // either way, and it is what answers "did my edit get picked up?".
-        rebuilt_modules: rebuilt_modules.to_vec(),
+        rebuilt_modules: provenance.rebuilt_modules.to_vec(),
         // The one comparison worth recording: a parent that is a snapshot in this
         // store has a module on disk, and matching digests mean this build produced
         // what the parent already had. A parent that is a distro image has nothing to
@@ -856,7 +883,9 @@ fn register_dev(
         // Only a tree that is its own checkout can say what changed. Handing over
         // an empty list from a tree that cannot tell would record "nothing
         // changed", which is a different and false claim.
-        changed_files: tree.versioned.then(|| tree.dirty.clone()),
+        changed_files: provenance
+            .tree
+            .and_then(|t| t.versioned.then(|| t.dirty.clone())),
         module_md5: prepared.md5.clone(),
         module_size: prepared.bytes.len() as u64,
         module_srcversion: prepared.srcversion.clone(),

@@ -43,6 +43,17 @@ use crate::write::{Action, Plan};
 pub struct Request {
     pub id: String,
     pub description: String,
+    /// `snapshot.status` — `dev` while a dev iteration is being tried, `active`
+    /// once it is a snapshot in its own right, `golden` for the baseline.
+    ///
+    /// A field rather than a literal inside [`manifest_text`], because the shell
+    /// tool writes `active`/`golden` and `list` shows this column: hardcoding
+    /// `dev` would make every snapshot this tool registers look like a work in
+    /// progress.
+    pub status: String,
+    /// `snapshot.kind`, which decides whether the id can be recomputed. See
+    /// [`crate::manifest::id_is_content_addressed`].
+    pub kind: String,
     /// The built, compressed module on disk.
     pub module: PathBuf,
     /// The derived initramfs on disk, to be copied into `/boot`.
@@ -143,8 +154,8 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     out.push_str(&format!("  id: \"{}\"\n", req.id));
     out.push_str(&format!("  timestamp: \"{timestamp}\"\n"));
     out.push_str(&format!("  description: \"{}\"\n", req.description));
-    out.push_str("  status: \"dev\"\n");
-    out.push_str("  kind: \"dev-build\"\n");
+    out.push_str(&format!("  status: \"{}\"\n", req.status));
+    out.push_str(&format!("  kind: \"{}\"\n", req.kind));
     if let Some(parent) = &req.parent {
         out.push_str(&format!("  parent: \"{parent}\"\n"));
     }
@@ -682,6 +693,8 @@ mod tests {
         Request {
             id: "snap-3f9a1c2b".to_string(),
             description: "printf marker".to_string(),
+            status: "dev".to_string(),
+            kind: crate::manifest::KIND_DEV.to_string(),
             module: PathBuf::from("/work/module.ko.zst"),
             initramfs: PathBuf::from("/work/dev.img"),
             vmlinuz_source: PathBuf::from("/boot/vmlinuz-linux-cachyos-bore"),

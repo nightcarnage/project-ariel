@@ -32,10 +32,16 @@
 //!
 //! ## Scope
 //!
-//! This module is **read-only**: it inspects a tree and works out what a dev
-//! snapshot would involve. Nothing here builds or writes. That keeps the analysis
-//! testable on a workstation with no kernel tree at all, and it means the plan can
-//! be printed before anyone commits to a 30-second build.
+//! The analysis half — [`inspect_tree`] and [`plan`] — is **read-only**: it inspects
+//! a tree and works out what a dev snapshot would involve, touching nothing. That
+//! keeps the analysis testable on a workstation with no kernel tree at all, and it
+//! means the plan can be printed before anyone commits to a 30-second build.
+//!
+//! The other half does real work: [`build`] runs `make` in the tree (as the tree's
+//! owner, never as root — see [`build_as`]), and [`assemble`] rewrites one member
+//! of a parent image into a new one. Neither ever writes to the *live* module tree
+//! or to `/boot`; that is the whole point of deriving an image rather than
+//! installing a module, and it is what the shell tool's `create` gets wrong.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -395,6 +401,98 @@ pub fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Where the kernel package installs its modules.
+const MODULES_ROOT: &str = "/usr/lib/modules";
+
+/// The module the kernel package installed for `release`, if it is there.
+///
+/// `create` can snapshot the running system, and the module that is running is the
+/// one the package installed — not one this tool built. Its location is the
+/// installed tree's business, so it is derived from the release rather than from any
+/// source tree.
+///
+pub fn installed_module(release: &str) -> Option<PathBuf> {
+    installed_module_under(Path::new(MODULES_ROOT), release)
+}
+
+/// [`installed_module`], with the modules root as an argument so it can be tested.
+fn installed_module_under(root: &Path, release: &str) -> Option<PathBuf> {
+    let dir = root.join(release).join("kernel").join(DEFAULT_MODULE_DIR);
+    // Found by extension rather than by name: the file is `amdgpu.ko.zst` today,
+    // and hard-coding that would be the thing to break the day the series grows a
+    // second module.
+    let mut found: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            found = Some(path);
+        }
+    }
+    found
+}
+
+/// Prepare an already-compressed module — the installed, running one — for
+/// insertion into an image.
+///
+/// The compressed bytes are copied **byte for byte** rather than re-stripped and
+/// re-compressed. This is the module that is installed and running, so it is the
+/// artefact that has actually booted; passing it through `strip` and `zstd` again
+/// would produce a snapshot that differs from the thing that was validated, for no
+/// gain at all.
+///
+/// The uncompressed copy exists only to be asked questions: `modinfo` reads the
+/// vermagic and srcversion from it, and its size is the module's raw size.
+///
+pub fn adopt_module(installed: &Path, runner: &dyn Runner, work: &Path) -> Result<Prepared> {
+    let name = installed
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("the installed module has no file name")?;
+    // `amdgpu.ko.zst` -> `amdgpu.ko`. The stem matters: `assemble` looks for
+    // `<stem>.zst` inside the parent image, so this is what decides which member
+    // gets replaced.
+    let stem = name.strip_suffix(".zst").unwrap_or(name).to_string();
+
+    std::fs::create_dir_all(work)
+        .with_context(|| format!("creating scratch space {}", work.display()))?;
+
+    // Read once and hash the bytes in hand, the same rule `build` follows: hashing
+    // the path separately would let the digest describe a different read of it.
+    let bytes =
+        std::fs::read(installed).with_context(|| format!("reading {}", installed.display()))?;
+    if bytes.is_empty() {
+        bail!("{} is empty; refusing to snapshot it", installed.display());
+    }
+
+    let compressed = work.join(name);
+    std::fs::write(&compressed, &bytes)
+        .with_context(|| format!("writing {}", compressed.display()))?;
+
+    let decompressed = work.join(&stem);
+    runner.run(&[
+        "zstd".to_string(),
+        "-d".to_string(),
+        "-f".to_string(),
+        compressed.display().to_string(),
+        "-o".to_string(),
+        decompressed.display().to_string(),
+    ])?;
+
+    let raw_bytes = std::fs::metadata(&decompressed)
+        .with_context(|| format!("stat {}", decompressed.display()))?
+        .len();
+
+    Ok(Prepared {
+        md5: crate::id::md5_hex(&bytes),
+        bytes,
+        source: decompressed.clone(),
+        raw_bytes,
+        compressed,
+        srcversion: module_fact("srcversion", &decompressed),
+        vermagic: module_fact("vermagic", &decompressed),
+    })
+}
+
 /// The most recently modified `.ko` under any of `dirs`.
 ///
 /// Newest rather than first: an incremental build leaves older objects behind, and
@@ -637,6 +735,29 @@ impl DevPlan {
 mod tests {
     use super::*;
 
+    fn have_zstd() -> bool {
+        Command::new("zstd")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn zstd_to(payload: &[u8], dest: &Path) {
+        let src = dest.with_extension("raw");
+        std::fs::write(&src, payload).unwrap();
+        let ok = Command::new("zstd")
+            .args(["-q", "-f"])
+            .arg(&src)
+            .arg("-o")
+            .arg(dest)
+            .status()
+            .expect("running zstd")
+            .success();
+        assert!(ok, "zstd failed");
+        let _ = std::fs::remove_file(&src);
+    }
+
     fn tree(dirty: &[&str]) -> Tree {
         Tree {
             path: PathBuf::from("/tree"),
@@ -657,6 +778,70 @@ mod tests {
             dirty: Vec::new(),
             versioned: false,
         }
+    }
+
+    /// The installed module is found by extension, not by name: the day the series
+    /// grows a second module, or the file is renamed, this still answers.
+    #[test]
+    fn the_installed_module_is_found_under_its_release() {
+        let dir = std::env::temp_dir().join(format!("snapdev-inst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let module_dir = dir
+            .join("7.2.9-1-cachyos-bore")
+            .join("kernel")
+            .join(DEFAULT_MODULE_DIR);
+        std::fs::create_dir_all(&module_dir).unwrap();
+        std::fs::write(module_dir.join("amdgpu.ko.zst"), b"module").unwrap();
+        // A second entry proves the scan picks the `.zst` rather than the first
+        // thing it sees.
+        std::fs::write(module_dir.join("amdgpu.ko"), b"uncompressed").unwrap();
+
+        let got = installed_module_under(&dir, "7.2.9-1-cachyos-bore");
+        assert_eq!(got, Some(module_dir.join("amdgpu.ko.zst")));
+
+        // A release with nothing installed is `None`, not a path to nothing.
+        assert_eq!(installed_module_under(&dir, "9.9.9-nope"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The adopted module's digest must describe the bytes that go into the image,
+    /// which are the installed bytes — not a re-compressed copy of them.
+    #[test]
+    fn adopting_a_module_keeps_its_bytes_and_hashes_those() {
+        if !have_zstd() {
+            eprintln!("skipping: no zstd on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("snapdev-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A real, compressed file, so `zstd -d` in `adopt_module` has something to
+        // do — and so `raw_bytes` is a fact rather than a stub.
+        let payload = vec![7u8; 4096];
+        let compressed = dir.join("amdgpu.ko.zst");
+        zstd_to(&payload, &compressed);
+
+        let work = dir.join("work");
+        let prepared = adopt_module(&compressed, &crate::write::System::default(), &work).unwrap();
+
+        assert_eq!(
+            prepared.bytes,
+            std::fs::read(&compressed).unwrap(),
+            "the compressed bytes must be the installed ones, unchanged"
+        );
+        assert_eq!(prepared.md5, crate::id::md5_hex(&prepared.bytes));
+        assert_eq!(
+            prepared.raw_bytes,
+            payload.len() as u64,
+            "raw size is the uncompressed size, which is a different number"
+        );
+        // The stem decides which member `assemble` replaces, so it has to survive.
+        assert_eq!(
+            prepared.source.file_name().and_then(|n| n.to_str()),
+            Some("amdgpu.ko")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -2116,6 +2116,8 @@ mod tests {
         let req = crate::register::Request {
             id: id.to_string(),
             description: "printf marker, iteration 3".to_string(),
+            status: "dev".to_string(),
+            kind: crate::manifest::KIND_DEV.to_string(),
             module: snap.join("modules/module.ko.zst"),
             initramfs: root.join("work/dev.img"),
             vmlinuz_source: root.join("work/vmlinuz"),
