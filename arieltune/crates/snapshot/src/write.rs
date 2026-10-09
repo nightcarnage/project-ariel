@@ -142,6 +142,16 @@ impl State {
 /// `saved_entry` from grubenv, via `grub-editenv` rather than a hand-written
 /// parser: grubenv carries a checksum and is not ours to reinterpret.
 pub fn saved_entry() -> Option<String> {
+    grubenv_value("saved_entry=")
+}
+
+/// `next_entry` from grubenv — the one-shot the bootloader consumes and clears.
+pub fn next_entry() -> Option<String> {
+    grubenv_value("next_entry=")
+}
+
+/// One `key=value` out of grubenv.
+fn grubenv_value(prefix: &str) -> Option<String> {
     let out = std::process::Command::new("grub-editenv")
         .arg("list")
         .output()
@@ -151,7 +161,27 @@ pub fn saved_entry() -> Option<String> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .find_map(|line| line.strip_prefix("saved_entry=").map(str::to_string))
+        .find_map(|line| line.strip_prefix(prefix).map(str::to_string))
+}
+
+/// Confirm GRUB will actually honour an armed one-shot boot.
+///
+/// `grub-reboot` exits 0 and can still change nothing: `next_entry` is only
+/// consulted when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. Reading the
+/// value back is the only way to tell "armed" from "written to a file nothing
+/// reads" — and the difference is a reboot into a kernel nobody asked for, on a
+/// machine that may only be reachable over the network.
+pub fn verify_boot(id: &str) -> Result<()> {
+    let now = next_entry();
+    if now.as_deref() != Some(id) {
+        bail!(
+            "the one-shot boot did not take: grubenv has next_entry={}, expected {id}.\n\
+             GRUB only consults next_entry when GRUB_DEFAULT=saved. Check that in \
+             /etc/default/grub and that grub-mkconfig has run since.",
+            now.as_deref().unwrap_or("<unset>")
+        );
+    }
+    Ok(())
 }
 
 /// Refuse the three combinations that break a pin. See the module docs.
@@ -337,6 +367,55 @@ pub fn plan_unpin(paths: &Paths) -> Result<Plan> {
             },
             regen_action(paths),
         ],
+    })
+}
+
+/// Arm a one-shot boot into a snapshot: the next boot uses it, the one after does
+/// not.
+///
+/// **One-shot on purpose.** This writes GRUB's `next_entry`, which the bootloader
+/// consumes and clears, so a snapshot that will not come up falls back to the pinned
+/// default by itself. Nothing here can leave a blade stuck booting a bad kernel —
+/// which is the difference between this and changing `saved_entry`, and the reason
+/// the reboot key in the pane is safe to make the default answer.
+///
+/// The plan deliberately arms and stops. Rebooting is the shell's job: it tears the
+/// terminal down first, so the machine does not go down with the TUI still holding
+/// the alternate screen.
+///
+/// No `Paths` argument: arming writes grubenv, which GRUB reads at boot, so nothing
+/// in `/boot` or `grub.cfg` needs regenerating — unlike every other writer here.
+pub fn plan_boot(state: &State, id: &str) -> Result<Plan> {
+    let Some(snapshot) = state.find(id) else {
+        bail!("snapshot {id} not found");
+    };
+
+    // Both of these produce a boot that GRUB cannot complete, and it would fail at
+    // the menu rather than here — on a machine you may only reach over the network.
+    if !snapshot.grub_entry {
+        bail!(
+            "cannot boot {id}: it has no GRUB menu entry.\n\
+             Run `unhide` if it is hidden, or `verify` to see what is missing."
+        );
+    }
+    if !snapshot.vmlinuz || !snapshot.initramfs {
+        let missing = match (snapshot.vmlinuz, snapshot.initramfs) {
+            (false, false) => "its kernel and its initramfs",
+            (false, true) => "its kernel",
+            _ => "its initramfs",
+        };
+        bail!(
+            "cannot boot {id}: {missing} is missing from /boot.\n\
+             The menu entry is there, so GRUB would offer a boot it cannot finish."
+        );
+    }
+
+    Ok(Plan {
+        summary: format!("boot {id} on the next boot only, then reboot now"),
+        actions: vec![Action::Run {
+            argv: vec!["grub-reboot".to_string(), id.to_string()],
+            what: format!("arm a one-shot boot into {id} (the boot after falls back)"),
+        }],
     })
 }
 
@@ -848,6 +927,75 @@ mod tests {
             described.contains("already gone"),
             "a missing artefact should be reported as such:\n{described}"
         );
+    }
+
+    // ---- boot --------------------------------------------------------------
+
+    /// Arming only. The reboot belongs to the shell, which tears the terminal down
+    /// first — rebooting from inside the pane would take the machine with the TUI
+    /// still holding the alternate screen.
+    #[test]
+    fn boot_arms_a_one_shot_and_leaves_rebooting_to_the_caller() {
+        let plan = plan_boot(&state(), "snap-target").expect("plans");
+        assert_eq!(plan.actions.len(), 1, "arming only: {:?}", plan.describe());
+        match &plan.actions[0] {
+            Action::Run { argv, .. } => {
+                assert_eq!(argv[0], "grub-reboot");
+                assert_eq!(argv[1], "snap-target");
+            }
+            other => panic!("expected grub-reboot, got {other:?}"),
+        }
+        // Arming writes grubenv, which GRUB reads at boot. Nothing in /boot or
+        // grub.cfg changes, so regenerating the menu would be busy-work.
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Run { argv, .. } if argv[0] == "grub-mkconfig")),
+            "arming must not regenerate the menu: {:?}",
+            plan.describe()
+        );
+    }
+
+    #[test]
+    fn boot_refuses_a_snapshot_with_no_menu_entry() {
+        let mut s = state();
+        s.snapshots
+            .iter_mut()
+            .find(|x| x.id == "snap-target")
+            .expect("fixture")
+            .grub_entry = false;
+        let err = plan_boot(&s, "snap-target").unwrap_err();
+        assert!(err.to_string().contains("no GRUB menu entry"), "{err}");
+    }
+
+    /// The menu entry can be there while the files it points at are not. GRUB would
+    /// offer the boot and fail at the prompt — on a blade reached over the network,
+    /// that is a machine you cannot get back.
+    #[test]
+    fn boot_refuses_a_snapshot_whose_artefacts_are_missing() {
+        for (vmlinuz, initramfs, expected) in [
+            (false, true, "its kernel"),
+            (true, false, "its initramfs"),
+            (false, false, "its kernel and its initramfs"),
+        ] {
+            let mut s = state();
+            let target = s
+                .snapshots
+                .iter_mut()
+                .find(|x| x.id == "snap-target")
+                .expect("fixture");
+            target.vmlinuz = vmlinuz;
+            target.initramfs = initramfs;
+            let err = plan_boot(&s, "snap-target").unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn boot_refuses_a_snapshot_it_does_not_know() {
+        let err = plan_boot(&state(), "snap-absent").unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
     }
 
     // ---- hide / unhide -----------------------------------------------------

@@ -52,6 +52,10 @@ pub enum Pending {
     Unpin,
     Hide(String),
     Unhide(String),
+    /// Arm a one-shot boot into this snapshot. The shell reboots afterwards.
+    Boot(String),
+    /// Delete this snapshot completely.
+    Prune(String),
 }
 
 impl Pending {
@@ -61,8 +65,29 @@ impl Pending {
             Pending::Unpin => "unpin",
             Pending::Hide(_) => "hide",
             Pending::Unhide(_) => "unhide",
+            Pending::Boot(_) => "boot",
+            Pending::Prune(_) => "prune",
         }
     }
+}
+
+/// The reboot message a confirmed boot produces, or `None` when the machine must
+/// stay up.
+///
+/// Split out because this rule is the whole safety property, and it is one the
+/// hardware cannot easily be asked about: **never reboot unless the one-shot
+/// actually armed.** `grub-reboot` exits 0 even when `grub.cfg` was generated
+/// without `GRUB_DEFAULT=saved` and will never consult `next_entry`. Rebooting on
+/// that boots the default instead of the snapshot that was chosen — silently, in the
+/// middle of a reboot, on a machine that may only be reachable over the network.
+/// Staying up with an error on screen is recoverable; that is not.
+fn boot_outcome(id: &str, armed: bool) -> Option<String> {
+    armed.then(|| {
+        format!(
+            "Rebooting into {id} for one boot.\n\
+             The boot after that returns to the pinned default."
+        )
+    })
 }
 
 /// Which of the pane's two regions the navigation keys act on.
@@ -307,24 +332,48 @@ impl SnapshotScreen {
             Pending::Unpin => write::plan_unpin(&self.paths),
             Pending::Hide(id) => write::plan_hide(&self.paths, &state, id),
             Pending::Unhide(id) => write::plan_unhide(&self.paths, &state, id),
+            Pending::Boot(id) => write::plan_boot(&state, id),
+            Pending::Prune(id) => write::plan_prune(&self.paths, &state, id),
         }
     }
 
     /// Execute the pending action.
     ///
+    /// Returns a message **only** when the machine should now reboot, which is how
+    /// a boot request reaches the shell. Returning it from here rather than
+    /// rebooting directly matters: the shell tears the terminal down first, so the
+    /// machine never goes down with the TUI still holding the alternate screen —
+    /// and, more importantly, a failed `grub-reboot` returns `None`, so a boot that
+    /// could not be armed does not reboot into whatever the default happened to be.
+    ///
     /// `grub-mkconfig` takes a second or two and runs on the event-loop thread;
     /// that is deliberate. It is short, it is a one-off on an explicit keypress,
     /// and the alternative — a background thread writing to `/boot` while the
     /// operator keeps pressing keys — is worse.
-    pub fn confirm(&mut self) {
-        let Some(action) = self.pending.clone() else {
-            return;
-        };
+    pub fn confirm(&mut self) -> Option<String> {
+        let action = self.pending.clone()?;
         match self.plan_for(&action) {
             Ok(plan) => match write::apply_with(&plan, false, self.runner.as_ref()) {
                 Ok(()) => {
-                    self.status = format!("{}: done", action.verb());
                     self.pending = None;
+                    if let Pending::Boot(id) = &action {
+                        // Read the value back before promising a reboot — see
+                        // `boot_outcome` for why an exit code is not enough.
+                        let armed = match write::verify_boot(id) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                self.error = Some(err.to_string());
+                                false
+                            }
+                        };
+                        if !armed {
+                            self.status = format!("boot {id}: NOT armed — staying up");
+                            return boot_outcome(id, false);
+                        }
+                        self.status = format!("rebooting into {id}");
+                        return boot_outcome(id, true);
+                    }
+                    self.status = format!("{}: done", action.verb());
                     self.refresh();
                 }
                 Err(err) => {
@@ -339,6 +388,7 @@ impl SnapshotScreen {
                 self.pending = None;
             }
         }
+        None
     }
 
     /// The lines the confirmation popup shows.
@@ -382,7 +432,7 @@ impl Screen for SnapshotScreen {
         // the ones that will actually do something.
         Some(match self.focus {
             Focus::List => {
-                "list: ↑↓ move · tab provenance · enter detail · p/P pin/unpin · h/H hide/unhide · r refresh"
+                "list: ↑↓ move · tab provenance · p/P pin · h/H hide · R reboot into · x prune"
                     .to_string()
             }
             Focus::Provenance => {
@@ -396,7 +446,13 @@ impl Screen for SnapshotScreen {
         // `q`, which is why `modal()` also reports true.
         if self.is_confirming() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(),
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // The one path that leaves the pane: a boot request goes back to
+                    // the shell, which owns the terminal teardown.
+                    if let Some(message) = self.confirm() {
+                        return Outcome::Reboot(message);
+                    }
+                }
                 // `q` backs out here as it does in APU's and MEM's popups. Without
                 // it, the key that quits every other screen would do nothing at
                 // all on the one screen that writes to /boot.
@@ -463,6 +519,22 @@ impl Screen for SnapshotScreen {
                 if let Some(id) = self.selected_id() {
                     let id = id.to_string();
                     self.request(Pending::Unhide(id));
+                }
+            }
+            // Uppercase because it is not a verb on the selection like `p`/`h`:
+            // it takes the machine down. The confirm popup names the snapshot it
+            // will boot, so the target is never implied.
+            KeyCode::Char('R') => {
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    self.request(Pending::Boot(id));
+                }
+            }
+            // Destructive, so it sits apart from the reversible verbs.
+            KeyCode::Char('x') => {
+                if let Some(id) = self.selected_id() {
+                    let id = id.to_string();
+                    self.request(Pending::Prune(id));
                 }
             }
 
@@ -1161,6 +1233,82 @@ mod tests {
         assert!(text.contains("snap-bbbbbbbb"));
         assert!(text.contains("SNAP─"), "no range on a short list");
         assert_eq!(s.list_off, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The reboot key. Uppercase, apart from the verbs on the selection, because
+    /// it takes the machine down.
+    #[test]
+    fn reboot_asks_first_and_defaults_to_yes() {
+        let (mut s, root) = screen("reboot");
+        let id = s.selected_id().unwrap().to_string();
+
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('R'))),
+            Outcome::Consumed
+        ));
+        assert!(s.is_confirming(), "a popup is up");
+        assert!(s.modal(), "and the shell must not steal keys while it is");
+        assert_eq!(s.pending, Some(Pending::Boot(id.clone())));
+
+        // The popup names the snapshot it will boot, so the target is never implied.
+        let plan = s.plan_for(&Pending::Boot(id.clone())).expect("plans");
+        assert!(plan.summary.contains(&id), "{}", plan.summary);
+
+        // `n` backs out without arming anything.
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('n'))),
+            Outcome::Consumed
+        ));
+        assert!(!s.is_confirming());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The rule the whole key rests on. `grub-reboot` exits 0 even when grub.cfg
+    /// will ignore `next_entry`, so an exit code is not evidence that the boot was
+    /// armed — and rebooting on that boots the default instead of the chosen
+    /// snapshot, silently, on a machine that may be remote.
+    #[test]
+    fn a_boot_that_did_not_arm_does_not_reboot() {
+        assert!(
+            boot_outcome("snap-aaaaaaaa", false).is_none(),
+            "must stay up when the one-shot did not take"
+        );
+        let message = boot_outcome("snap-aaaaaaaa", true).expect("reboots when armed");
+        assert!(message.contains("snap-aaaaaaaa"), "{message}");
+        // ...and says what happens the boot after, because that is the part an
+        // operator has to know before agreeing.
+        assert!(message.contains("pinned default"), "{message}");
+    }
+
+    /// A snapshot with no menu entry cannot be booted, and the refusal must happen
+    /// before the machine goes anywhere.
+    #[test]
+    fn rebooting_into_an_entryless_snapshot_is_refused() {
+        let (mut s, root) = screen("reboot-noref");
+        // The fixture gives only the first snapshot a menu entry.
+        s.move_selection(1);
+        let id = s.selected_id().unwrap().to_string();
+        s.request(Pending::Boot(id));
+        let err = s.plan_for(&s.pending.clone().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("no GRUB menu entry"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_is_bound_and_needs_confirmation() {
+        let (mut s, root) = screen("prune-key");
+        let id = s.selected_id().unwrap().to_string();
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('x'))),
+            Outcome::Consumed
+        ));
+        assert_eq!(s.pending, Some(Pending::Prune(id.clone())));
+        // ...and the popup shows the deletions, so the irreversibility is visible
+        // before the key that commits to it.
+        let plan = s.plan_for(&Pending::Prune(id)).expect("plans");
+        let described = plan.describe().join("\n");
+        assert!(described.contains("remove"), "{described}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
