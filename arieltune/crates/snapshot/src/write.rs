@@ -334,7 +334,7 @@ pub fn plan_pin(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
 /// Mark a snapshot as the golden image.
 ///
 /// The marker is a file in the store rather than a GRUB change, but it is not
-/// cosmetic: [`guard_removable`] refuses to hide or prune whatever it names, so
+/// cosmetic: `guard_removable` refuses to hide or prune whatever it names, so
 /// this moves the protection from one snapshot to another and is worth a plan.
 pub fn plan_golden(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
     let Some(_snapshot) = state.find(id) else {

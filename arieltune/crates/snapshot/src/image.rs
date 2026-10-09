@@ -215,7 +215,7 @@ pub fn find_member(image: &Path, suffix: &str) -> Result<String> {
 
 /// Every member of the early archive whose path ends in `suffix`.
 ///
-/// The early archive is where the modules are; see [`derive`].
+/// The early archive is where the modules are; see [`derive`](self::derive).
 pub fn members_ending(image: &Path, suffix: &str) -> Result<Vec<String>> {
     let bytes =
         std::fs::read(image).with_context(|| format!("reading the image {}", image.display()))?;

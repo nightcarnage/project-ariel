@@ -21,7 +21,7 @@
 //! | [`store`] | discovery over the snapshot root |
 //! | [`grub`] | `40_custom` blocks and `grub.cfg` menu entries |
 //! | [`register`] | turning a verified image into a bootable snapshot |
-//! | [`write`] | the action plan every writing verb is built from |
+//! | [`write`](mod@write) | the action plan every writing verb is built from |
 //! | [`doctor`] | whether a *store* is coherent |
 //! | [`verify`] | whether one *snapshot* is what its manifest claims |
 //! | [`report`] | the findings vocabulary those two share |

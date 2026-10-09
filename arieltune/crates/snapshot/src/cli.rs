@@ -650,7 +650,7 @@ pub enum Cmd {
     /// Hidden, and not a user surface: this is the protocol
     /// `completions/snaptune.bash` speaks, one candidate per line for `compgen -W`.
     /// It is a verb rather than a table in the script because the script must not
-    /// carry its own copy of the verb list -- see [`completion_candidates`].
+    /// carry its own copy of the verb list -- see `completion_candidates`.
     ///
     /// `words` is the command line before the word being completed, with the
     /// program name and this verb already stripped.

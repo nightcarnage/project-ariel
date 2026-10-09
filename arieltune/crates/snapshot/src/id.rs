@@ -26,7 +26,7 @@
 //! 2. **`cat f1 f2 f3 f4 | md5sum` is NOT the same case.** When nothing could be
 //!    read the pipeline still hashes *empty input*, so the component is
 //!    `d41d8cd9`, not `""`. [`concat_md5_prefix8`] keeps that distinction, and
-//!    [`tests::empty_input_hashes_to_d41d8cd9`] pins it.
+//!    `tests::empty_input_hashes_to_d41d8cd9` pins it.
 //!
 //! 3. **`echo` vs `printf` is load-bearing.** F1/F3 hash a newline-terminated
 //!    string (`echo`); F2 does not (`printf`). Using one for the other silently
@@ -40,7 +40,7 @@
 //!    re-derived or audited — see `docs/snapshot-tool.md` §3.1 for the three
 //!    snapshots on blade 104 where this is already true.
 //!
-//! The verified vectors in [`tests`] are real snapshots, not invented:
+//! The verified vectors in `tests` are real snapshots, not invented:
 //! `snap-0848359a`, `snap-67d5ebcf` (F3) and `snap-da794092` (F2) each
 //! reproduce exactly from their recorded components.
 
