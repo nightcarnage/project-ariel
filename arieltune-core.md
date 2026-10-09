@@ -1,13 +1,36 @@
 # arieltune-core.md — BC-250 8-Core CPU Unlock: Design Handoff
 
-Status: **LIVE AND VERIFIED** — blade 115 runs 8C/16T (mask 0xFF, forced from
-an abnormal 0xD7), 0 MCE, two clean per-core stress sweeps, boot unit enabled.
-Full validation + ops log: `docs/ops/blade115-validation-log.md` (internal
-record, not part of upstream PRs).
+Status: **LIVE AND VERIFIED** — blade 115 runs 8C/16T (mask `0xFF`, unlocked from
+its recorded `0xD7` baseline), 0 MCE, two clean per-core stress sweeps, boot unit
+enabled. Full validation + ops log: `docs/ops/blade115-validation-log.md`
+(internal record, not part of upstream PRs).
 
 Scope: the `aputune cores` feature, kernel patch 28, and the fleet rollout
 plan. All conclusions below come from the 2026-08-18 investigation of the
 community 8-core unlock forks, plus the live validation on blade 115.
+
+> **PARTLY STALE — the mask gate changed after this was written. The code wins.**
+>
+> The rule stated in §0 (escape hatch), §1.3 items 3–4, §2 (state machine, hard
+> gate 3) and §3 (`cores` command reference) is superseded. It says every safe
+> path accepts only a live mask of `0x77` (or already `0xFF`) and refuses any
+> other as `ABNORMAL`, writable only through `--force-abnormal` / TUI `[F]`.
+> `cores` no longer works that way: it judges the live mask against **this
+> blade's recorded factory mask** — `/var/lib/arieltune/stock.json`, captured by
+> `cores stock capture`, falling back to the textbook `0x77` only when no
+> baseline has been captured. A blade that ships `0xD7` is therefore its own
+> normal and needs no force.
+>
+> The current rule is `state_for_stock(mask, visible_cores, stock)` in
+> `crates/apu/src/cores.rs`. Its own doc comment is the reasoning and is worth
+> reading before editing this file:
+>
+> > `Abnormal` must mean "we have no baseline for this", never "it isn't the
+> > value I assumed".
+>
+> `--force-abnormal` and the TUI `[F]` key still exist, but they are no longer
+> how a per-die mask is unlocked. The body is left as written so the dated design
+> record stays intact — except the bit-level error in §1.3(3), corrected inline.
 
 ## 0. At a glance
 
@@ -70,11 +93,15 @@ community 8-core unlock forks, plus the live validation on blade 115.
    `boot` proceed only when the live mask reads `0x77` (or already `0xFF`).
    Anything else is refused, same rule as GabriWar, rw-r-r, and the DXE driver
    ("avoid lockout on abnormal masks"). Because blade 115 shipped with a
-   genuine abnormal mask (0xD7 — stock 0x77 with bit 6 set), the refusal is
+   per-die mask (0xD7 — a *different* 6C/12T layout from 0x77: bit 7 set and
+   bit 5 clear, against 0x77's bits 0,1,2,4,5,6 set), the refusal was
    bypassable **only** through `apply --force-abnormal` or the TUI `[F]`
    confirmation popup: the same 0x98 write, the same 0xFF readback, an
-   explicit warning, and never any auto-reboot. `boot` (the unit path) has no
+   explicit warning, and never any auto-reboot. `boot` (the unit path) had no
    force.
+   **Superseded — see the note at the top.** `cores` now treats a blade's
+   *recorded* stock as its baseline, so `0xD7` is blade 115's normal state and
+   needs no force.
 4. **No verdict cache / no hardware identity.** The fleet clones OS images
    across blades, so any persisted "this blade passed verification" state is
    untrustworthy lineage. The only trusted checks are live reads of the current
