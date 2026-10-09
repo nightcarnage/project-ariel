@@ -187,36 +187,53 @@ only honoured when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. `boot` re
 the armed value back out of grubenv before it reports success, and will not reboot
 unless that check passed.
 
-### 3.5 The name: `snaptune`, not `snapshot`
+### 3.5 The name: `snaptune`, `snapshot`, and the retired shell tool
 
-The binary is `snaptune` for two reasons: `snapshot` is an unrelated program on the
-workstation (the GNOME screenshot tool answers `Unknown option --ids`), and the name
-joins the fleet's per-namespace convention.
+The binary is `snaptune` because the name `snapshot` is taken twice over: on a
+workstation by the GNOME screenshot tool (which answers `Unknown option --ids`), and
+on the blades by the bc-250-snapshotter shell tool this replaces.
 
-**`/usr/local/bin/snapshot` on the blades is the shell tool, and stays that way.**
-Checked on 104 and 115: both have a 108 KB `snapshot` there (with
-`/etc/bash_completion.d/snapshot` on 104 and the repo checkout at
-`/srv/data/bc-250-snapshotter/`), so a compat symlink to this binary cannot be
-created without displacing the tool it would be replacing. `snaptune` is installed
-alongside it instead, as its own binary, and the two coexist:
+**That shell tool is retired (2026-10-09).** Both blades and the suite's installers
+now carry:
 
 ```text
-/usr/local/bin/snapshot    the shell tool, unchanged
-/usr/local/bin/snaptune    this tool
+/usr/local/bin/snapshot    -> arieltune    the retired tool's name, served by this namespace
+/usr/local/bin/snaptune    -> arieltune
+/usr/local/bin/at          -> arieltune
 ```
 
-The fleet convention is one multi-call `arieltune` plus symlinks per namespace
-(`aputune`, `biostune`, `memtune`, `wikitune`, `at` all point at it). This tool is
-a **standalone binary** rather than another such symlink, because the installed
-`arieltune` has no `snapshot` namespace yet — building and installing a new
-`arieltune` would replace the binary the other modules are served from. When that
-happens, `snaptune` becomes a symlink to `arieltune` and `arieltune snapshot <verb>`
-starts working; until then, `snaptune <verb>` is the only entry point.
+The cutover was two steps, and both are done: `arieltune` gained the `snapshot`
+namespace (so `arieltune snapshot <verb>` and the `snapshot` argv[0] work), and
+`/usr/local/bin/snapshot` became a compat symlink. What made it safe to check:
 
-Retiring the shell tool is therefore two deliberate steps, not one: install
-`arieltune` with the namespace, then replace `/usr/local/bin/snapshot` with the
-compat symlink and check the fleet scripts. §6 lists the verbs that would need
-porting before that step is safe.
+- **The verbs were already ported.** §6.5 is the map from the shell's own
+  `snapshot --help` to the verb or flag that replaced each one — including the
+  aliases and the three environment variables. Four verbs are ported with a
+  deliberate difference, and all four are documented there rather than quietly
+  changed.
+- **Nothing automated called it.** No systemd unit, no timer, no crontab, and no
+  script on `PATH` invoked `snapshot` or `blade-snapshot` on either blade. The
+  remaining mentions in `/srv/data` are research scripts and notes, which keep
+  working: the name still resolves, to this tool.
+- **One program did.** `arieltune apu` asks `snapshot list --ids` which snapshot a
+  boot came from. That mode is kept machine-readable for exactly this reason, and
+  the two tools' id **sets** were compared before the swap — identical on both
+  blades. Their *order* differs (the shell's was glob order, this one is newest
+  first, like `list`); the consumer reads the whole list looking for one id, so the
+  order is not load-bearing, and §6.5 notes it for anything older that piped
+  `head -1`.
+- **The tool is not lost.** Its source is the `bc-250-snapshotter` repo (pushed to
+  gitea, cloned under `/srv/data/bc-250-snapshotter/` on 104), and installing the
+  suite copies any incumbent at that name to
+  `/var/tmp/snapshot-retired-<date>` before the symlink takes over.
+
+The shell tool's `/etc/bash_completion.d/snapshot` is gone; `completions/snaptune.bash`
+covers the name now, so `snapshot show snap-a<TAB>` completes ids the same way
+`snaptune` does (§5.12).
+
+The standalone `snaptune` binary is still built by this crate — the same code without
+the suite around it, for a box that wants only this namespace. On these blades the
+name is a symlink to `arieltune`, so the two entry points cannot drift apart.
 
 ---
 
@@ -499,9 +516,9 @@ Two consequences worth knowing:
   positions from each verb's own `--help` usage (`<ID>` / `[ID]`) and asserts the
   completion agrees with it.
 
-`snapshot` is deliberately not registered by the script: that name belongs to the
-shell tool until it is retired, and it has its own completion file. The cutover is
-one line in `completions/snaptune.bash` (§3.5).
+The script registers `snapshot` as well as `snaptune`: that name is the retired shell
+tool's, and it now resolves to this namespace, so its completion is this function's
+job (§3.5).
 
 ### 5.11 Rescue copies, test results, and getting the module back out
 
@@ -591,7 +608,9 @@ back to.
 ### 6.5 Every shell verb, and where it went
 
 Read from the shell tool's own `snapshot --help`, so this is its list and not a
-recollection of it. This is the table to work from before retiring `snapshot`.
+recollection of it. The retirement was worked from this table; it stays because it is
+the map of the old surface onto the new one, and because anything that still calls
+`snapshot <verb>` is calling this tool now.
 
 | shell | here | note |
 |---|---|---|
@@ -627,6 +646,13 @@ box happened to boot, so it now takes an optional id and defaults to the whole s
 reading root-first, with a parent that is not itself a snapshot (the fleet's
 `base-7.2.9-1-cachyos-bore`) kept and marked, because that name is where the lineage
 starts.
+
+One difference that is not a verb: **`list --ids` prints newest-first here, and printed
+glob order (alphabetical by hash) in the shell.** The two lists held the same ids when
+they were compared on both blades before the swap — the order was never meaningful, and
+matching `list`'s own order is the more useful one — but a script that piped
+`snapshot list --ids | head -1` names a different snapshot than it used to. `arieltune
+apu` reads the whole list looking for one id, so it is unaffected.
 
 Environment, from the shell's own help and its `README.md`:
 
@@ -728,7 +754,8 @@ cargo build -p snapshot --bin snaptune              # dev build
 cargo build -p snapshot --release --bin snaptune    # release
 ```
 
-Install on a blade — `snaptune` only, never `/usr/local/bin/snapshot` (§3.5):
+Install on a blade — the name `snapshot` is the retired shell tool's and belongs to
+this namespace now (§3.5):
 
 ```bash
 scp target/debug/snaptune blade:/var/tmp/snaptune.new

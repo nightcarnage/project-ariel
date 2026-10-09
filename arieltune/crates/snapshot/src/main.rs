@@ -2,12 +2,15 @@
 //! `snaptune` — the standalone binary.
 //!
 //! Named `snaptune` rather than `snapshot` because it joins `arieltune`/`llmtune`
-//! as a sibling — and because the name `snapshot` is taken twice over: on the
-//! workstation by the GNOME screenshot tool, and on the blades by the shell tool
-//! this replaces, which stays at `/usr/local/bin/snapshot` until it is retired.
+//! as a sibling, and because the name `snapshot` is taken twice over: on a workstation
+//! by the GNOME screenshot tool, and on the blades by the bc-250-snapshotter shell tool
+//! this replaces.
 //!
-//! There is therefore **no** `snapshot` compat symlink to install, and installing one
-//! would silently replace the tool being replaced. See `docs/snapshot-tool.md` §3.5.
+//! That tool is **retired**: `/usr/local/bin/snapshot` is now a compat symlink to
+//! `arieltune`, so the name reaches this namespace, and `snapshot list --ids` is kept
+//! machine-compatible because `arieltune apu` parses it. This standalone binary is the
+//! same code without the suite around it -- what a box that wants only this namespace
+//! installs. See `docs/snapshot-tool.md` §3.5.
 //!
 //! This build writes as well as reads: `prune`, `pin`, `hide`, `boot` and
 //! `dev --run --register` change the store, `/boot` or the boot configuration, and

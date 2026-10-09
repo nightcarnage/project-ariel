@@ -10,11 +10,10 @@
 #   * `at`        short alias  -> arieltune
 #   * `aputune` `memtune` `biostune` `wikitune` `snaptune`  compat symlinks -> arieltune
 #     (argv[0] dispatch keeps old commands + any systemd units that call them working)
-#
-# `snapshot` is deliberately NOT among them: that name belongs to the
-# bc-250-snapshotter shell tool until it is retired, and shadowing it would replace the
-# tool being replaced. The dispatch already understands the name, so the cutover is a
-# symlink and nothing else.
+#   * `snapshot`  -> arieltune, the retired bc-250-snapshotter shell tool's name. The
+#     suite's `snapshot` namespace serves it, and `snapshot list --ids` stays
+#     machine-compatible because `arieltune apu` parses it. A shell tool found there is
+#     backed up to /var/tmp before the symlink replaces it.
 #
 # Also installs bash completion for `snaptune` (ids + verbs), from
 # completions/snaptune.bash -> /etc/bash_completion.d/.
@@ -48,14 +47,26 @@ echo ">> installing $BIN (sudo)..."
 sudo install -d "$PREFIX/bin"
 sudo install -m755 target/release/arieltune "$BIN"
 
-echo ">> symlinks: at + compat (aputune/memtune/biostune/wikitune/snaptune)"
+# The retired shell tool lives at this name; keep a copy of whatever is there before
+# the symlink takes the name over. Its repo keeps the source, but a box may never have
+# seen the repo.
+if [ -e "$PREFIX/bin/snapshot" ] && [ ! -L "$PREFIX/bin/snapshot" ]; then
+  RETIRED="/var/tmp/snapshot-retired-$(date +%Y%m%d)"
+  echo ">> backing up the shell tool: $PREFIX/bin/snapshot -> $RETIRED"
+  sudo cp -p "$PREFIX/bin/snapshot" "$RETIRED"
+fi
+
+echo ">> symlinks: at + compat (aputune/memtune/biostune/wikitune/snaptune/snapshot)"
 sudo ln -sf arieltune "$PREFIX/bin/at"
-for name in aputune memtune biostune wikitune snaptune; do
+for name in aputune memtune biostune wikitune snaptune snapshot; do
   sudo ln -sf arieltune "$PREFIX/bin/$name"
 done
 
-echo ">> bash completion (snaptune): /etc/bash_completion.d/snaptune"
+echo ">> bash completion (snaptune + snapshot): /etc/bash_completion.d/snaptune"
 sudo install -d /etc/bash_completion.d
+# The retired shell tool's completion completes by calling the tool it belongs to;
+# this file covers the name instead.
+sudo rm -f /etc/bash_completion.d/snapshot
 sudo install -m644 completions/snaptune.bash /etc/bash_completion.d/snaptune
 
 echo ">> installed: $("$BIN" --version)"

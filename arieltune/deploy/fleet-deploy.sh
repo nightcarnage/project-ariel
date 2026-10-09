@@ -41,16 +41,20 @@ install_compat() {
   # $1 = target. Install binary + at + compat symlinks.
   #
   # `snaptune` is required for the snapshot namespace to be reachable by name: without
-  # the symlink the argv[0] dispatch never sees it. `snapshot` is deliberately NOT
-  # installed — that name belongs to the bc-250-snapshotter shell tool until it is
-  # retired, and shadowing it would replace the tool being replaced.
+  # the symlink the argv[0] dispatch never sees it. `snapshot` is the retired
+  # bc-250-snapshotter shell tool's name, now served by that namespace — the shell
+  # tool's own binary is backed up to /var/tmp first if one is still installed.
   #
   # The bash completion goes with the binary: it is what makes `snaptune show snap-a<TAB>`
-  # fill in an id, and it is inert if bash never sources it.
-  ssh "$1" 'sudo install -m755 /tmp/arieltune /usr/local/bin/arieltune \
+  # fill in an id, and it is inert if bash never sources it. The retired tool's
+  # completion file is removed: it completes by calling the tool it belongs to.
+  ssh "$1" 'if [ -e /usr/local/bin/snapshot ] && [ ! -L /usr/local/bin/snapshot ]; then
+      sudo cp -p /usr/local/bin/snapshot /var/tmp/snapshot-retired-$(date +%Y%m%d); fi \
+    && sudo install -m755 /tmp/arieltune /usr/local/bin/arieltune \
     && sudo ln -sf arieltune /usr/local/bin/at \
-    && for n in aputune memtune biostune wikitune snaptune; do sudo ln -sf arieltune /usr/local/bin/$n; done \
+    && for n in aputune memtune biostune wikitune snaptune snapshot; do sudo ln -sf arieltune /usr/local/bin/$n; done \
     && sudo install -d /etc/bash_completion.d \
+    && sudo rm -f /etc/bash_completion.d/snapshot \
     && sudo install -m644 /tmp/snaptune.bash /etc/bash_completion.d/snaptune'
 }
 

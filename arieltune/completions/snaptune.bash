@@ -15,6 +15,7 @@
 #   snaptune list --al<TAB>     # flags, too
 #   arieltune snapshot <TAB>    # the same, through the suite's multi-call name
 #   at snap <TAB>               # and through the short alias
+#   snapshot show snap-a<TAB>   # the retired shell tool's name, now a symlink here
 #
 # There is deliberately no verb list in this file. The tool answers `__complete` for
 # the words already typed and prints the candidates, so a verb or an alias added to
@@ -57,11 +58,10 @@ _snaptune_complete() {
     return 0
 }
 
-# `snapshot` is deliberately NOT registered here: that name belongs to the shell tool
-# until it is retired, and its own /etc/bash_completion.d/snapshot is installed in
-# its name. Claiming it would override completion for the tool still in use. The
-# function above already answers to the name, so the cutover is this one line --
-# see docs/snapshot-tool.md §3.5.
-complete -o default -F _snaptune_complete snaptune
+# `snapshot` is registered now that the bc-250-snapshotter shell tool is retired and
+# the name is a symlink to this binary (docs/snapshot-tool.md §3.5). Installing this
+# file replaces the shell tool's own /etc/bash_completion.d/snapshot, which completed
+# by calling `snapshot list --ids`.
+complete -o default -F _snaptune_complete snaptune snapshot
 # The suite's multi-call names: this file speaks for the snapshot namespace only.
 complete -o default -F _snaptune_complete arieltune at
