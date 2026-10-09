@@ -235,18 +235,38 @@ impl MenuEntry {
     }
 }
 
-/// The `--id` value from a `menuentry` line, if present.
+/// The first quoted string in `s`, unquoted.
+fn quoted(s: &str) -> Option<String> {
+    let start = s.find(['\'', '"'])?;
+    let quote = &s[start..start + 1];
+    let rest = &s[start + 1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// The id a `menuentry` line ends up with, in either of the two spellings
+/// `grub.cfg` uses.
+///
+/// - `--id 'snap-11e61755'` — what our own `40_custom` blocks write.
+/// - `$menuentry_id_option 'gnulinux-snap-11e61755-advanced-<uuid>'` — what
+///   `10_linux` writes for every kernel it finds, which includes every
+///   `vmlinuz-snap-*` this tool installs. The variable is assigned earlier in the
+///   file, and that assignment line is deliberately *not* an entry (see
+///   [`is_menuentry`]); the menuentry line carries the value it was given.
+///
+/// Both are real ids, and `grub-reboot` resolves either. Reading only the first
+/// form hid the id of every distro-generated entry: `grub-list` printed a title in
+/// the id column, and `boot --entry <that id>` refused an id that works. Found by
+/// running the shell tool and this one side by side on blade 115.
 fn id_option(line: &str) -> Option<String> {
-    let marker = "--id ";
-    let start = line.find(marker)? + marker.len();
-    let rest = &line[start..];
-    let quote = rest.chars().next()?;
-    if quote == '\'' || quote == '"' {
-        let end = rest[1..].find(quote)?;
-        Some(rest[1..1 + end].to_string())
-    } else {
-        Some(rest.split_whitespace().next()?.to_string())
+    if let Some(at) = line.find("$menuentry_id_option") {
+        if let Some(id) = quoted(&line[at..]) {
+            return Some(id);
+        }
     }
+    let marker = "--id ";
+    let rest = &line[line.find(marker)? + marker.len()..];
+    quoted(rest).or_else(|| Some(rest.split_whitespace().next()?.to_string()))
 }
 
 /// Every menu entry in a `grub.cfg`, with its nesting, by brace depth.
@@ -825,6 +845,52 @@ submenu 'B' {
         assert_eq!(
             resolve_boot_entry(&entries, "B>Same Title").unwrap(),
             "B>Same Title"
+        );
+    }
+
+    /// `10_linux` puts the id in a variable rather than after a literal `--id`, so a
+    /// reader that only knows `--id` shows a title where an id exists.
+    #[test]
+    fn the_menuentry_id_option_variable_form_is_read_too() {
+        let cfg = r#"menuentry_id_option="--id gnulinux-simple-8387e4a0"
+menuentry 'CachyOS Linux, with Linux linux-cachyos-bore' --class cachyos --class gnu-linux $menuentry_id_option 'gnulinux-linux-cachyos-bore-advanced-757f018a' {
+	linux /vmlinuz-linux-cachyos-bore
+}
+menuentry 'ours' --id 'snap-11e61755' {
+	linux /vmlinuz-snap-11e61755
+}
+"#;
+        let entries = parse_menu_entries(cfg);
+        assert_eq!(
+            entries.len(),
+            2,
+            "the assignment line is still not an entry: {entries:?}"
+        );
+        assert_eq!(
+            entries[0].id.as_deref(),
+            Some("gnulinux-linux-cachyos-bore-advanced-757f018a"),
+            "the variable form carries a real id, and grub-reboot resolves it"
+        );
+        assert_eq!(
+            entries[0].display_id(),
+            "gnulinux-linux-cachyos-bore-advanced-757f018a"
+        );
+        assert_eq!(
+            entries[1].id.as_deref(),
+            Some("snap-11e61755"),
+            "the literal form still works"
+        );
+    }
+
+    /// Every id `grub-list` prints must be one `boot --entry` will accept, or the
+    /// listing sends people to a command that refuses what it just showed them.
+    #[test]
+    fn an_id_from_the_variable_form_can_be_armed() {
+        let cfg = "menuentry 'CachyOS Linux' $menuentry_id_option 'gnulinux-linux-cachyos-advanced-abc' {\n}\n";
+        let entries = parse_menu_entries(cfg);
+        assert_eq!(
+            resolve_boot_entry(&entries, "gnulinux-linux-cachyos-advanced-abc").unwrap(),
+            "gnulinux-linux-cachyos-advanced-abc"
         );
     }
 
