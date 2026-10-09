@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! The SNAPSHOTS tab.
+//! The SNAPTUNE tab.
 //!
 //! ## What this pane may and may not do
 //!
@@ -29,8 +29,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::store::{Paths, Store};
-use crate::write::{self, Plan};
+use crate::store::{human_bytes, Paths, Snapshot, Store};
+use crate::write::{self, Plan, Runner, System};
 
 /// What the operator has asked for but not yet confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,10 +55,24 @@ impl Pending {
 /// The pane's whole state.
 pub struct SnapshotScreen {
     pub paths: Paths,
-    ids: Vec<String>,
-    descriptions: Vec<String>,
+    /// Every snapshot in the store, hidden ones included.
+    ///
+    /// Hidden rows are kept rather than filtered: this is the pane from which you
+    /// unhide them, so dropping them would make that unreachable. They are
+    /// annotated instead, the way the CLI's `list` does it.
+    snapshots: Vec<Snapshot>,
+    /// The pinned GRUB default. grubenv is global rather than per-snapshot, so it
+    /// is read once per refresh and compared per row.
+    pinned: Option<String>,
     selection: usize,
+    /// `enter` grows the provenance panel; while it is up, PgUp/PgDn read it.
     detail: bool,
+    /// First provenance line shown, so a manifest longer than the panel is still
+    /// readable rather than silently truncated.
+    detail_scroll: usize,
+    /// Where this pane's commands go. Injected so tests can confirm an action
+    /// without spawning `grub-mkconfig`; the suite always gets [`System`].
+    runner: Box<dyn Runner>,
     /// Set while a confirmation popup is up. `modal()` reports it, which stops
     /// the shell stealing digits and quit keys mid-confirmation.
     pending: Option<Pending>,
@@ -75,12 +89,20 @@ impl Default for SnapshotScreen {
 impl SnapshotScreen {
     /// The pane on a real blade.
     pub fn with_paths(paths: Paths) -> Self {
+        SnapshotScreen::with_runner(paths, Box::new(System))
+    }
+
+    /// The pane with an injected command runner, for tests.
+    pub fn with_runner(paths: Paths, runner: Box<dyn Runner>) -> Self {
         let mut screen = SnapshotScreen {
             paths,
-            ids: Vec::new(),
-            descriptions: Vec::new(),
+            snapshots: Vec::new(),
+            pinned: None,
             selection: 0,
-            detail: false,
+            // Provenance is the reason to look at a snapshot, so it starts up.
+            detail: true,
+            detail_scroll: 0,
+            runner,
             pending: None,
             status: String::new(),
             error: None,
@@ -93,25 +115,27 @@ impl SnapshotScreen {
     pub fn refresh(&mut self) {
         match Store::new(self.paths.clone()).discover() {
             Ok(snapshots) => {
-                // Hidden snapshots are listed here on purpose: this is the pane
-                // from which you unhide them, and `--all` is the CLI's way to
-                // ask the same question.
-                self.ids = snapshots.iter().map(|s| s.id.clone()).collect();
-                self.descriptions = snapshots
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{}  {}  {}",
-                            s.date().unwrap_or_else(|| "-".to_string()),
-                            s.status().unwrap_or_else(|| "-".to_string()),
-                            s.description()
-                        )
-                    })
-                    .collect();
-                if self.selection >= self.ids.len() {
-                    self.selection = self.ids.len().saturating_sub(1);
+                if self.selection >= snapshots.len() {
+                    self.selection = snapshots.len().saturating_sub(1);
                 }
-                self.status = format!("{} snapshot(s)", self.ids.len());
+                self.detail_scroll = 0;
+                self.pinned = write::saved_entry();
+
+                // Totals, because on an archive blade the standing question is
+                // "which of these can go?" and that is answered in bytes.
+                let bytes: u64 = snapshots
+                    .iter()
+                    .map(|snapshot| snapshot.size_bytes(&self.paths))
+                    .sum();
+                let hidden = snapshots.iter().filter(|s| s.hidden).count();
+                self.status = format!(
+                    "{} snapshot(s) · {} hidden · {} on disk",
+                    snapshots.len(),
+                    hidden,
+                    human_bytes(bytes)
+                );
+                self.snapshots = snapshots;
+                self.error = None;
             }
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -121,7 +145,12 @@ impl SnapshotScreen {
     }
 
     pub fn selected_id(&self) -> Option<&str> {
-        self.ids.get(self.selection).map(String::as_str)
+        self.snapshots.get(self.selection).map(|s| s.id.as_str())
+    }
+
+    /// The selected snapshot, for the provenance panel.
+    pub fn selected(&self) -> Option<&Snapshot> {
+        self.snapshots.get(self.selection)
     }
 
     /// True while the confirmation popup is up.
@@ -130,17 +159,29 @@ impl SnapshotScreen {
     }
 
     pub fn select_next(&mut self) {
-        if !self.ids.is_empty() {
-            self.selection = (self.selection + 1).min(self.ids.len() - 1);
+        if !self.snapshots.is_empty() {
+            self.selection = (self.selection + 1).min(self.snapshots.len() - 1);
+            self.detail_scroll = 0;
         }
     }
 
     pub fn select_prev(&mut self) {
         self.selection = self.selection.saturating_sub(1);
+        // A scroll offset from the previous snapshot would open the new one
+        // half-read, which looks like missing data.
+        self.detail_scroll = 0;
+    }
+
+    /// Scroll the provenance panel. Clamped by the renderer, which is the only
+    /// place that knows how many lines fit.
+    pub fn scroll_detail(&mut self, delta: i32) {
+        let next = self.detail_scroll as i32 + delta;
+        self.detail_scroll = next.max(0) as usize;
     }
 
     pub fn toggle_detail(&mut self) {
         self.detail = !self.detail;
+        self.detail_scroll = 0;
     }
 
     /// Ask for an action. Nothing is written until [`SnapshotScreen::confirm`].
@@ -179,7 +220,7 @@ impl SnapshotScreen {
             return;
         };
         match self.plan_for(&action) {
-            Ok(plan) => match write::apply(&plan, false) {
+            Ok(plan) => match write::apply_with(&plan, false, self.runner.as_ref()) {
                 Ok(()) => {
                     self.status = format!("{}: done", action.verb());
                     self.pending = None;
@@ -219,7 +260,7 @@ impl SnapshotScreen {
 
 impl Screen for SnapshotScreen {
     fn title(&self) -> &'static str {
-        "SNAPSHOTS"
+        "SNAPTUNE"
     }
 
     fn on_enter(&mut self) {
@@ -236,7 +277,10 @@ impl Screen for SnapshotScreen {
     }
 
     fn status_hint(&self) -> Option<String> {
-        Some("↑↓ move · enter detail · p/P pin/unpin · h/H hide/unhide · r refresh".to_string())
+        Some(
+            "↑↓ move · enter detail · PgUp/PgDn scroll · p/P pin/unpin · h/H hide/unhide · r refresh"
+                .to_string(),
+        )
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Outcome {
@@ -270,6 +314,14 @@ impl Screen for SnapshotScreen {
                 }
                 KeyCode::Char('r') => {
                     self.refresh();
+                    Outcome::Consumed
+                }
+                KeyCode::PageDown => {
+                    self.scroll_detail(5);
+                    Outcome::Consumed
+                }
+                KeyCode::PageUp => {
+                    self.scroll_detail(-5);
                     Outcome::Consumed
                 }
                 KeyCode::Char('p') => {
@@ -311,62 +363,28 @@ impl Screen for SnapshotScreen {
             .and_then(|pending| self.plan_for(&pending).ok())
             .map(|plan| self.confirm_lines(&plan));
 
+        // Provenance is the point of this pane, so the panel is on by default and
+        // `enter` grows it for reading a long manifest.
+        let provenance = if self.detail {
+            (area.height * 55 / 100).max(6)
+        } else {
+            4
+        };
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Length(4)])
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(provenance),
+                Constraint::Length(3),
+            ])
             .split(area);
 
-        let mut lines: Vec<Line> = Vec::new();
-        if self.ids.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("No snapshots in {}", self.paths.root.display()),
-                theme::dim(),
-            )));
-        }
-        for (i, id) in self.ids.iter().enumerate() {
-            let marker = if i == self.selection { "▶ " } else { "  " };
-            let style = if i == self.selection {
-                theme::header()
-            } else {
-                theme::dim()
-            };
-            lines.push(Line::from(Span::styled(format!("{marker}{id}"), style)));
-            if self.detail {
-                lines.push(Line::from(Span::raw(format!(
-                    "      {}",
-                    self.descriptions.get(i).cloned().unwrap_or_default()
-                ))));
-            }
-        }
-        f.render_widget(
-            Paragraph::new(lines).block(widgets::panel("SNAPSHOTS", true)),
-            rows[0],
-        );
-
-        let mut bottom: Vec<Line> = Vec::new();
-        if let Some(err) = &self.error {
-            bottom.push(Line::from(Span::styled(
-                format!("! {err}"),
-                theme::header(),
-            )));
-        } else {
-            bottom.push(Line::from(Span::raw(self.status.clone())));
-        }
-        if let Some(id) = self.selected_id() {
-            bottom.push(Line::from(Span::styled(
-                format!("selected: {id}"),
-                theme::dim(),
-            )));
-        }
-        f.render_widget(
-            Paragraph::new(bottom)
-                .block(widgets::panel("status", false))
-                .wrap(Wrap { trim: true }),
-            rows[1],
-        );
+        self.draw_list(f, rows[0]);
+        self.draw_provenance(f, rows[1]);
+        self.draw_status(f, rows[2]);
 
         if let Some(lines) = popup_lines {
-            let popup = centered(area, 70, 60);
+            let popup = centered(area, 76, 60);
             f.render_widget(Clear, popup);
             f.render_widget(
                 Paragraph::new(lines)
@@ -375,6 +393,290 @@ impl Screen for SnapshotScreen {
                 popup,
             );
         }
+    }
+}
+
+impl SnapshotScreen {
+    /// The list: markers, id, date, status, kernel, description.
+    ///
+    /// A table rather than a column of ids. The description is how a human
+    /// recognises a snapshot and the date is how they place it; showing either
+    /// only on demand means scrolling through hashes to find the one you mean.
+    fn draw_list(&self, f: &mut Frame, area: Rect) {
+        let id_w = self
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.id.len())
+            .max()
+            .unwrap_or(12)
+            .clamp(12, 16);
+        let kernel_w = 21; // "7.2.9-1-cachyos-bore"
+                           // The kernel column only earns its place when a description still fits.
+        let show_kernel = area.width as usize >= 100;
+
+        let mut lines: Vec<Line> = Vec::new();
+        if self.snapshots.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("No snapshots in {}", self.paths.root.display()),
+                theme::dim(),
+            )));
+        } else {
+            let header = if show_kernel {
+                format!(
+                    "    {:<id_w$} {:<10} {:<9} {:<kernel_w$} DESCRIPTION",
+                    "SNAPSHOT", "DATE", "STATUS", "KERNEL"
+                )
+            } else {
+                format!(
+                    "    {:<id_w$} {:<10} {:<9} DESCRIPTION",
+                    "SNAPSHOT", "DATE", "STATUS"
+                )
+            };
+            lines.push(Line::from(Span::styled(header, theme::dim())));
+        }
+
+        for (index, snap) in self.snapshots.iter().enumerate() {
+            let selected = index == self.selection;
+            let style = if selected {
+                theme::header()
+            } else {
+                theme::dim()
+            };
+            let pinned = self.pinned.as_deref() == Some(snap.id.as_str());
+            // ▶ booted, ★ golden, P pinned. The letters are deliberate: ▶ and ★
+            // are typographic, P is unambiguous about what it means.
+            let markers = format!(
+                "{}{}{}",
+                if snap.booted { '▶' } else { ' ' },
+                if snap.golden { '★' } else { ' ' },
+                if pinned { 'P' } else { ' ' }
+            );
+            let description = if snap.hidden {
+                format!("{} (hidden)", snap.description())
+            } else {
+                snap.description()
+            };
+
+            let mut spans = vec![
+                Span::styled(format!("{markers} "), style),
+                Span::styled(format!("{:<id_w$} ", snap.id), style),
+                Span::styled(
+                    format!("{:<10} ", snap.date().unwrap_or_else(|| "-".to_string())),
+                    style,
+                ),
+                Span::styled(
+                    format!("{:<9} ", snap.status().unwrap_or_else(|| "-".to_string())),
+                    style,
+                ),
+            ];
+            if show_kernel {
+                spans.push(Span::styled(
+                    format!(
+                        "{:<kernel_w$} ",
+                        snap.kernel_version().unwrap_or_else(|| "-".to_string())
+                    ),
+                    style,
+                ));
+            }
+            spans.push(Span::styled(description, style));
+            lines.push(Line::from(spans));
+        }
+
+        f.render_widget(
+            Paragraph::new(lines).block(widgets::panel("SNAPTUNE", true)),
+            area,
+        );
+    }
+
+    /// The provenance panel for the selected snapshot.
+    fn draw_provenance(&mut self, f: &mut Frame, area: Rect) {
+        let lines = self.provenance_lines();
+        let visible = area.height.saturating_sub(2) as usize;
+        let total = lines.len();
+        // Clamp here rather than in `scroll_detail`, because this is the only
+        // place that knows how many lines actually fit.
+        self.detail_scroll = self.detail_scroll.min(total.saturating_sub(visible));
+
+        let shown: Vec<Line> = lines
+            .into_iter()
+            .skip(self.detail_scroll)
+            .take(visible)
+            .collect();
+
+        let title = if total > visible {
+            format!(
+                "provenance  {}-{} of {}  ·  PgUp/PgDn",
+                self.detail_scroll + 1,
+                (self.detail_scroll + visible).min(total),
+                total
+            )
+        } else {
+            "provenance".to_string()
+        };
+
+        f.render_widget(
+            Paragraph::new(shown).block(widgets::panel(&title, false)),
+            area,
+        );
+    }
+
+    /// Build the provenance lines for the selected snapshot.
+    ///
+    /// Sectioned by the question being asked rather than in the order the
+    /// manifest happens to store things. A screen of `key: value` is not
+    /// provenance anyone can act on; these sections are:
+    ///
+    /// - **warnings** — what is wrong *now*, computed from the disk rather than
+    ///   believed from the manifest;
+    /// - **boot** — whether it can boot at all;
+    /// - **disk** — what it costs;
+    /// - then the manifest itself, grouped: **identity**, **origin**,
+    ///   **contents**, **boot record**.
+    fn provenance_lines(&self) -> Vec<Line<'static>> {
+        let Some(snap) = self.selected() else {
+            return vec![Line::from(Span::styled(
+                "no snapshot selected",
+                theme::dim(),
+            ))];
+        };
+
+        let heading = |text: &str| Line::from(Span::styled(format!("── {text}"), theme::header()));
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // These flags decide which keys are refused, so they lead.
+        let mut flags: Vec<&str> = Vec::new();
+        if snap.booted {
+            flags.push("booted");
+        }
+        if snap.golden {
+            flags.push("golden");
+        }
+        if snap.hidden {
+            flags.push("hidden");
+        }
+        if self.pinned.as_deref() == Some(snap.id.as_str()) {
+            flags.push("pinned (GRUB default)");
+        }
+        if !flags.is_empty() {
+            lines.push(Line::from(Span::styled(flags.join(" · "), theme::header())));
+        }
+
+        let warnings = snap.warnings();
+        if !warnings.is_empty() {
+            lines.push(heading("warnings"));
+            for warning in warnings {
+                lines.push(Line::from(Span::raw(format!("  ! {warning}"))));
+            }
+        }
+
+        lines.push(heading("boot"));
+        lines.push(Line::from(Span::raw(format!(
+            "  vmlinuz {} · initramfs {} · cmdline {} · GRUB entry {}",
+            yn(snap.vmlinuz),
+            yn(snap.initramfs),
+            yn(snap.cmdline_file),
+            yn(snap.grub_entry)
+        ))));
+
+        match &snap.manifest {
+            None => lines.push(Line::from(Span::styled(
+                "  no manifest — only the artefacts and the GRUB entry are known",
+                theme::dim(),
+            ))),
+            Some(manifest) => {
+                let fields = manifest.fields();
+                for section in Section::ORDER {
+                    let rows: Vec<&(String, String)> = fields
+                        .iter()
+                        .filter(|(key, _)| section_for(key) == section)
+                        .collect();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    lines.push(heading(section.label()));
+                    for (key, value) in rows {
+                        lines.push(Line::from(Span::raw(format!("  {key}: {value}"))));
+                    }
+                }
+            }
+        }
+
+        // Last, because it is the one line that answers a question nobody asked
+        // until they are deciding what to delete.
+        lines.push(heading("disk"));
+        lines.push(Line::from(Span::raw(format!(
+            "  {} total for this snapshot",
+            human_bytes(snap.size_bytes(&self.paths))
+        ))));
+
+        lines
+    }
+
+    fn draw_status(&self, f: &mut Frame, area: Rect) {
+        let line = match &self.error {
+            Some(err) => Line::from(Span::styled(format!("! {err}"), theme::header())),
+            None => Line::from(Span::raw(self.status.clone())),
+        };
+        f.render_widget(
+            Paragraph::new(line)
+                .block(widgets::panel("status", false))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+    }
+}
+
+/// How the manifest's fields are grouped on screen.
+///
+/// The grouping is presentation, not schema: it exists so a reader sees "how it
+/// was captured" as a block instead of hunting for `source_tree.mode` among
+/// thirty unrelated keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Identity,
+    Origin,
+    Contents,
+    BootRecord,
+}
+
+impl Section {
+    const ORDER: [Section; 4] = [
+        Section::Identity,
+        Section::Origin,
+        Section::Contents,
+        Section::BootRecord,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::Identity => "identity",
+            Section::Origin => "origin",
+            Section::Contents => "contents",
+            Section::BootRecord => "recorded at capture",
+        }
+    }
+}
+
+/// Which section a dotted manifest path belongs to.
+///
+/// Keyed on the top-level block, so a field added inside a known block lands in
+/// the right group without being named here. Unknown blocks fall to `origin`,
+/// which is the safest: it is where provenance belongs.
+fn section_for(key: &str) -> Section {
+    match key.split('.').next().unwrap_or_default() {
+        "snapshot" => Section::Identity,
+        "kernel" | "source_tree" | "registered" => Section::Origin,
+        "module" | "patches" | "config" | "firmware" | "initramfs" => Section::Contents,
+        "grub" | "boot_files" | "test_results" | "cmdline" => Section::BootRecord,
+        _ => Section::Origin,
+    }
+}
+
+fn yn(present: bool) -> &'static str {
+    if present {
+        "OK"
+    } else {
+        "MISSING"
     }
 }
 
@@ -444,13 +746,37 @@ mod tests {
         ] {
             let snap = root.join(id);
             std::fs::create_dir_all(&snap).unwrap();
+            // Modelled on a real manifest rather than the minimum: this pane's job
+            // is provenance, so a fixture with one block would prove nothing about
+            // how the sections lay out.
             std::fs::write(
                 snap.join("manifest.yaml"),
-                format!("snapshot:\n  id: \"{id}\"\n  timestamp: \"{date}T10:00:00Z\"\n  description: \"{id} desc\"\n"),
+                format!(
+                    "snapshot:\n  id: \"{id}\"\n  timestamp: \"{date}T10:00:00Z\"\n  \
+                     description: \"{id} desc\"\n  status: \"active\"\n  parent: \"base\"\n\
+                     kernel:\n  version: \"7.2.9-1-cachyos-bore\"\n\
+                     source_tree:\n  mode: \"running-module\"\n\
+                     module:\n  srcversion: \"ABC1234567890\"\n  size: \"6584284 bytes\"\n\
+                     patches:\n  applied: false\n  markers: 0\n\
+                     grub:\n  entry_title: \"[{id}] {id} desc\"\n\
+                     test_results:\n  boot_test: \"PASS\"\n"
+                ),
             )
             .unwrap();
         }
         std::fs::create_dir_all(root.join("boot")).unwrap();
+        // Real artefacts, so the pane shows a healthy snapshot as well as a
+        // damaged one: a fixture where everything is missing only ever proves the
+        // warnings render.
+        for id in ["snap-aaaaaaaa", "snap-bbbbbbbb"] {
+            std::fs::write(root.join(format!("boot/vmlinuz-{id}")), vec![0u8; 1024]).unwrap();
+            std::fs::write(
+                root.join(format!("boot/initramfs-{id}.img")),
+                vec![0u8; 4096],
+            )
+            .unwrap();
+            std::fs::write(root.join(format!("boot/{id}.cmdline")), b"quiet").unwrap();
+        }
         std::fs::create_dir_all(root.join("etc/grub.d")).unwrap();
         std::fs::create_dir_all(root.join("proc")).unwrap();
         std::fs::write(
@@ -460,7 +786,9 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("etc/grub.d/40_custom"),
-            "#!/bin/sh\nexec tail -n +3 $0\n",
+            "#!/bin/sh\nexec tail -n +3 $0\n\
+             # === snap-aaaaaaaa: snap-aaaaaaaa desc ===\n\
+             menuentry 'x' --id 'snap-aaaaaaaa' {\n}\n",
         )
         .unwrap();
         root
@@ -469,15 +797,55 @@ mod tests {
     fn screen(tag: &str) -> (SnapshotScreen, PathBuf) {
         let root = fixture(tag);
         let paths = Paths::under(&root);
-        (SnapshotScreen::with_paths(paths), root)
+        // A recording runner, so confirming an action in a test writes the fixture
+        // files but never spawns grub-mkconfig on the test machine.
+        (
+            SnapshotScreen::with_runner(paths, Box::new(write::Recording::default())),
+            root,
+        )
     }
 
     #[test]
     fn lists_snapshots_newest_first() {
         let (s, root) = screen("list");
-        assert_eq!(s.ids.len(), 2);
+        assert_eq!(s.snapshots.len(), 2);
         assert_eq!(s.selected_id(), Some("snap-aaaaaaaa"));
-        assert_eq!(s.status, "2 snapshot(s)");
+        assert!(
+            s.status.starts_with("2 snapshot(s)"),
+            "status should lead with the count: {}",
+            s.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The point of the panel: a snapshot is recognised by its description and
+    /// placed by its date, so both belong in the list rather than behind a key.
+    #[test]
+    fn the_list_shows_date_and_description() {
+        let (mut s, root) = screen("columns");
+        let text = render(&mut s, 120, 24);
+
+        assert!(text.contains("DESCRIPTION"), "no description column");
+        assert!(text.contains("2026-10-08"), "first date missing");
+        assert!(text.contains("2026-08-25"), "second date missing");
+        assert!(text.contains("snap-aaaaaaaa desc"), "description missing");
+        assert!(text.contains("SNAPSHOT"), "no header");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Narrow panes drop the kernel column so the description still fits.
+    #[test]
+    fn a_narrow_pane_still_shows_the_description() {
+        let (mut s, root) = screen("narrow");
+        let text = render(&mut s, 74, 24);
+        assert!(
+            !text.contains("KERNEL"),
+            "kernel column should have been dropped"
+        );
+        assert!(
+            text.contains("snap-aaaaaaaa desc"),
+            "description must survive"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -533,7 +901,7 @@ mod tests {
         );
         assert!(!root.join(&id).join("manifest.yaml").exists());
         // ...and the pane now shows it as hidden (it is still listed).
-        assert_eq!(s.ids.len(), 2);
+        assert_eq!(s.snapshots.len(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -578,9 +946,52 @@ mod tests {
     #[test]
     fn detail_toggles() {
         let (mut s, root) = screen("detail");
-        assert!(!s.detail);
+        assert!(s.detail, "provenance starts visible");
         s.toggle_detail();
-        assert!(s.detail);
+        assert!(!s.detail);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The provenance panel must answer questions, not list keys in file order.
+    #[test]
+    fn provenance_is_sectioned() {
+        let (mut s, root) = screen("provenance");
+        let text = render(&mut s, 120, 40);
+
+        for heading in ["identity", "origin", "contents", "disk", "boot"] {
+            assert!(
+                text.contains(&format!("── {heading}")),
+                "missing section: {heading}"
+            );
+        }
+        // Fields appear under their section, dotted, as recorded.
+        assert!(text.contains("snapshot.description"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Sections are assigned by top-level block, so a field inside a known block
+    /// lands correctly without being named.
+    #[test]
+    fn fields_are_grouped_by_block() {
+        assert_eq!(section_for("snapshot.id"), Section::Identity);
+        assert_eq!(section_for("source_tree.mode"), Section::Origin);
+        assert_eq!(section_for("module.srcversion"), Section::Contents);
+        assert_eq!(section_for("patches.files[0].markers"), Section::Contents);
+        assert_eq!(section_for("test_results.boot_test"), Section::BootRecord);
+        // Unknown blocks default to provenance rather than being dropped.
+        assert_eq!(section_for("something_new"), Section::Origin);
+    }
+
+    #[test]
+    fn scrolling_the_provenance_panel_is_clamped_to_zero() {
+        let (mut s, root) = screen("scroll");
+        s.scroll_detail(-5);
+        assert_eq!(s.detail_scroll, 0, "cannot scroll above the first line");
+        s.scroll_detail(4);
+        assert_eq!(s.detail_scroll, 4);
+        // Changing selection resets it, or the next snapshot opens half-read.
+        s.select_next();
+        assert_eq!(s.detail_scroll, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -600,6 +1011,21 @@ mod tests {
             PathBuf::from(crate::store::DEFAULT_ROOT),
             "an empty variable must not mean an empty root"
         );
+    }
+
+    /// Not an assertion — a way to look at the pane without a terminal.
+    ///
+    /// `cargo test -p snapshot dump_pane -- --ignored --nocapture` prints the
+    /// rendered frame, which is how the layout gets reviewed after a change
+    /// instead of guessing at column widths.
+    #[test]
+    #[ignore = "prints the pane for review; run with --ignored --nocapture"]
+    fn dump_pane() {
+        let (mut s, root) = screen("dump");
+        println!("\n{}", render(&mut s, 120, 30));
+        s.select_next();
+        println!("\n{}", render(&mut s, 120, 30));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---- rendering ---------------------------------------------------------
@@ -631,12 +1057,11 @@ mod tests {
     #[test]
     fn the_pane_renders_its_title_and_rows() {
         let (mut s, root) = screen("render");
-        let text = render(&mut s, 100, 20);
+        let text = render(&mut s, 120, 30);
 
-        assert!(text.contains("SNAPSHOTS"), "panel title missing");
+        assert!(text.contains("SNAPTUNE"), "panel title missing");
         assert!(text.contains("snap-aaaaaaaa"), "first row missing");
         assert!(text.contains("snap-bbbbbbbb"), "second row missing");
-        assert!(text.contains('▶'), "selection marker missing");
         assert!(text.contains("2 snapshot(s)"), "status line missing");
         let _ = std::fs::remove_dir_all(&root);
     }

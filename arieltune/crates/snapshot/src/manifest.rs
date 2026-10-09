@@ -32,6 +32,59 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_yaml::Value;
 
+/// Flatten a YAML tree into `(dotted path, scalar)` pairs.
+///
+/// Mapping keys join with `.`, sequence indices append `[0]`, so a patch list
+/// reads as `patches.files[2].markers`.
+fn flatten(value: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::Mapping(map) => {
+            for (key, child) in map {
+                let key = match scalar_text(key) {
+                    Some(text) => text,
+                    // A non-scalar key is not something this format produces; name
+                    // it rather than dropping the subtree silently.
+                    None => format!("{key:?}"),
+                };
+                let path = if prefix.is_empty() {
+                    key
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten(child, &path, out);
+            }
+        }
+        Value::Sequence(items) => {
+            for (index, child) in items.iter().enumerate() {
+                flatten(child, &format!("{prefix}[{index}]"), out);
+            }
+        }
+        Value::Null => {}
+        scalar => {
+            if let Some(text) = scalar_text(scalar) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    out.push((prefix.to_string(), text.to_string()));
+                }
+            }
+        }
+    }
+}
+
+/// A YAML scalar as text.
+///
+/// `Value` has no `Display`, and `serde_yaml::to_string` would append a newline
+/// to every value. Handled by kind instead: a number or bool rendered as text is
+/// what the writer meant (`markers: 0`), and quoting rules are not reinterpreted.
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// A parsed `manifest.yaml`.
 ///
 /// Parsing is deliberately **not** allowed to fail. Five manifests across blades
@@ -157,6 +210,22 @@ impl Manifest {
             .or_else(|| self.scan(scan_key))
     }
 
+    /// Every scalar in the manifest, as dotted paths in document order.
+    ///
+    /// A manifest exists to record provenance, and *which* fields matter is not
+    /// knowable in advance: this module names a dozen, and the writer has emitted
+    /// more over time (`registered`, `source_tree.mode`, per-file patch markers).
+    /// So the detail view walks the tree instead of listing named accessors — a
+    /// field a future shell tool adds shows up with no code change here.
+    ///
+    /// Empty values are skipped: the writer emits plenty of `""` and `[]`, and
+    /// blank rows crowd out the ones that say something.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        flatten(&self.value, "", &mut out);
+        out
+    }
+
     // ---- semantic accessors ------------------------------------------------
 
     /// `snapshot.id`
@@ -240,7 +309,6 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// A real manifest, taken verbatim from `snap-da794092` on blade 104 —
     /// including the duplicated `BOOT_IMAGE=` and the unquoted `size`.
     const REAL: &str = r#"snapshot:
@@ -385,5 +453,52 @@ initramfs:
     #[test]
     fn a_clean_manifest_records_no_parse_error() {
         assert!(real().parse_error().is_none());
+    }
+
+    // ---- provenance flattening --------------------------------------------
+
+    #[test]
+    fn fields_flatten_to_dotted_paths() {
+        let fields = real().fields();
+        let lookup = |key: &str| {
+            fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+
+        assert_eq!(lookup("snapshot.id"), Some("snap-da794092"));
+        assert_eq!(lookup("kernel.version"), Some("7.0.9-1-cachyos"));
+        assert_eq!(lookup("module.srcversion"), Some("53DEA5FD08F79B2EB5D0913"));
+        // Scalars that came out as YAML booleans/numbers still render as text.
+        assert_eq!(lookup("patches.applied"), Some("false"));
+        assert_eq!(lookup("patches.markers"), Some("0"));
+        assert_eq!(lookup("test_results.boot_test"), Some("PASS"));
+    }
+
+    #[test]
+    fn fields_skip_empty_values() {
+        let fields = real().fields();
+        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+        // `source_tree.path: ""` and `patches.files: []` must not become blank rows.
+        assert!(
+            !keys.contains(&"source_tree.path"),
+            "empty string kept: {keys:?}"
+        );
+        assert!(!keys.iter().any(|k| k.starts_with("patches.files")));
+        assert!(fields.iter().all(|(_, v)| !v.is_empty()));
+    }
+
+    /// A manifest that would not parse still yields whatever a line scan found,
+    /// so the detail panel is not empty for the five legacy snapshots.
+    #[test]
+    fn a_broken_manifest_still_describes_itself() {
+        let m = Manifest::parse(LEGACY_BROKEN).expect("never fails");
+        assert!(m.fields().is_empty(), "no tree, so no flattened fields");
+        assert_eq!(
+            m.description().as_deref(),
+            Some("p0 7.0.9-gcf stock (rescue) 2026-07-05")
+        );
+        assert_eq!(m.status().as_deref(), Some("active"));
     }
 }

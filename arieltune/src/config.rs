@@ -9,10 +9,21 @@ use std::path::PathBuf;
 /// The four tabs, in fixed left-to-right order. This IS the tab order.
 pub const TAB_ORDER: [&str; 5] = ["wiki", "bios", "apu", "mem", "snapshot"];
 
+/// Names a tab answers to besides its key in [`TAB_ORDER`].
+///
+/// `snapshot` stays the key — it is what `--tab`, `default_tab` and the `1`-`5`
+/// routing resolve against, and scripts use it — while `snaptune` is the name the
+/// pane wears. Both must land on the same tab, so the brand costs nothing.
+const TAB_ALIASES: [(&str, &str); 1] = [("snaptune", "snapshot")];
+
 /// Resolve a tab name (case-insensitive) to its index in [`TAB_ORDER`].
 pub fn tab_index(name: &str) -> Option<usize> {
     let n = name.trim().to_ascii_lowercase();
-    TAB_ORDER.iter().position(|t| *t == n)
+    let key = match TAB_ALIASES.iter().find(|(alias, _)| *alias == n) {
+        Some((_, key)) => *key,
+        None => n.as_str(),
+    };
+    TAB_ORDER.iter().position(|t| *t == key)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +70,16 @@ mod tests {
         assert_eq!(tab_index(" Apu "), Some(2));
         assert_eq!(tab_index("mem"), Some(3));
         assert_eq!(tab_index("nope"), None);
+    }
+
+    /// The pane is branded SNAPTUNE; the key, the scripts and the muscle memory
+    /// stay `snapshot`. Both must reach the same tab.
+    #[test]
+    fn the_branded_name_reaches_the_same_tab() {
+        let snapshot = tab_index("snapshot");
+        assert_eq!(snapshot, Some(4), "the tab is the fifth");
+        assert_eq!(tab_index("snaptune"), snapshot);
+        assert_eq!(tab_index("SnapTune"), snapshot);
     }
 
     #[test]

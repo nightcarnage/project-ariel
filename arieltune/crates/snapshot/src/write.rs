@@ -370,8 +370,63 @@ fn yn(present: bool) -> &'static str {
     }
 }
 
+/// Where a plan's `Run` actions go.
+///
+/// Exists so the write path can be exercised end to end without a test spawning
+/// `grub-mkconfig` on whatever machine happens to be running the suite. The
+/// alternative — building fixtures carefully so that no step has a command in it —
+/// would make the tests lie about what real plans contain.
+pub trait Runner {
+    fn run(&self, argv: &[String]) -> Result<()>;
+}
+
+/// Runs commands for real.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct System;
+
+impl Runner for System {
+    fn run(&self, argv: &[String]) -> Result<()> {
+        let (program, args) = argv.split_first().context("empty argv")?;
+        let out = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .with_context(|| format!("running {program}"))?;
+        if !out.status.success() {
+            // Stop at the first failure: a half-applied plan is worse than a
+            // refused one, and the caller sees which step it was.
+            bail!(
+                "{} failed: {}",
+                argv.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Records commands instead of running them, for tests.
+///
+/// Cloneable and shared, so a test can hand one to the pane and still read back
+/// what was issued.
+#[derive(Debug, Default, Clone)]
+pub struct Recording {
+    pub calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+}
+
+impl Runner for Recording {
+    fn run(&self, argv: &[String]) -> Result<()> {
+        self.calls.borrow_mut().push(argv.to_vec());
+        Ok(())
+    }
+}
+
 /// Execute a plan. With `dry_run`, print it and touch nothing.
 pub fn apply(plan: &Plan, dry_run: bool) -> Result<()> {
+    apply_with(plan, dry_run, &System)
+}
+
+/// Execute a plan, sending its commands to `runner`.
+pub fn apply_with(plan: &Plan, dry_run: bool, runner: &dyn Runner) -> Result<()> {
     println!("{}", plan.summary);
     for line in plan.describe() {
         println!("  {line}");
@@ -391,22 +446,7 @@ pub fn apply(plan: &Plan, dry_run: bool) -> Result<()> {
                 std::fs::rename(from, to)
                     .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
             }
-            Action::Run { argv, .. } => {
-                let (program, args) = argv.split_first().context("empty argv")?;
-                let out = std::process::Command::new(program)
-                    .args(args)
-                    .output()
-                    .with_context(|| format!("running {program}"))?;
-                if !out.status.success() {
-                    // Stop at the first failure: a half-applied plan is worse
-                    // than a refused one, and the caller sees which step it was.
-                    bail!(
-                        "{} failed: {}",
-                        argv.join(" "),
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                }
-            }
+            Action::Run { argv, .. } => runner.run(argv)?,
         }
     }
     Ok(())
@@ -440,7 +480,19 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        Paths::under("/fixture")
+        Paths::under(fixture_root())
+    }
+
+    /// A real, writable scratch root.
+    ///
+    /// `/fixture` was enough while every test only *planned*, because a plan
+    /// names paths without touching them. The moment one applies a plan, a fake
+    /// root fails the write for the wrong reason — so the planning tests would
+    /// keep passing while the apply path was never really exercised.
+    fn fixture_root() -> PathBuf {
+        let dir = std::env::temp_dir().join("snapshot-write-fixture");
+        std::fs::create_dir_all(dir.join("etc/default")).expect("scratch dir");
+        dir
     }
 
     fn snapshot(id: &str, hidden: bool) -> Snapshot {
@@ -474,7 +526,7 @@ mod tests {
                 .expect("render the existing entry"),
             grub_defaults: "GRUB_DEFAULT=0\nGRUB_DISABLE_SUBMENU='false'\nGRUB_TIMEOUT=5\n"
                 .to_string(),
-            grub_defaults_path: PathBuf::from("/fixture/etc/default/grub"),
+            grub_defaults_path: fixture_root().join("etc/default/grub"),
             acpi_override: false,
         }
     }
@@ -670,5 +722,37 @@ mod tests {
         assert_eq!(lines.len(), plan.actions.len());
         assert!(lines.iter().any(|l| l.starts_with("rename")));
         assert!(lines.iter().any(|l| l.starts_with("run")));
+    }
+
+    /// Applying a plan writes the files and issues the commands, and the runner
+    /// seam means a test can assert *which* commands without spawning them.
+    #[test]
+    fn apply_issues_the_commands_to_the_runner() {
+        let runner = Recording::default();
+        let plan = plan_pin(&paths(), &state(), "snap-target").expect("plans");
+        apply_with(&plan, false, &runner).expect("applies");
+
+        let calls = runner.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|argv| argv.first().map(String::as_str) == Some("grub-set-default")),
+            "pin must set the default: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|argv| argv.first().map(String::as_str) == Some("grub-mkconfig")),
+            "...and regenerate the menu: {calls:?}"
+        );
+    }
+
+    /// `--dry-run` must not reach the runner at all.
+    #[test]
+    fn a_dry_run_issues_no_commands() {
+        let runner = Recording::default();
+        let plan = plan_unpin(&paths()).expect("plans");
+        apply_with(&plan, true, &runner).expect("applies");
+        assert!(runner.calls.borrow().is_empty(), "dry-run ran something");
     }
 }

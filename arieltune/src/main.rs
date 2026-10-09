@@ -22,7 +22,7 @@ use shell::Shell;
 #[command(
     name = "arieltune",
     version,
-    about = "BC-250 tuning suite: WIKI (manual), BIOS (CBS/OEM Setup), APU (liberation+clocks), MEM (GDDR6 timings), SNAPSHOTS (kernel snapshots).",
+    about = "BC-250 tuning suite: WIKI (manual), BIOS (CBS/OEM Setup), APU (liberation+clocks), MEM (GDDR6 timings), SNAPTUNE (kernel snapshots).",
     long_about = "arieltune is the unified tuner for the ASRock BC-250 (Cyan Skillfish, gfx1013, PCI 1002:13FE).\n\
         \n\
         Tabs (each is also a CLI namespace): apu, mem, bios, wiki, snapshot.\n\
@@ -37,7 +37,7 @@ use shell::Shell;
         Migrate/uninstall are suite-level and dry-run by default (need --apply)."
 )]
 struct Cli {
-    /// Open the TUI at this tab: wiki, bios, apu, mem, or snapshot. Overrides the config default_tab.
+    /// Open the TUI at this tab: wiki, bios, apu, mem, or snapshot (SNAPTUNE). Overrides the config default_tab.
     #[arg(long, global = true)]
     tab: Option<String>,
 
@@ -87,9 +87,10 @@ enum Top {
         #[command(subcommand)]
         cmd: Option<wiki::Cmd>,
     },
-    /// SNAPSHOTS tab: the kernel snapshot store and its GRUB entries. Bare `snapshot` opens the tab.
+    /// SNAPTUNE tab: the kernel snapshot store and its GRUB entries. Bare `snapshot` opens the tab.
     ///
-    /// `arieltune snapshot <subcommand>` runs the CLI. Reads are safe anywhere; `pin`, `unpin`,
+    /// `arieltune snapshot <subcommand>` runs the CLI (also reachable as `snaptune`).
+    /// Reads are safe anywhere; `pin`, `unpin`,
     /// `hide` and `unhide` change the boot configuration (/etc/grub.d, grubenv) and need root,
     /// and every one of them takes --dry-run to print the plan first. The guards refuse to hide
     /// the booted, golden, or pinned snapshot, because removing that menu entry makes GRUB fall
@@ -97,6 +98,7 @@ enum Top {
     ///
     /// NOT IMPLEMENTED YET: create, register, rebuild, prune, boot. Those still belong to the
     /// bc-250-snapshotter shell tool, which remains authoritative.
+    #[command(alias = "snaptune")]
     Snapshot {
         #[command(flatten)]
         global: snapshot::cli::Global,

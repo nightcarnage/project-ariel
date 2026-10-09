@@ -171,6 +171,107 @@ impl Snapshot {
         let stamp = self.timestamp().unwrap_or_else(|| String::from("0000"));
         (stamp, self.id.clone())
     }
+
+    /// Bytes this snapshot costs on disk: its three boot artefacts plus its own
+    /// module copy.
+    ///
+    /// Worth showing on an archive blade, where the standing question is which of
+    /// these can go — and that is not answerable from a list of ids.
+    pub fn size_bytes(&self, paths: &Paths) -> u64 {
+        [
+            paths.boot.join(format!("vmlinuz-{}", self.id)),
+            paths.boot.join(format!("initramfs-{}.img", self.id)),
+            paths.boot.join(format!("{}.cmdline", self.id)),
+            paths.root.join(&self.id).join("modules/amdgpu.ko.zst"),
+        ]
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
+    }
+
+    /// Everything about this snapshot that is wrong or worth knowing.
+    ///
+    /// **Computed, not recorded.** The manifest states what the writer believed
+    /// at capture time; this states what is true on disk now. A snapshot whose
+    /// initramfs was deleted still carries a manifest claiming it exists, and
+    /// that difference is the point.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+
+        if let Some(err) = &self.manifest_error {
+            out.push(format!(
+                "manifest is not valid YAML — the fields shown came from a line scan ({err})"
+            ));
+        }
+
+        let mut missing = Vec::new();
+        if !self.vmlinuz {
+            missing.push("vmlinuz");
+        }
+        if !self.initramfs {
+            missing.push("initramfs");
+        }
+        if !self.cmdline_file {
+            missing.push("cmdline");
+        }
+        if !missing.is_empty() {
+            out.push(format!(
+                "cannot boot: {} missing from /boot",
+                missing.join(" and ")
+            ));
+        }
+
+        if !self.grub_entry {
+            out.push("no GRUB entry — not bootable from the menu".to_string());
+        }
+
+        if self.hidden {
+            out.push(
+                "hidden: the manifest is renamed, so the shell tool omits it from its list"
+                    .to_string(),
+            );
+        }
+
+        // The auditability gap: a build-from-source id hashes four source files
+        // and Module.symvers, and the manifest records none of them, so the id
+        // cannot be re-derived once the tree is gone. Three snapshots on blade
+        // 104 are already in that state.
+        let built_from_source = self
+            .manifest
+            .as_ref()
+            .and_then(|m| m.source_tree_mode())
+            .as_deref()
+            == Some("built-from-source");
+        if built_from_source && self.manifest_error.is_none() {
+            out.push(
+                "id hashed from a source tree, but the manifest records none of its inputs — \
+                 it cannot be re-derived"
+                    .to_string(),
+            );
+        }
+
+        out
+    }
+}
+
+/// Bytes as a short human string, for on-screen totals.
+///
+/// Deliberately coarse (one decimal, four units): this exists to answer "can I
+/// afford this?" at a glance, not to be parsed.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 /// Reads a snapshot store. Holds paths only; every method is a fresh read, so a
@@ -445,8 +546,106 @@ mod tests {
     }
 
     /// A malformed timestamp must not be truncated into a plausible date.
+    /// A minimal snapshot, for exercising the derived views without a fixture of
+    /// files on disk.
+    fn bare_snapshot(id: &str) -> Snapshot {
+        Snapshot {
+            id: id.to_string(),
+            manifest: None,
+            manifest_error: None,
+            hidden: false,
+            golden: false,
+            booted: false,
+            grub_entry: true,
+            vmlinuz: true,
+            initramfs: true,
+            cmdline_file: true,
+        }
+    }
+
+    /// A healthy snapshot has nothing to report — otherwise the warnings list
+    /// becomes noise nobody reads.
     #[test]
-    fn date_rejects_a_non_date_prefix() {
+    fn a_healthy_snapshot_has_no_warnings() {
+        assert!(bare_snapshot("snap-aaaaaaaa").warnings().is_empty());
+    }
+
+    #[test]
+    fn warnings_name_the_missing_artefacts() {
+        let mut snap = bare_snapshot("snap-aaaaaaaa");
+        snap.initramfs = false;
+        let warnings = snap.warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("cannot boot")),
+            "{warnings:?}"
+        );
+        assert!(warnings.iter().any(|w| w.contains("initramfs")));
+        assert!(
+            !warnings.iter().any(|w| w.contains("vmlinuz")),
+            "vmlinuz is present, so it must not be listed: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warnings_flag_a_missing_grub_entry_and_a_hidden_manifest() {
+        let mut snap = bare_snapshot("snap-aaaaaaaa");
+        snap.grub_entry = false;
+        snap.hidden = true;
+        let warnings = snap.warnings();
+        assert!(warnings.iter().any(|w| w.contains("no GRUB entry")));
+        assert!(warnings.iter().any(|w| w.contains("hidden")));
+    }
+
+    /// The auditability gap this crate found: a build-from-source id hashes four
+    /// source files and Module.symvers, none of which the manifest records.
+    #[test]
+    fn warnings_flag_an_underivable_id() {
+        let mut snap = bare_snapshot("snap-aaaaaaaa");
+        snap.manifest =
+            Some(Manifest::parse("source_tree:\n  mode: \"built-from-source\"\n").expect("parses"));
+        let warnings = snap.warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("cannot be re-derived")),
+            "{warnings:?}"
+        );
+
+        // A running-module capture records what it hashed, so it is fine.
+        let mut fine = bare_snapshot("snap-bbbbbbbb");
+        fine.manifest =
+            Some(Manifest::parse("source_tree:\n  mode: \"running-module\"\n").expect("parses"));
+        assert!(fine.warnings().is_empty(), "{:?}", fine.warnings());
+    }
+
+    #[test]
+    fn an_unreadable_manifest_is_itself_a_warning() {
+        let mut snap = bare_snapshot("snap-aaaaaaaa");
+        snap.manifest_error = Some("could not find expected ':'".to_string());
+        let warnings = snap.warnings();
+        assert!(warnings.iter().any(|w| w.contains("not valid YAML")));
+    }
+
+    #[test]
+    fn sizes_add_up_from_the_real_files() {
+        let root = fixture("sizes");
+        let store = Store::new(Paths::under(&root));
+        let found = store.discover().unwrap();
+        let newest = found.iter().find(|s| s.id == "snap-aaaaaaaa").unwrap();
+        // The fixture writes 1 byte each for vmlinuz, cmdline and initramfs.
+        assert_eq!(newest.size_bytes(&store.paths), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn human_bytes_reads_at_a_glance() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024 * 3 / 2), "1.5 MiB");
+        assert_eq!(human_bytes(2 * 1024 * 1024 * 1024), "2.0 GiB");
+    }
+
+    #[test]
+    fn a_malformed_timestamp_must_not_be_truncated_into_a_date() {
         let root = temp_dir("baddate");
         let snap = root.join("snap-cccccccc");
         std::fs::create_dir_all(&snap).unwrap();
