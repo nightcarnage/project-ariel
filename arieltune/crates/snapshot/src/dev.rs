@@ -802,9 +802,12 @@ impl DevPlan {
             }
         } else {
             out.push(String::new());
+            // "The image being derived from", not "the parent snapshot's" — this plan
+            // is printed by `create` too, whose base image is the running kernel's
+            // own initramfs rather than any snapshot's.
             out.push(
-                "would       assemble a snapshot from this module, derived from the \
-                 parent snapshot's own initramfs"
+                "would       derive an image carrying this module, from the base image \
+                 in the plan above"
                     .to_string(),
             );
             out.push(
