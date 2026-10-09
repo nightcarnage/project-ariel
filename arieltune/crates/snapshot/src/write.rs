@@ -424,13 +424,38 @@ pub trait Runner {
 
 /// Runs commands for real.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct System;
+pub struct System {
+    /// Run commands as this user, when set.
+    ///
+    /// `dev --register` needs root for the writes under `/boot`, `/etc/grub.d` and
+    /// the store — but the *build* must not be root's. `make` rewrites the objects
+    /// whose inputs changed, and those objects would then belong to root, which
+    /// breaks the next build the developer runs as themselves. Handing the build
+    /// to the tree's owner is what keeps the tree usable.
+    pub as_user: Option<(u32, u32)>,
+}
+
+impl System {
+    /// A runner that executes as `uid`/`gid`.
+    pub fn as_user(uid: u32, gid: u32) -> Self {
+        Self {
+            as_user: Some((uid, gid)),
+        }
+    }
+}
 
 impl Runner for System {
     fn run(&self, argv: &[String]) -> Result<()> {
         let (program, args) = argv.split_first().context("empty argv")?;
-        let out = std::process::Command::new(program)
-            .args(args)
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        if let Some((uid, gid)) = self.as_user {
+            use std::os::unix::process::CommandExt;
+            // gid before uid: once the uid has dropped, setting the group is no
+            // longer permitted.
+            command.gid(gid).uid(uid);
+        }
+        let out = command
             .output()
             .with_context(|| format!("running {program}"))?;
         if !out.status.success() {
@@ -464,7 +489,7 @@ impl Runner for Recording {
 
 /// Execute a plan. With `dry_run`, print it and touch nothing.
 pub fn apply(plan: &Plan, dry_run: bool) -> Result<()> {
-    apply_with(plan, dry_run, &System)
+    apply_with(plan, dry_run, &System::default())
 }
 
 /// Execute a plan, sending its commands to `runner`.

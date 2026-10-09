@@ -354,6 +354,47 @@ pub fn module_fact(field: &str, ko: &Path) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Whether a build should be handed to `owner` rather than run by `euid`.
+///
+/// The rule, split out so it is testable without a filesystem: only root needs to
+/// step aside, and only for a tree that somebody else owns.
+pub fn needs_privilege_drop(euid: u32, owner: u32) -> bool {
+    euid == 0 && owner != 0
+}
+
+/// The user a build of this tree should run as, when that is not us.
+///
+/// **This is not a nicety.** `dev --register` must run as root to write `/boot`,
+/// `/etc/grub.d` and the store, but `make` rewrites the objects whose inputs
+/// changed — and those objects would then be root's. The developer's next build,
+/// as themselves, then fails on a file it cannot overwrite. Observed on blade 115:
+/// `amdgpu_drv.o`, `amdgpu.o`, `amdgpu.mod.o` and `amdgpu.ko` all came back
+/// root-owned after a sudo-run iteration.
+pub fn build_as(tree: &Path) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(tree).ok()?;
+    if needs_privilege_drop(unsafe { libc::geteuid() }, meta.uid() as u32) {
+        Some((meta.uid() as u32, meta.gid() as u32))
+    } else {
+        None
+    }
+}
+
+/// Give a directory to another user, so a dropped-privilege build can write in it.
+pub fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .context("the scratch path contains a NUL byte")?;
+    if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
+        bail!(
+            "cannot give {} to {uid}:{gid}: {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 /// The most recently modified `.ko` under any of `dirs`.
 ///
 /// Newest rather than first: an incremental build leaves older objects behind, and
@@ -964,5 +1005,24 @@ mod tests {
             Some("7.0.9-1-cachyos-bore".to_string()),
         );
         assert!(targeted.can_build(), "{:?}", targeted.blockers);
+    }
+
+    /// The rule that keeps a sudo-run build from taking the tree with it.
+    ///
+    /// Observed on blade 115: after `sudo snaptune dev --run --register`, four
+    /// objects under the amdgpu directory came back owned by root — exactly the
+    /// ones `make` had rewritten — and the developer's next build, as themselves,
+    /// would have failed on a file it could not overwrite.
+    #[test]
+    fn only_root_building_someone_elses_tree_steps_aside() {
+        // Root building a user's tree: hand it over.
+        assert!(needs_privilege_drop(0, 1000));
+        // Root building root's own tree: nothing to hand over.
+        assert!(!needs_privilege_drop(0, 0));
+        // A user building their own tree: already the right owner.
+        assert!(!needs_privilege_drop(1000, 1000));
+        // A user building a tree they do not own: their own permissions decide,
+        // and silently becoming the other user would be a surprise.
+        assert!(!needs_privilege_drop(1000, 0));
     }
 }

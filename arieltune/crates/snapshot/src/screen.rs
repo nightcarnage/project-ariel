@@ -128,7 +128,7 @@ impl Default for SnapshotScreen {
 impl SnapshotScreen {
     /// The pane on a real blade.
     pub fn with_paths(paths: Paths) -> Self {
-        SnapshotScreen::with_runner(paths, Box::new(System))
+        SnapshotScreen::with_runner(paths, Box::new(System::default()))
     }
 
     /// The pane with an injected command runner, for tests.

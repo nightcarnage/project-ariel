@@ -546,7 +546,23 @@ fn cmd_dev(
     )?;
 
     let work = std::env::temp_dir().join(format!("snapdev-{}", std::process::id()));
-    let prepared = dev::build(&plan.tree, &write::System, &work)?;
+
+    // `--register` needs root, but the build must not be root's: `make` rewrites the
+    // objects its inputs changed, and a root-owned `amdgpu_drv.o` breaks the next
+    // build the developer runs as themselves. Hand the build to the tree's owner,
+    // and the scratch directory with it, since that is where the stripped and
+    // compressed module are written.
+    let build_runner = match dev::build_as(&plan.tree.path) {
+        Some((uid, gid)) => {
+            std::fs::create_dir_all(&work)
+                .with_context(|| format!("creating scratch space {}", work.display()))?;
+            dev::hand_over(&work, uid, gid)?;
+            write::System::as_user(uid, gid)
+        }
+        None => write::System::default(),
+    };
+
+    let prepared = dev::build(&plan.tree, &build_runner, &work)?;
     println!(
         "built       {} ({} bytes, stripped)",
         prepared.source.display(),
