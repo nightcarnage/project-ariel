@@ -187,18 +187,36 @@ only honoured when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. `boot` re
 the armed value back out of grubenv before it reports success, and will not reboot
 unless that check passed.
 
-### 3.5 The name: `snaptune`, and the `snapshot` symlink
+### 3.5 The name: `snaptune`, not `snapshot`
 
-The binary is `snaptune`, not `snapshot`, because `snapshot` is an unrelated
-program on the workstation (the GNOME screenshot tool answers `Unknown option
---ids`), and because it joins `arieltune`/`llmtune` as a sibling.
+The binary is `snaptune` for two reasons: `snapshot` is an unrelated program on the
+workstation (the GNOME screenshot tool answers `Unknown option --ids`), and the name
+joins the fleet's per-namespace convention.
 
-Blades get a `snapshot` **compat symlink** so the existing fleet scripts keep
-working. It is a symlink to this binary, so the shell tool's behaviour is not
-preserved by the symlink — only its name is. Where the two differ is §6.
+**`/usr/local/bin/snapshot` on the blades is the shell tool, and stays that way.**
+Checked on 104 and 115: both have a 108 KB `snapshot` there (with
+`/etc/bash_completion.d/snapshot` on 104 and the repo checkout at
+`/srv/data/bc-250-snapshotter/`), so a compat symlink to this binary cannot be
+created without displacing the tool it would be replacing. `snaptune` is installed
+alongside it instead, as its own binary, and the two coexist:
 
-The same verbs are also reachable as `arieltune snapshot <verb>`, which is the
-namespaced form the TUI's other modules use.
+```text
+/usr/local/bin/snapshot    the shell tool, unchanged
+/usr/local/bin/snaptune    this tool
+```
+
+The fleet convention is one multi-call `arieltune` plus symlinks per namespace
+(`aputune`, `biostune`, `memtune`, `wikitune`, `at` all point at it). This tool is
+a **standalone binary** rather than another such symlink, because the installed
+`arieltune` has no `snapshot` namespace yet — building and installing a new
+`arieltune` would replace the binary the other modules are served from. When that
+happens, `snaptune` becomes a symlink to `arieltune` and `arieltune snapshot <verb>`
+starts working; until then, `snaptune <verb>` is the only entry point.
+
+Retiring the shell tool is therefore two deliberate steps, not one: install
+`arieltune` with the namespace, then replace `/usr/local/bin/snapshot` with the
+compat symlink and check the fleet scripts. §6 lists the verbs that would need
+porting before that step is safe.
 
 ---
 
@@ -464,3 +482,44 @@ Five checks, in the order they appear. An `ok` means the check ran and passed; a
 recomputes the id from the stored bytes. It runs only for kinds whose id *is* the
 content (§3.1) and says "not checked" otherwise — on most existing snapshots, which
 the shell wrote, that is the expected answer rather than a problem.
+
+---
+
+## 8. Installing
+
+Build from the `arieltune` workspace:
+
+```bash
+cargo build -p snapshot --bin snaptune              # dev build
+cargo build -p snapshot --release --bin snaptune    # release
+```
+
+Install on a blade — `snaptune` only, never `/usr/local/bin/snapshot` (§3.5):
+
+```bash
+scp target/debug/snaptune blade:/var/tmp/snaptune.new
+ssh blade 'sudo install -m755 -o root -g root /var/tmp/snaptune.new /usr/local/bin/snaptune \
+           && rm -f /var/tmp/snaptune.new && snaptune --version'
+```
+
+Note `cargo test` and `cargo clippy` do **not** refresh `target/debug/snaptune` —
+only a real `cargo build` does. Installing a binary that `cargo test` left behind
+silently ships the previous version's behaviour.
+
+Replace a binary that may be running by uploading to `<name>.new` and `mv -f`-ing it
+over the target; an in-place `scp` fails with "Text file busy".
+
+### Which verbs need root
+
+Everything read-only works as an ordinary user, including `doctor` and `verify`
+(confirmed on 104 and 115). Only the writers need `sudo`: `create`, `rebuild`,
+`dev --register`, `register`, `boot`, `pin`, `unpin`, `hide`, `unhide`,
+`golden <id>`, `prune`.
+
+### Pointing at a different store
+
+`--root <dir>` (or `SNAPSHOT_ROOT=`) reads a store from anywhere, with the boot,
+GRUB and cmdline paths taken from under it — so a fixture is readable end to end and
+a whole workflow can be exercised without touching the real one. That is how
+`create` and `rebuild` were validated: a fixture root under `/var/tmp`, which writes
+nothing outside it.
