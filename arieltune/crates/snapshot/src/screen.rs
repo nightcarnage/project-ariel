@@ -1022,6 +1022,17 @@ impl Screen for SnapshotScreen {
         // Bounded, though: the panel asks for 55% of whatever is left, and on a
         // short terminal that leaves the list one or two data rows. The list is how
         // you choose what the panel describes, so it keeps a floor.
+        // The suite shell owns the tab bar and the global status line; this pane
+        // draws its own title/body/footer inside the content area it is handed, the
+        // layout every other tab uses. The title is split off first, so the sizing
+        // below still measures the height that is actually left.
+        let root = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        self.draw_title(f, root[0]);
+        let area = root[1];
+
         let provenance = if self.detail {
             let wanted = (area.height * 55 / 100).max(6);
             let ceiling = area.height.saturating_sub(MIN_LIST_ROWS + 3);
@@ -1143,6 +1154,23 @@ impl SnapshotScreen {
             Ok(strings) => ModuleScan::Strings(strings),
             Err(why) => ModuleScan::Unavailable(format!("{why:#}")),
         }
+    }
+
+    /// The pane's title line: ` arieltune snap ` and what the pane is for.
+    ///
+    /// The tab bar says which tab you are on; this says which pane, in the same
+    /// shape as WIKI, BIOS, APU and MEM so the suite reads as one program rather
+    /// than five. It is the first row of the pane, and the table starts below it.
+    ///
+    /// `snap`, not `snapshot`: the tab and the CLI namespace are `snap`, the way
+    /// this pane's siblings are named on screen (`arieltune mem`, not
+    /// `arieltune memory`). `snaptune` remains the name of the standalone binary.
+    fn draw_title(&self, f: &mut Frame, area: Rect) {
+        let line = Line::from(vec![
+            Span::styled(" arieltune snap ", theme::key()),
+            Span::styled("  kernel snapshots + patch series", theme::dim()),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
     }
 
     /// The list: markers, id, date, status, kernel, description.
@@ -2454,7 +2482,11 @@ mod tests {
     #[test]
     fn provenance_is_sectioned() {
         let (mut s, root) = screen("provenance");
-        let text = render(&mut s, 120, 40);
+        // 42, not the 40 this used to use. The pane draws its own title row now, and
+        // that row comes out of the height the panel's 55% is measured against, so
+        // showing all five headings needs one line more (41 is the exact boundary;
+        // the extra line keeps this test about the sectioning, not the arithmetic).
+        let text = render(&mut s, 120, 42);
 
         for heading in ["identity", "origin", "contents", "disk", "boot"] {
             assert!(
@@ -2685,7 +2717,12 @@ mod tests {
     // widget tree the shell drives, rendered into a buffer the test can read, so
     // a broken layout fails here instead of needing an operator at a console.
 
-    fn render(screen: &mut SnapshotScreen, width: u16, height: u16) -> String {
+    /// The pane as rows.
+    ///
+    /// Rows rather than one flat run of cells, because "the title is the first line
+    /// and the table starts below it" is a statement about position, and a flat
+    /// string cannot make it. It also makes the review dumps readable.
+    fn render_rows(screen: &mut SnapshotScreen, width: u16, height: u16) -> Vec<String> {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -2696,13 +2733,18 @@ mod tests {
                 screen.draw(frame, area);
             })
             .expect("draws without error");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol())
+                    .collect()
+            })
             .collect()
+    }
+
+    fn render(screen: &mut SnapshotScreen, width: u16, height: u16) -> String {
+        render_rows(screen, width, height).join("\n")
     }
 
     #[test]
@@ -2710,10 +2752,51 @@ mod tests {
         let (mut s, root) = screen("render");
         let text = render(&mut s, 120, 30);
 
+        assert!(text.contains(" arieltune snap "), "pane title missing");
         assert!(text.contains("SNAP"), "panel title missing");
         assert!(text.contains("snap-aaaaaaaa"), "first row missing");
         assert!(text.contains("snap-bbbbbbbb"), "second row missing");
         assert!(text.contains("2 snapshot(s)"), "status line missing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The title line goes ABOVE the table, on the first row of the pane.
+    ///
+    /// Position is the whole point: every other tab opens with its title under the
+    /// tab bar, and this pane used to start straight into the table, so its rows sat
+    /// one line higher than the other tabs'. Asserting the text is present would not
+    /// catch that -- the table would still be there, just in the wrong place.
+    #[test]
+    fn the_title_is_the_first_row_and_the_table_starts_below_it() {
+        let (mut s, root) = screen("title-row");
+        let rows = render_rows(&mut s, 120, 30);
+
+        assert!(
+            rows[0].starts_with(" arieltune snap "),
+            "row 0 is not the pane title: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("kernel snapshots"),
+            "the title row should say what the pane is for: {:?}",
+            rows[0]
+        );
+        assert!(
+            !rows[0].contains('┌'),
+            "the table must not begin on the title row: {:?}",
+            rows[0]
+        );
+        // The table's own frame, and then its column header, below the title.
+        assert!(
+            rows[1].contains('┌') && rows[1].contains("SNAP"),
+            "the table should start on row 1: {:?}",
+            rows[1]
+        );
+        assert!(
+            rows[2].contains("SNAPSHOT"),
+            "column headers should follow the frame: {:?}",
+            rows[2]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
