@@ -7,8 +7,8 @@
 #
 # Build ON this host (same arch/glibc as the target), then per node:
 #   * scp the ONE release binary
-#   * install it to /usr/local/bin/arieltune + the `at` alias + the four compat
-#     symlinks (aputune/memtune/biostune/wikitune -> arieltune)
+#   * install it to /usr/local/bin/arieltune + the `at` alias + the five compat
+#     symlinks (aputune/memtune/biostune/wikitune/snaptune -> arieltune)
 #   * run `arieltune migrate --apply` (disable-before-enable: stops/disables any
 #     legacy aputune-* GPU units so the SMU never has two clock writers)
 #   * set the GPU power setpoints + enable app-driven autosleep as the mode
@@ -39,9 +39,14 @@ BIN=target/release/arieltune
 
 install_compat() {
   # $1 = target. Install binary + at + compat symlinks.
+  #
+  # `snaptune` is required for the snapshot namespace to be reachable by name: without
+  # the symlink the argv[0] dispatch never sees it. `snapshot` is deliberately NOT
+  # installed — that name belongs to the bc-250-snapshotter shell tool until it is
+  # retired, and shadowing it would replace the tool being replaced.
   ssh "$1" 'sudo install -m755 /tmp/arieltune /usr/local/bin/arieltune \
     && sudo ln -sf arieltune /usr/local/bin/at \
-    && for n in aputune memtune biostune wikitune; do sudo ln -sf arieltune /usr/local/bin/$n; done'
+    && for n in aputune memtune biostune wikitune snaptune; do sudo ln -sf arieltune /usr/local/bin/$n; done'
 }
 
 deploy_one() {
