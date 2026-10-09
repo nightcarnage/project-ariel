@@ -230,6 +230,21 @@ pub struct Prepared {
     /// as a file, so registration can copy it into the snapshot store without the
     /// caller having to write it out again.
     pub compressed: PathBuf,
+    /// MD5 of the compressed module, all 32 hex characters.
+    ///
+    /// Computed from [`Prepared::bytes`] rather than by hashing the file, so the
+    /// digest recorded in a manifest describes the exact bytes that were put into
+    /// the image — a re-read could pick up a different file and would still look
+    /// right.
+    pub md5: String,
+    /// `modinfo -F srcversion`, when the module can be asked.
+    ///
+    /// This is the identity a kernel module actually carries: it changes whenever
+    /// the module's source changes, which makes it the one field that can answer
+    /// "is the module I am running the one this snapshot was built with?".
+    pub srcversion: Option<String>,
+    /// `modinfo -F vermagic`, when the module can be asked.
+    pub vermagic: Option<String>,
 }
 
 /// Build the module directories the tree has changed, and compress the result.
@@ -299,13 +314,44 @@ pub fn build(tree: &Tree, runner: &dyn Runner, work: &Path) -> Result<Prepared> 
         compressed.display().to_string(),
     ])?;
 
-    Ok(Prepared {
-        bytes: std::fs::read(&compressed)
-            .with_context(|| format!("reading {}", compressed.display()))?,
+    // Read once and hash the bytes in hand: hashing the file separately would let
+    // the digest describe a different read of the same path.
+    let bytes =
+        std::fs::read(&compressed).with_context(|| format!("reading {}", compressed.display()))?;
+
+    // Asked of the module that was just built, not of the installed one: the whole
+    // point is to record what *this* build produced.
+    let mut prepared = Prepared {
+        md5: crate::id::md5_hex(&bytes),
+        bytes,
         source: ko,
         raw_bytes,
         compressed,
-    })
+        srcversion: None,
+        vermagic: None,
+    };
+    prepared.srcversion = module_fact("srcversion", &prepared.compressed);
+    prepared.vermagic = module_fact("vermagic", &prepared.compressed);
+    Ok(prepared)
+}
+
+/// Ask `modinfo` for one field of a module.
+///
+/// Returns `None` rather than a placeholder when `modinfo` is missing or says
+/// nothing — the caller decides how to say "unknown", because the right wording
+/// differs between a command's output and a manifest's.
+pub fn module_fact(field: &str, ko: &Path) -> Option<String> {
+    let out = std::process::Command::new("modinfo")
+        .args(["-F", field])
+        .arg(ko)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&out.stdout);
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The most recently modified `.ko` under any of `dirs`.

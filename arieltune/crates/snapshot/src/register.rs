@@ -66,6 +66,20 @@ pub struct Request {
     pub parent: Option<String>,
     /// The source tree it was built from, for provenance.
     pub tree: Option<PathBuf>,
+    /// The files the tree said had changed, when it could say.
+    ///
+    /// `None` is not "nothing changed" — it is "this tree cannot tell", which is
+    /// what an extracted source tree with no VCS of its own answers. Recording an
+    /// empty list there would be a claim, and a false one.
+    pub changed_files: Option<Vec<String>>,
+    /// MD5 of the compressed module, all 32 hex characters.
+    pub module_md5: String,
+    /// Size of the compressed module.
+    pub module_size: u64,
+    /// `modinfo -F srcversion` for the built module, when it could be asked.
+    pub module_srcversion: Option<String>,
+    /// `modinfo -F vermagic` for the built module, when it could be asked.
+    pub module_vermagic: Option<String>,
     /// The snapshot store root, where this snapshot's directory goes.
     pub store_root: PathBuf,
     /// The `/boot` directory the artefacts go into.
@@ -141,6 +155,20 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     if let Ok(dest) = req.module_dest() {
         out.push_str(&format!("  path: {}\n", dest.display()));
     }
+    // The module's own identity, which is what makes a snapshot's module
+    // comparable to a running one. `UNKNOWN` rather than omitted, matching the
+    // shell tool: a missing key reads as an older manifest, and a wrong one would
+    // be worse.
+    out.push_str(&format!(
+        "  srcversion: {}\n",
+        req.module_srcversion.as_deref().unwrap_or("UNKNOWN")
+    ));
+    out.push_str(&format!(
+        "  vermagic: {}\n",
+        req.module_vermagic.as_deref().unwrap_or("UNKNOWN")
+    ));
+    out.push_str(&format!("  md5: {}\n", req.module_md5));
+    out.push_str(&format!("  size: {} bytes\n", req.module_size));
     // Top-level, because that is where the entry builder reads it from. Emitting it
     // anywhere else produces a manifest that parses, looks complete, and makes the
     // menu entry unbuildable.
@@ -181,8 +209,20 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
             out.push_str("  mode: \"running-module\"\n");
         }
     }
+    // The files the build was derived from, when the tree could tell us. Omitted
+    // entirely when it could not, rather than written as an empty list -- an empty
+    // list is indistinguishable from "nothing changed", and those are opposites.
+    if let Some(files) = &req.changed_files {
+        out.push_str("  changed_files:\n");
+        for file in files {
+            out.push_str(&format!("    - {file}\n"));
+        }
+    }
     out.push_str("\nbuild:\n");
     out.push_str("  initramfs: \"derived from parent, one member replaced\"\n");
+    if req.changed_files.is_none() {
+        out.push_str("  changed_files: \"unknown - this tree is not a checkout of its own\"\n");
+    }
     out.push_str("  patches: \"unknown until this snapshot boots\"\n");
     out
 }
@@ -517,6 +557,11 @@ mod tests {
             root_uuid: "757f018a-71b0-44fc-aac8-c5b2ed165923".to_string(),
             parent: Some("linux-cachyos-bore".to_string()),
             tree: Some(PathBuf::from("/home/nightcarnage/tree")),
+            changed_files: Some(vec!["drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c".to_string()]),
+            module_md5: "ecdb619e5bddacf7ab37be0c563043a5".to_string(),
+            module_size: 7357845,
+            module_srcversion: Some("11F98DC7EE7590D51AA9C9C".to_string()),
+            module_vermagic: Some("7.2.9-1-cachyos-bore SMP preempt mod_unload".to_string()),
             store_root: PathBuf::from("/var/lib/kernel-snapshots"),
             boot: PathBuf::from("/boot"),
             acpi_override: false,
@@ -690,5 +735,82 @@ mod tests {
         );
         // The mode is not `built-from-source`: the full kernel build did not run.
         assert!(text.contains("dev-module-build"), "{text}");
+    }
+
+    /// The module's own identity is what lets a snapshot be compared with the
+    /// module a kernel is actually running — the srcversion changes whenever the
+    /// source does, so it is the field that answers "is this the build I think it
+    /// is?".
+    #[test]
+    fn the_manifest_records_the_module_identity() {
+        let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("srcversion: 11F98DC7EE7590D51AA9C9C"),
+            "{text}"
+        );
+        assert!(
+            text.contains("vermagic: 7.2.9-1-cachyos-bore SMP preempt mod_unload"),
+            "{text}"
+        );
+        assert!(
+            text.contains("md5: ecdb619e5bddacf7ab37be0c563043a5"),
+            "{text}"
+        );
+        assert!(text.contains("size: 7357845 bytes"), "{text}");
+
+        // The shell tool's accessors must find these, or the SNAP tab and
+        // `snap diff` see a snapshot with no module at all.
+        let parsed = crate::manifest::Manifest::parse(&text).unwrap();
+        assert!(
+            parsed
+                .fields()
+                .iter()
+                .any(|(k, v)| k == "module.srcversion" && v == "11F98DC7EE7590D51AA9C9C"),
+            "{:?}",
+            parsed.fields()
+        );
+    }
+
+    /// When `modinfo` cannot be asked the manifest says `UNKNOWN`, matching the
+    /// shell tool. An invented value would be worse than a missing one, and an
+    /// absent key reads as an older manifest rather than as an unknown module.
+    #[test]
+    fn an_unaskable_module_is_recorded_as_unknown_not_invented() {
+        let mut req = request();
+        req.module_srcversion = None;
+        req.module_vermagic = None;
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(text.contains("srcversion: UNKNOWN"), "{text}");
+        assert!(text.contains("vermagic: UNKNOWN"), "{text}");
+        // The digest and size are always computable in-process, so they are not
+        // allowed to degrade to UNKNOWN.
+        assert!(!text.contains("md5: UNKNOWN"), "{text}");
+        assert!(!text.contains("size: UNKNOWN"), "{text}");
+    }
+
+    /// A tree that cannot say what changed must not be recorded as a tree that
+    /// changed nothing. Those look identical in a field and mean opposite things.
+    #[test]
+    fn a_treeless_diff_is_unknown_rather_than_empty() {
+        let mut req = request();
+        req.changed_files = None;
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("not a checkout of its own"),
+            "the manifest must say why it cannot tell: {text}"
+        );
+        assert!(
+            !text.contains("changed_files:\n"),
+            "and must not emit an empty list, which reads as 'nothing changed': {text}"
+        );
+
+        // With a diff, the files are listed.
+        let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
+        assert!(text.contains("changed_files:\n"), "{text}");
+        assert!(
+            text.contains("    - drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c"),
+            "{text}"
+        );
+        assert!(!text.contains("not a checkout of its own"), "{text}");
     }
 }

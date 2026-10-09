@@ -601,7 +601,7 @@ fn cmd_dev(
             &parent_image,
             target_release.as_deref(),
             &targets,
-            plan.tree.path.as_path(),
+            &plan.tree,
         )?)
     } else {
         None
@@ -660,7 +660,7 @@ fn register_dev(
     parent_image: &Path,
     target_release: Option<&str>,
     targets: &DevTargets,
-    tree: &Path,
+    tree: &dev::Tree,
 ) -> Result<String> {
     let kernel_version = target_release
         .context(
@@ -696,7 +696,15 @@ fn register_dev(
         cmdline,
         root_uuid: register::root_uuid()?,
         parent: targets.parent.clone().or_else(|| store.booted_id()),
-        tree: Some(tree.to_path_buf()),
+        tree: Some(tree.path.clone()),
+        // Only a tree that is its own checkout can say what changed. Handing over
+        // an empty list from a tree that cannot tell would record "nothing
+        // changed", which is a different and false claim.
+        changed_files: tree.versioned.then(|| tree.dirty.clone()),
+        module_md5: prepared.md5.clone(),
+        module_size: prepared.bytes.len() as u64,
+        module_srcversion: prepared.srcversion.clone(),
+        module_vermagic: prepared.vermagic.clone(),
         store_root: store.paths.root.clone(),
         boot: store.paths.boot.clone(),
         acpi_override: store.paths.boot.join("acpi_override.cpio").is_file(),

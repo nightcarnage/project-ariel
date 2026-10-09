@@ -81,6 +81,18 @@ pub fn md5_prefix8(bytes: &[u8]) -> String {
     to_hex(&hasher.finalize())[..8].to_string()
 }
 
+/// MD5 of arbitrary bytes, all 32 hex characters.
+///
+/// The full digest is for *recording* (the manifest's `module.md5`, matching the
+/// shell tool's `md5sum <module>`) rather than for addressing. Computed from the
+/// bytes already in hand, so the manifest cannot end up describing a different
+/// file from the one the image was built around.
+pub fn md5_hex(bytes: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(bytes);
+    to_hex(&hasher.finalize())
+}
+
 /// `md5sum <path> | cut -c1-8`, **including its failure mode**.
 ///
 /// An unreadable path yields `""` (the shell's `cut` sees no stdout), never an
