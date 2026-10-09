@@ -20,6 +20,7 @@
 //! | [`cli`] | the read-only command surface |
 
 pub mod cli;
+pub mod cpio;
 pub mod dev;
 pub mod grub;
 pub mod id;
