@@ -132,9 +132,18 @@ enum Top {
 }
 
 /// Support the legacy binary names via argv\[0\]: when invoked through a compat
-/// symlink (`aputune`/`memtune`/`biostune`/`wikitune` -> arieltune), inject the
-/// matching subcommand namespace so old commands AND systemd units that call the
-/// old names keep working unchanged. `at` and `arieltune` pass through.
+/// symlink (`aputune`/`memtune`/`biostune`/`wikitune`/`snaptune` -> arieltune),
+/// inject the matching subcommand namespace so old commands AND systemd units that
+/// call the old names keep working unchanged. `at` and `arieltune` pass through.
+///
+/// `snapshot` is mapped for the same reason but is **not** installed as a symlink:
+/// that name belongs to the bc-250-snapshotter shell tool until it is retired, and
+/// shadowing it would silently replace the tool being replaced. The mapping is here
+/// so the cutover is a symlink and nothing else.
+///
+/// Without the `snaptune` entry a `snaptune list` would reach clap as an unknown
+/// top-level argument, and bare `snaptune` would open the TUI — a whole-screen
+/// surprise from a command that used to print a table.
 fn compat_args() -> Vec<String> {
     inject_compat_namespace(std::env::args().collect())
 }
@@ -153,10 +162,21 @@ fn inject_compat_namespace(mut args: Vec<String>) -> Vec<String> {
         "memtune" => Some("mem"),
         "biostune" => Some("bios"),
         "wikitune" => Some("wiki"),
+        "snaptune" => Some("snap"),
+        "snapshot" => Some("snap"),
         _ => None,
     };
     if let Some(ns) = ns {
-        args.insert(1, ns.to_string());
+        // `--version` belongs to the suite, not to the namespace: injected, it reaches
+        // the namespace's parser and is rejected as an unexpected argument, so
+        // `aputune --version` and `snaptune --version` both errored. The suite's own
+        // version is the honest answer — there is one binary — and it is what someone
+        // checking what is installed wants. `--help` is deliberately left alone, because
+        // the namespace's help is the more useful answer.
+        let only_version = args.len() == 2 && matches!(args[1].as_str(), "--version" | "-V");
+        if !only_version {
+            args.insert(1, ns.to_string());
+        }
     }
     args
 }
@@ -249,6 +269,46 @@ mod tests {
         assert_eq!(
             inject_compat_namespace(v(&["memtune"])),
             v(&["memtune", "mem"])
+        );
+        // The snapshot namespace, by the name this suite installs and by the name the
+        // shell tool it replaces answers to.
+        assert_eq!(
+            inject_compat_namespace(v(&["/usr/local/bin/snaptune", "list", "--ids"])),
+            v(&["/usr/local/bin/snaptune", "snap", "list", "--ids"])
+        );
+        assert_eq!(
+            inject_compat_namespace(v(&["snapshot", "verify", "snap-aaaaaaaa"])),
+            v(&["snapshot", "snap", "verify", "snap-aaaaaaaa"])
+        );
+        assert_eq!(
+            inject_compat_namespace(v(&["snaptune"])),
+            v(&["snaptune", "snap"]),
+            "bare `snaptune` opens the SNAP tab, not the whole TUI"
+        );
+    }
+
+    /// One binary, so `--version` answers for the suite rather than being rejected by
+    /// the namespace's parser. `--help` still means the namespace's help.
+    #[test]
+    fn version_asks_the_suite_and_help_asks_the_namespace() {
+        assert_eq!(
+            inject_compat_namespace(v(&["snaptune", "--version"])),
+            v(&["snaptune", "--version"]),
+            "--version reaches the root parser"
+        );
+        assert_eq!(
+            inject_compat_namespace(v(&["aputune", "-V"])),
+            v(&["aputune", "-V"])
+        );
+        assert_eq!(
+            inject_compat_namespace(v(&["snaptune", "--help"])),
+            v(&["snaptune", "snap", "--help"]),
+            "the namespace's help is the more useful one"
+        );
+        assert_eq!(
+            inject_compat_namespace(v(&["snaptune", "list", "--version"])),
+            v(&["snaptune", "snap", "list", "--version"]),
+            "only a bare --version is asking about the suite"
         );
     }
 

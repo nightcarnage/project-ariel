@@ -8,8 +8,13 @@
 #
 # Installs ONE binary (`arieltune`) plus:
 #   * `at`        short alias  -> arieltune
-#   * `aputune` `memtune` `biostune` `wikitune`  compat symlinks -> arieltune
+#   * `aputune` `memtune` `biostune` `wikitune` `snaptune`  compat symlinks -> arieltune
 #     (argv[0] dispatch keeps old commands + any systemd units that call them working)
+#
+# `snapshot` is deliberately NOT among them: that name belongs to the
+# bc-250-snapshotter shell tool until it is retired, and shadowing it would replace the
+# tool being replaced. The dispatch already understands the name, so the cutover is a
+# symlink and nothing else.
 #
 # Needs: a Rust toolchain (cargo) to build, sudo to install.
 set -euo pipefail
@@ -40,9 +45,9 @@ echo ">> installing $BIN (sudo)..."
 sudo install -d "$PREFIX/bin"
 sudo install -m755 target/release/arieltune "$BIN"
 
-echo ">> symlinks: at + compat (aputune/memtune/biostune/wikitune)"
+echo ">> symlinks: at + compat (aputune/memtune/biostune/wikitune/snaptune)"
 sudo ln -sf arieltune "$PREFIX/bin/at"
-for name in aputune memtune biostune wikitune; do
+for name in aputune memtune biostune wikitune snaptune; do
   sudo ln -sf arieltune "$PREFIX/bin/$name"
 done
 
