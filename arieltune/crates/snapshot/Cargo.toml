@@ -1,0 +1,18 @@
+[package]
+name = "snapshot"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "BC-250 kernel snapshot manager: content-addressed module/initramfs/vmlinuz snapshots, their GRUB entries, and the boot pin. Port of bc-250-snapshotter."
+
+[[bin]]
+name = "snaptune"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+md-5 = "0.10"

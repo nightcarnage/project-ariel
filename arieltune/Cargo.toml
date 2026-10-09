@@ -38,6 +38,7 @@ members = [
     "crates/bc250-board",
     "crates/ariel-smu",
     "crates/ariel-compute",
+    "crates/snapshot",
 ]
 
 [profile.release]
