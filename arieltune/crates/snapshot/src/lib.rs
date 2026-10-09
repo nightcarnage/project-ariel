@@ -24,6 +24,7 @@ pub mod cpio;
 pub mod dev;
 pub mod grub;
 pub mod id;
+pub mod image;
 pub mod manifest;
 pub mod screen;
 pub mod store;

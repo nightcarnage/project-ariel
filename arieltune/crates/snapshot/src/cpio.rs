@@ -30,6 +30,9 @@ const HEADER: usize = 110;
 const MAGIC: &[u8] = b"070701";
 const TRAILER: &str = "TRAILER!!!";
 
+/// The trailer marker, exposed so callers can skip it when enumerating members.
+pub const TRAILER_NAME: &str = "TRAILER!!!";
+
 /// Padding needed to bring `n` up to a 4-byte boundary.
 fn pad4(n: usize) -> usize {
     (4 - n % 4) % 4
@@ -39,6 +42,10 @@ fn pad4(n: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct Member {
     pub name: String,
+    /// The `newc` mode word. Its top bits carry the file type, and a symlink's
+    /// "data" is its target — which is why a caller that wants file contents has
+    /// to ask, rather than assuming any non-empty member will extract.
+    pub mode: usize,
     /// Offset of the 110-byte header.
     pub header_at: usize,
     /// Offset of the data.
@@ -46,6 +53,14 @@ pub struct Member {
     pub data_len: usize,
     /// Offset just past this record's padding — the next record starts here.
     pub end: usize,
+}
+
+impl Member {
+    /// A regular file, as opposed to a directory, symlink, or device node.
+    pub fn is_regular_file(&self) -> bool {
+        // S_IFMT in the top bits; S_IFREG is 0o100000.
+        self.mode & 0o170000 == 0o100000
+    }
 }
 
 /// Read the 8 hex digits of field `n` (0-based from the magic).
@@ -59,9 +74,21 @@ fn field(header: &[u8], n: usize) -> Result<usize> {
 
 /// Walk an archive into its members, in order. Stops at the trailer, which is
 /// included so that its `end` is the archive's extent.
-pub fn parse(bytes: &[u8]) -> Result<Vec<Member>> {
+/// One archive inside a concatenation.
+#[derive(Debug, Clone)]
+pub struct Archive {
+    /// Offset of its first record.
+    pub start: usize,
+    /// Offset just past its trailer record.
+    pub end: usize,
+    pub members: Vec<Member>,
+}
+
+/// Parse the single archive that starts at `at`, returning its members and the
+/// offset just past its trailer record.
+fn parse_at(bytes: &[u8], at0: usize) -> Result<(Vec<Member>, usize)> {
     let mut members = Vec::new();
-    let mut at = 0usize;
+    let mut at = at0;
     loop {
         if at + HEADER > bytes.len() {
             bail!("archive ends mid-header at {at}");
@@ -97,14 +124,62 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Member>> {
         let trailer = name == TRAILER;
         members.push(Member {
             name,
+            mode: field(header, 1)?,
             header_at: at,
             data_at,
             data_len: filesize,
             end,
         });
         if trailer {
-            return Ok(members);
+            return Ok((members, end));
         }
+        at = end;
+    }
+}
+
+/// Parse the first archive in `bytes`.
+pub fn parse(bytes: &[u8]) -> Result<Vec<Member>> {
+    Ok(parse_at(bytes, 0)?.0)
+}
+
+/// Parse **every** archive in a concatenation, in order.
+///
+/// This is the shape that matters, and it is not obvious from the outside. An
+/// initramfs is not one archive and not even two: on a real blade image the
+/// decompressed stream holds **three** concatenated cpio archives (a `newc`
+/// stream is a sequence of archives, each ending in its own `TRAILER!!!`, with
+/// zero padding between them). The kernel merges them in order, later winning.
+///
+/// Parsing only the first finds 1316 members on the real image and **no kernel
+/// modules whatsoever** — the amdgpu module is 25 MB into the *second* archive.
+/// Anything that stops at the first trailer is silently looking at the wrong
+/// third of the image.
+pub fn parse_concatenated(bytes: &[u8]) -> Result<Vec<Archive>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    loop {
+        // Skip the zero padding between archives. Every magic starts with a
+        // non-zero byte, so this cannot walk into content.
+        let start = at;
+        while at < bytes.len() && bytes[at] == 0 {
+            at += 1;
+        }
+        if at >= bytes.len() {
+            return Ok(out);
+        }
+        if at + 6 > bytes.len() || &bytes[at..at + 6] != MAGIC {
+            let end = (at + 6).min(bytes.len());
+            bail!(
+                "expected an archive at {at}, found {:02X?}",
+                &bytes[at..end]
+            );
+        }
+        let (members, end) = parse_at(bytes, at)?;
+        out.push(Archive {
+            start,
+            end,
+            members,
+        });
         at = end;
     }
 }
@@ -120,10 +195,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Member>> {
 /// Note this is the end of the **trailer record**, not the start of the next
 /// archive: mkinitcpio pads between them. See [`compressed_at`].
 pub fn extent(bytes: &[u8]) -> Result<usize> {
-    Ok(parse(bytes)?
-        .last()
-        .map(|m| m.end)
-        .expect("parse always returns the trailer"))
+    Ok(parse_at(bytes, 0)?.1)
 }
 
 /// Name a compression frame by its magic, for error messages and for reporting
@@ -169,17 +241,38 @@ pub fn compressed_at(bytes: &[u8]) -> Result<usize> {
     Ok(at)
 }
 
+/// Is `name` present in any archive of this concatenation?
+pub fn contains(bytes: &[u8], name: &str) -> bool {
+    parse_concatenated(bytes)
+        .map(|archives| {
+            archives
+                .iter()
+                .flat_map(|archive| archive.members.iter())
+                .any(|m| m.name == name)
+        })
+        .unwrap_or(false)
+}
+
 /// Rewrite one regular member in place, leaving every other byte untouched.
+///
+/// Searches **every** archive in the concatenation, not just the first: on a real
+/// initramfs the kernel modules live in the second one.
 ///
 /// Errors rather than appending when the member is absent: a dev snapshot whose
 /// module silently failed to land is the failure this whole path exists to avoid,
-/// and a caller that gets `Ok` from a no-op would report success.
+/// and a caller that got `Ok` from a no-op would report success.
 pub fn replace_member(bytes: &[u8], name: &str, new_data: &[u8]) -> Result<Vec<u8>> {
-    let members = parse(bytes)?;
-    let member = members
+    let archives = parse_concatenated(bytes)?;
+    let member = archives
         .iter()
+        .flat_map(|archive| archive.members.iter())
         .find(|m| m.name == name)
-        .with_context(|| format!("no member {name:?} in this archive"))?;
+        .with_context(|| {
+            format!(
+                "no member {name:?} in any of the {} archives here",
+                archives.len()
+            )
+        })?;
     if member.name == TRAILER {
         bail!("{TRAILER} is not a rewritable member");
     }
@@ -202,31 +295,36 @@ pub fn replace_member(bytes: &[u8], name: &str, new_data: &[u8]) -> Result<Vec<u
     Ok(out)
 }
 
+/// Build an archive the way `cpio` would, so the parser is tested against the
+/// real byte layout rather than against this crate's own writer.
+///
+/// Test-only: the writer for real is `cpio(1)`. It lives here rather than in
+/// `mod tests` so `image` can build fixtures with it too.
+#[cfg(test)]
+pub(crate) fn build(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    // Bound rather than inlined: `chain([...])` would borrow a temporary.
+    let trailer = [(TRAILER, &b""[..])];
+    for (ino, (name, data)) in (1usize..).zip(entries.iter().chain(trailer.iter())) {
+        let name_bytes = [name.as_bytes(), &[0u8]].concat();
+        let header =
+            format!(
+            "070701{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
+            ino, 0o100644, 0, 0, 1, 0, data.len(), 0, 0, 0, 0, name_bytes.len(), 0
+        );
+        assert_eq!(header.len(), HEADER);
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(&name_bytes);
+        out.resize(out.len() + pad4(out.len()), 0);
+        out.extend_from_slice(data);
+        out.resize(out.len() + pad4(data.len()), 0);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build an archive the way cpio would, so the parser is tested against the
-    /// real byte layout rather than against its own writer.
-    fn build(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut out = Vec::new();
-        // Bound rather than inlined: `chain([...])` would borrow a temporary.
-        let trailer = [(TRAILER, &b""[..])];
-        for (ino, (name, data)) in (1usize..).zip(entries.iter().chain(trailer.iter())) {
-            let name_bytes = [name.as_bytes(), &[0u8]].concat();
-            let header = format!(
-                "070701{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
-                ino, 0o100644, 0, 0, 1, 0, data.len(), 0, 0, 0, 0, name_bytes.len(), 0
-            );
-            assert_eq!(header.len(), HEADER);
-            out.extend_from_slice(header.as_bytes());
-            out.extend_from_slice(&name_bytes);
-            out.resize(out.len() + pad4(out.len()), 0);
-            out.extend_from_slice(data);
-            out.resize(out.len() + pad4(data.len()), 0);
-        }
-        out
-    }
 
     #[test]
     fn parse_finds_every_member_in_order() {
@@ -245,6 +343,51 @@ mod tests {
         let entries: &[(&str, &[u8])] = &[("a", b"1234"), ("bb", b"56789")];
         let archive = build(entries);
         assert_eq!(extent(&archive).unwrap(), archive.len());
+    }
+
+    /// The real layout: several archives in one stream, zero-padded apart. Parsing
+    /// only the first is what made a real image look like it contained no kernel
+    /// modules at all.
+    #[test]
+    fn concatenated_archives_are_all_found() {
+        let mut stream = build(&[("first/only", b"a")]);
+        while !stream.len().is_multiple_of(512) {
+            stream.push(0);
+        }
+        stream.extend_from_slice(&build(&[
+            ("usr/lib/modules/kver/modules.dep", b"dep"),
+            ("usr/lib/modules/kver/kernel/amdgpu.ko.zst", b"MODULE"),
+        ]));
+        stream.extend_from_slice(&build(&[("third/thing", b"c")]));
+
+        let archives = parse_concatenated(&stream).unwrap();
+        assert_eq!(archives.len(), 3, "all three must be found");
+        assert_eq!(archives[0].members[0].name, "first/only");
+        assert_eq!(archives[1].members.len(), 3);
+
+        // The whole point: a member in the *second* archive is reachable, and
+        // `parse` alone would not have seen it.
+        assert!(
+            !parse(&stream)
+                .unwrap()
+                .iter()
+                .any(|m| m.name.ends_with("amdgpu.ko.zst")),
+            "the first archive really does not contain the module"
+        );
+        let out = replace_member(
+            &stream,
+            "usr/lib/modules/kver/kernel/amdgpu.ko.zst",
+            b"NEWER",
+        )
+        .expect("the module is in the second archive and must be found");
+        let after = parse_concatenated(&out).unwrap();
+        let m = after
+            .iter()
+            .flat_map(|a| a.members.iter())
+            .find(|m| m.name.ends_with("amdgpu.ko.zst"))
+            .unwrap();
+        assert_eq!(&out[m.data_at..m.data_at + m.data_len], b"NEWER");
+        assert_eq!(after.len(), 3, "the third archive survives");
     }
 
     #[test]
