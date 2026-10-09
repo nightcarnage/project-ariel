@@ -28,8 +28,10 @@ pub mod id;
 pub mod image;
 pub mod manifest;
 pub mod register;
+pub mod report;
 pub mod screen;
 pub mod store;
+pub mod verify;
 pub mod write;
 
 pub use cli::{Cmd, Global};

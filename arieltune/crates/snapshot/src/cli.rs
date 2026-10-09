@@ -26,7 +26,9 @@ use crate::grub;
 use crate::id;
 use crate::image;
 use crate::register;
+use crate::report;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
+use crate::verify;
 use crate::write;
 
 #[derive(Parser, Debug)]
@@ -47,7 +49,7 @@ use crate::write;
         for reading and a flag for anything that writes (`dev` previews unless --run,\n\
         as `apu build` and `mem set` do).\n\
         \n\
-        NOT IMPLEMENTED YET: create, rebuild, verify. Those still belong to the\n\
+        NOT IMPLEMENTED YET: create, rebuild. Those still belong to the\n\
         shell tool, which remains authoritative."
 )]
 pub struct Cli {
@@ -225,6 +227,29 @@ pub enum Cmd {
         verify: bool,
     },
 
+    /// Check a snapshot against what is actually on disk. Read-only.
+    ///
+    /// `doctor` asks whether the *store* is coherent; this asks whether one
+    /// *snapshot* is what its manifest claims — a different question, because a
+    /// manifest is written once and never checked again afterwards. It re-reads the
+    /// files the manifest names, compares the module's digest against the recorded
+    /// one, confirms the GRUB entry boots this snapshot's own kernel and image, and
+    /// recomputes the id from the stored bytes.
+    ///
+    /// The id is optional: with none, every visible snapshot is checked and only the
+    /// ones that are not clean are listed. Names the offenders rather than counting
+    /// them.
+    ///
+    /// Exits 2 when anything failed — there is no `--verify` flag here, because
+    /// gating is this verb's whole job.
+    Verify {
+        /// Snapshot id, e.g. snap-0848359a. Omit to check them all.
+        id: Option<String>,
+        /// One JSON object on stdout and nothing else, for callers that parse it.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
@@ -394,6 +419,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             reboot,
         } => cmd_boot(&store.paths, &id, dry_run, reboot),
         Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
+        Cmd::Verify { id, json } => cmd_verify(&store, id.as_deref(), json),
     }
 }
 
@@ -925,7 +951,7 @@ fn cmd_doctor(paths: &Paths, json: bool, verify: bool) -> Result<i32> {
         println!("\n  -> nothing broken. `snaptune list` for the snapshots themselves.");
     } else {
         println!(
-            "\n  -> {} thing(s) broken. `snaptune show <id>` for one snapshot in \
+            "\n  -> {} thing(s) broken. `snaptune verify <id>` for one snapshot in \
              detail; `prune` removes one properly.",
             failures.len()
         );
@@ -934,12 +960,119 @@ fn cmd_doctor(paths: &Paths, json: bool, verify: bool) -> Result<i32> {
 }
 
 /// The exit code, which is what makes `--verify` a gate.
-fn exit_for(report: &doctor::Report, verify: bool) -> i32 {
-    if verify && report.worst() == doctor::Severity::Fail {
+fn exit_for(report: &report::Report, verify: bool) -> i32 {
+    if verify && report.worst() == report::Severity::Fail {
         2
     } else {
         0
     }
+}
+
+/// Check a snapshot, or all of them, against what is on disk.
+///
+/// Gating is unconditional here, unlike `doctor --verify`: the other verbs report as
+/// a courtesy while being useful anyway, whereas a verifier that answers non-zero for
+/// a broken snapshot is the entire point of running it.
+fn cmd_verify(store: &Store, id: Option<&str>, json: bool) -> Result<i32> {
+    let paths = &store.paths;
+
+    // One snapshot, or every visible one. Hidden snapshots are left out when no id is
+    // given: they have no entry by design, so the entry check would report the design
+    // as a fault — and a snapshot someone deliberately put aside is not the one whose
+    // integrity needs a gate.
+    let reports: Vec<(String, report::Report)> = match id {
+        Some(id) => match store.get(id)? {
+            Some(snapshot) => vec![(snapshot.id.clone(), verify::one(paths, &snapshot))],
+            None => {
+                eprintln!("snapshot {id} not found in {}", paths.root.display());
+                return Ok(1);
+            }
+        },
+        None => verify::all(paths),
+    };
+
+    let worst = reports
+        .iter()
+        .map(|(_, r)| r.worst())
+        .max()
+        .unwrap_or(report::Severity::Ok);
+
+    if json {
+        // One object on stdout, nothing else — the same contract `doctor --json` keeps.
+        let snapshots: Vec<serde_json::Value> = reports
+            .iter()
+            .map(|(id, report)| {
+                serde_json::json!({
+                    "id": id,
+                    "worst": report.worst().label(),
+                    "findings": report
+                        .findings
+                        .iter()
+                        .map(|f| serde_json::json!({
+                            "check": f.key,
+                            "severity": f.severity.label(),
+                            "detail": f.detail,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "store": paths.root,
+                "worst": worst.label(),
+                "snapshots": snapshots,
+            }))?
+        );
+        return Ok(if worst == report::Severity::Fail {
+            2
+        } else {
+            0
+        });
+    }
+
+    // With no failures and no id, the per-check detail is 5 lines times N snapshots of
+    // "ok" — noise. The summary is the answer; `show` still has the detail.
+    let quiet = id.is_none();
+    println!("snaptune verify");
+    for (sid, report) in &reports {
+        if quiet && report.worst() == report::Severity::Ok {
+            continue;
+        }
+        println!("\n  {sid}");
+        for line in report.lines() {
+            println!("{line}");
+        }
+    }
+
+    let broken: usize = reports.iter().map(|(_, r)| r.failures().len()).sum();
+    let unchecked = reports
+        .iter()
+        .filter(|(_, r)| r.worst() == report::Severity::Warn)
+        .count();
+
+    // An `ok` line means a check ran and passed. A `warn` line can mean "this is not
+    // quite right" or "this could not be checked", and those are different answers to
+    // "is this snapshot what it claims?" — so the summary says how many snapshots were
+    // only partly verifiable rather than calling the run clean.
+    if broken == 0 {
+        let mut line = format!("\n  -> {} snapshot(s), nothing broken", reports.len());
+        if unchecked > 0 {
+            line.push_str(&format!(
+                "; {unchecked} only partly checked (see the `warn` lines)"
+            ));
+        }
+        println!("{line}.");
+    } else {
+        println!(
+            "\n  -> {broken} problem(s) across {} snapshot(s). `prune` removes one \
+             properly if the fault is in the files; `snaptune doctor` first if more \
+             than one is broken.",
+            reports.len()
+        );
+    }
+    Ok(if broken > 0 { 2 } else { 0 })
 }
 
 /// One field that differs between two snapshots.
