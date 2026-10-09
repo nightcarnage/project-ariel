@@ -34,8 +34,12 @@ mod dpm;
 mod gpuctl;
 mod initramfs;
 mod kbuild;
-mod kernel;
-mod patches;
+// Public: the supported kernel releases and the curated liberation series are
+// reference data other tabs legitimately need by name. The SNAP pane reports which
+// patches a snapshot was built against, and it must be the *same* series this app
+// probes, or the two would disagree about the kernel they are describing.
+pub mod kernel;
+pub mod patches;
 mod persist;
 mod profile;
 mod stock;

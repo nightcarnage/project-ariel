@@ -73,6 +73,80 @@ pub fn screens() -> Vec<Box<dyn Screen>> {
         Box::new(bios::screen()),
         Box::new(apu::screen()),
         Box::new(mem::screen()),
-        Box::new(snapshot::screen()),
+        Box::new(snapshot::screen().with_series(kernel_series())),
     ]
+}
+
+/// The liberation series for every supported kernel, in the shape the SNAP pane
+/// takes.
+///
+/// Built here rather than inside the pane: the series is APU's reference data — it
+/// owns the patch bodies and the runtime tells — and the pane's job is boot
+/// configuration, so reaching across for it would put the GPU stack behind a tool
+/// that never touches the GPU. The shell is the one place that already depends on
+/// both, and this is the single copy of the series the suite uses.
+fn kernel_series() -> Vec<snapshot::screen::KernelSeries> {
+    apu::kernel::Kernel::ALL
+        .iter()
+        .map(|kernel| snapshot::screen::KernelSeries {
+            release: kernel.release().to_string(),
+            entries: apu::patches::series(*kernel)
+                .map(|patch| snapshot::screen::SeriesEntry {
+                    id: patch.id.to_string(),
+                    title: patch.title.to_string(),
+                    touches: patch.touches.to_string(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The injection is the one thing here that can fail silently: if it produced an
+    /// empty series, the pane would say "no curated series is known for this kernel"
+    /// and look correct while telling the operator nothing. So the shape is asserted,
+    /// not assumed.
+    #[test]
+    fn every_supported_kernel_gets_its_series() {
+        let series = kernel_series();
+        assert_eq!(
+            series.len(),
+            apu::kernel::Kernel::ALL.len(),
+            "one series per supported kernel"
+        );
+
+        for (supplied, kernel) in series.iter().zip(apu::kernel::Kernel::ALL) {
+            // The releases must match exactly, or the pane's lookup — which is an
+            // equality test against what a snapshot records — would never hit.
+            assert_eq!(supplied.release, kernel.release());
+            assert!(
+                !supplied.entries.is_empty(),
+                "{} has an empty series",
+                supplied.release
+            );
+            // And the entries must be named, or the popup would list blanks.
+            for entry in &supplied.entries {
+                assert!(!entry.id.is_empty());
+                assert!(!entry.title.is_empty());
+                assert!(!entry.touches.is_empty());
+            }
+        }
+    }
+
+    /// The suite builds the SNAP pane with the series attached; the standalone binary
+    /// builds it without. This is the suite's, so it must have them.
+    #[test]
+    fn the_snap_pane_is_built_with_the_series() {
+        let pane = snapshot::screen().with_series(kernel_series());
+        for kernel in apu::kernel::Kernel::ALL {
+            assert!(
+                pane.knows_series_for(kernel.release()),
+                "the pane should recognise {}",
+                kernel.release()
+            );
+        }
+    }
 }

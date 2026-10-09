@@ -38,6 +38,7 @@ use std::time::Duration;
 use arieltune_tui_kit::{theme, widgets, Outcome, Screen};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -101,6 +102,177 @@ pub enum Focus {
     Provenance,
 }
 
+/// One patch in a kernel's liberation series — as much of it as this pane needs to
+/// name one.
+///
+/// A local type rather than a dependency on the APU crate. The series *is* APU's
+/// reference data: it owns the patch bodies (embedded from `crates/apu/patches/`)
+/// and the runtime tells that prove each one live on the running kernel. Reaching
+/// across for it would put the GPU stack behind a tool whose whole job is editing
+/// boot configuration. So the suite — which already owns both — hands the series
+/// in, and the standalone binary shows what each snapshot records instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesEntry {
+    /// Ordinal as it appears in the filename, e.g. `07`.
+    pub id: String,
+    /// One-line purpose.
+    pub title: String,
+    /// The kernel source files it touches, as the series records them.
+    pub touches: String,
+}
+
+/// The liberation series belonging to one kernel release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelSeries {
+    /// The release a snapshot records, e.g. `7.2.9-1-cachyos-bore`. Matched
+    /// exactly: a snapshot built for a kernel with no curated series must say so
+    /// rather than be shown the nearest one, which would be a confident lie about
+    /// which patches it contains.
+    pub release: String,
+    pub entries: Vec<SeriesEntry>,
+}
+
+/// The `i` popup's state.
+///
+/// Deliberately separate from `Pending`: that one is a question and owns the
+/// keyboard, this one is a read. Folding them together would make `q` mean
+/// "cancel" here instead of "quit".
+#[derive(Debug, Clone, Default)]
+struct PatchPopup {
+    scroll: usize,
+}
+
+/// The `i` popup's body: the selected kernel's series, with the entries this
+/// snapshot's own build touched marked.
+///
+/// Pure, and given everything it needs, because the marking rule is the part worth
+/// testing. It is the difference between "here is the series" and "here is what is
+/// different about this one" — which is the question this pane exists to answer.
+///
+/// The marking is deliberately conservative. A snapshot whose tree could not say
+/// which files changed gets told that, not shown an unmarked list that reads as
+/// "nothing about this one is different".
+fn patch_popup_lines(
+    id: &str,
+    kernel: &str,
+    series: Option<&KernelSeries>,
+    changed: &[String],
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        format!(" {id} — built for {kernel}"),
+        theme::dim(),
+    )));
+
+    let Some(series) = series else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " No curated series is known for this kernel here.",
+            theme::dim(),
+        )));
+        lines.push(Line::from(Span::styled(
+            " The series is APU's reference data; this pane is handed it by the\n \
+             suite. In the standalone binary, only what the manifest records is\n \
+             available — see the provenance panel behind this popup.",
+            theme::dim(),
+        )));
+        return lines;
+    };
+
+    // `entry_touches` reduces both sides to basenames, so the paths are handed over
+    // as they were recorded rather than pre-chewed here.
+    let hits: Vec<&SeriesEntry> = series
+        .entries
+        .iter()
+        .filter(|entry| entry_touches(entry, changed))
+        .collect();
+
+    lines.push(Line::from(""));
+    match (changed.is_empty(), hits.is_empty()) {
+        // The honest case for an extracted tree on a blade: nobody can say which
+        // patch the edit landed in, and pretending otherwise would be worse than
+        // the gap.
+        (true, _) => {
+            lines.push(Line::from(Span::styled(
+                " This snapshot does not record which files changed, so the local \
+                 edit\n cannot be attributed to a patch. The list below is the \
+                 series as a whole.",
+                theme::dim(),
+            )));
+        }
+        (false, true) => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " {} file(s) changed, none of them a file this series patches —\n \
+                     the edit is beside the series, not in it.",
+                    changed.len()
+                ),
+                theme::dim(),
+            )));
+        }
+        (false, false) => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " * marks the {} patch(es) this snapshot's edit landed in:",
+                    hits.len()
+                ),
+                theme::header(),
+            )));
+        }
+    }
+    if !changed.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("   changed: {}", changed.join(", ")),
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        format!(" {} patches in this kernel's series.", series.entries.len()),
+        theme::dim(),
+    )));
+    lines.push(Line::from(""));
+
+    for entry in &series.entries {
+        let hit = entry_touches(entry, changed);
+        let marker = if hit { "*" } else { " " };
+        let style = if hit {
+            theme::header()
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {marker} {}  {}", entry.id, entry.title),
+            style,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("      {}", entry.touches),
+            theme::dim(),
+        )));
+    }
+    lines
+}
+
+/// Whether a patch touches any of the changed files, by basename.
+///
+/// The series records `touches` as the file basenames it edits — sometimes more than
+/// one, separated by commas — while a tree reports full paths. **Both sides are
+/// reduced to names here** rather than at each call site: a caller that passed a path
+/// and got a silent no-match would be reporting "this edit is beside the series",
+/// which is a wrong answer, not a missing one.
+fn entry_touches(entry: &SeriesEntry, changed: &[String]) -> bool {
+    let basename = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+
+    entry
+        .touches
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .any(|name| changed.iter().any(|file| basename(file) == name))
+}
+
 /// Rows the list moves, and lines the panel scrolls, for one `PgUp`/`PgDn`.
 /// Matches WIKI's page step so paging feels the same in both.
 const PAGE: i32 = 15;
@@ -140,6 +312,13 @@ pub struct SnapshotScreen {
     /// Set while a confirmation popup is up. `modal()` reports it, which stops
     /// the shell stealing digits and quit keys mid-confirmation.
     pending: Option<Pending>,
+    /// The `i` popup. Separate from `pending` because it is a read, not a question:
+    /// it closes on the same keys APU's patch popup does (`q`, `Esc`, `i` itself),
+    /// so `modal()` reporting it costs the operator nothing.
+    patch_popup: Option<PatchPopup>,
+    /// Each supported kernel's liberation series, keyed by release. Empty in the
+    /// standalone binary, which has no access to the series — see [`SeriesEntry`].
+    series: Vec<KernelSeries>,
     status: String,
     error: Option<String>,
 }
@@ -170,11 +349,38 @@ impl SnapshotScreen {
             detail_scroll: 0,
             runner,
             pending: None,
+            patch_popup: None,
+            series: Vec::new(),
             status: String::new(),
             error: None,
         };
         screen.refresh();
         screen
+    }
+
+    /// Hand in each kernel's liberation series.
+    ///
+    /// Called by the suite, which owns both this pane and the APU crate that owns
+    /// the series. Without it the `i` popup reports that no series is known here,
+    /// which is true and better than showing an empty list that looks like "this
+    /// kernel has no patches".
+    pub fn with_series(mut self, series: Vec<KernelSeries>) -> Self {
+        self.series = series;
+        self
+    }
+
+    /// Whether this pane was handed a series for `release`.
+    ///
+    /// Public so the suite can assert its injection actually matches the releases
+    /// snapshots record — a mismatch would show as "no series known", which looks
+    /// like a fact about the kernel rather than a wiring mistake.
+    pub fn knows_series_for(&self, release: &str) -> bool {
+        self.series_for(release).is_some()
+    }
+
+    /// The series for a snapshot's kernel, if one is known.
+    fn series_for(&self, release: &str) -> Option<&KernelSeries> {
+        self.series.iter().find(|s| s.release == release)
     }
 
     /// Re-read the store. Cheap (a directory scan plus small files).
@@ -424,7 +630,7 @@ impl Screen for SnapshotScreen {
     }
 
     fn modal(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.patch_popup.is_some()
     }
 
     fn status_hint(&self) -> Option<String> {
@@ -470,6 +676,33 @@ impl Screen for SnapshotScreen {
         // which would otherwise give it to the shell, where nothing is bound.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
+        }
+
+        // The `i` popup owns the plain keys while it is open — the same idiom as
+        // APU's patch popup, so one habit covers both tabs. Modified keys are left
+        // to fall through to the hand-back below, which keeps Ctrl-C and the
+        // shell's Ctrl-Q reachable with the popup up: a read that could trap the
+        // operator inside it would be worse than no read.
+        if self.patch_popup.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') | KeyCode::Enter => {
+                    self.patch_popup = None;
+                    self.refresh();
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_series(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_series(1),
+                KeyCode::PageUp => self.scroll_series(-PAGE),
+                KeyCode::PageDown => self.scroll_series(PAGE),
+                // `g`/`G` jump, as they do everywhere else in the suite. `G` asks
+                // for the end and the renderer clamps it, which is the only place
+                // that knows how many lines fit.
+                KeyCode::Home | KeyCode::Char('g') => self.series_to(0),
+                KeyCode::End | KeyCode::Char('G') => self.series_to(usize::MAX),
+                // Anything unbound is swallowed rather than acted on, so a stray
+                // key cannot reach a writer through an open popup.
+                _ => {}
+            }
+            return Outcome::Consumed;
         }
 
         // Hand the shell's globals back untouched: modified keys (Ctrl-Q quit,
@@ -538,6 +771,13 @@ impl Screen for SnapshotScreen {
                 }
             }
 
+            KeyCode::Char('i') => {
+                if self.selected().is_some() {
+                    self.patch_popup = Some(PatchPopup::default());
+                    self.status = "series: ↑↓ scroll · i, q or esc close".to_string();
+                }
+            }
+
             // Anything else falls through so the shell can switch tabs / quit.
             _ => return Outcome::Ignored,
         }
@@ -589,10 +829,75 @@ impl Screen for SnapshotScreen {
                 popup,
             );
         }
+
+        // The series popup, if open. Drawn last so it sits above everything, and
+        // `Clear` first so the panes beneath do not bleed through it.
+        if let Some(popup) = self.patch_popup.as_ref() {
+            let scroll = popup.scroll;
+            let lines = self.series_lines();
+            let rect = centered(area, 84, 80);
+            f.render_widget(Clear, rect);
+            f.render_widget(
+                Paragraph::new(lines)
+                    .block(widgets::panel(
+                        "series  ↑↓ scroll · g/G ends · i, q or esc close",
+                        true,
+                    ))
+                    .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+                rect,
+            );
+        }
     }
 }
 
 impl SnapshotScreen {
+    /// Scroll the series popup by `delta`. Clamped at zero here; the upper bound is
+    /// the renderer's, since it is the only place that knows how many lines fit.
+    fn scroll_series(&mut self, delta: i32) {
+        if let Some(popup) = self.patch_popup.as_mut() {
+            let next = popup.scroll as i32 + delta;
+            popup.scroll = next.max(0) as usize;
+        }
+    }
+
+    /// Jump the series popup to `line` (the renderer clamps the end).
+    fn series_to(&mut self, line: usize) {
+        if let Some(popup) = self.patch_popup.as_mut() {
+            popup.scroll = line;
+        }
+    }
+
+    /// The files this snapshot's build recorded as changed, when it could tell.
+    ///
+    /// An empty answer is not "nothing changed": an extracted source tree on a blade
+    /// cannot diff itself, and its manifest says so in words rather than writing an
+    /// empty list, precisely so the two cannot be confused here.
+    fn recorded_changes(snapshot: &Snapshot) -> Vec<String> {
+        let Some(manifest) = &snapshot.manifest else {
+            return Vec::new();
+        };
+        manifest
+            .fields()
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("source_tree.changed_files"))
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    /// The popup's body for the current selection.
+    fn series_lines(&self) -> Vec<Line<'static>> {
+        let Some(snapshot) = self.selected() else {
+            return vec![Line::from(Span::styled(
+                "no snapshot selected",
+                theme::dim(),
+            ))];
+        };
+        let kernel = snapshot.kernel_version().unwrap_or_else(|| "?".to_string());
+        let series = self.series_for(&kernel);
+        let changed = Self::recorded_changes(snapshot);
+        patch_popup_lines(&snapshot.id, &kernel, series, &changed)
+    }
+
     /// The list: markers, id, date, status, kernel, description.
     ///
     /// A table rather than a column of ids. The description is how a human
@@ -1310,6 +1615,189 @@ mod tests {
         let described = plan.describe().join("\n");
         assert!(described.contains("remove"), "{described}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The series popup. Same idiom as APU's: it owns the plain keys while open and
+    /// closes on the keys that opened it, so it cannot trap the operator inside a
+    /// read.
+    #[test]
+    fn the_series_popup_opens_scrolls_and_closes() {
+        let (mut s, root) = screen("series-popup");
+        s = s.with_series(vec![KernelSeries {
+            release: "7.2.9-1-cachyos-bore".to_string(),
+            entries: vec![SeriesEntry {
+                id: "07".to_string(),
+                title: "CAC weight + sendraw debugfs".to_string(),
+                touches: "cyan_skillfish_ppt.c".to_string(),
+            }],
+        }]);
+
+        assert!(matches!(
+            s.on_key(key(KeyCode::Char('i'))),
+            Outcome::Consumed
+        ));
+        assert!(s.patch_popup.is_some(), "the popup should be up");
+        assert!(s.modal(), "and the shell must not steal keys while it is");
+
+        // Scrolling cannot go above the first line.
+        s.on_key(key(KeyCode::Up));
+        assert_eq!(s.patch_popup.as_ref().unwrap().scroll, 0);
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.patch_popup.as_ref().unwrap().scroll, 1);
+        s.on_key(key(KeyCode::Char('g')));
+        assert_eq!(s.patch_popup.as_ref().unwrap().scroll, 0);
+
+        // Each of the three keys that opened or named it closes it. Start from
+        // closed, or the first `i` would close rather than open.
+        s.on_key(key(KeyCode::Esc));
+        assert!(s.patch_popup.is_none(), "closed before the loop");
+        for closer in [KeyCode::Char('i'), KeyCode::Char('q'), KeyCode::Esc] {
+            s.on_key(key(KeyCode::Char('i')));
+            assert!(s.patch_popup.is_some(), "`i` should open it");
+            s.on_key(key(closer));
+            assert!(s.patch_popup.is_none(), "{closer:?} should close it");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A popup that swallowed Ctrl-C would be worse than no popup.
+    #[test]
+    fn ctrl_c_still_quits_with_the_series_popup_open() {
+        let (mut s, root) = screen("series-ctrlc");
+        s.on_key(key(KeyCode::Char('i')));
+        assert!(s.patch_popup.is_some());
+        assert!(matches!(s.on_key(ctrl('c')), Outcome::Quit));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The series records the file *basenames* a patch edits; a tree reports paths.
+    #[test]
+    fn a_patch_is_matched_by_the_basename_it_touches() {
+        let entry = SeriesEntry {
+            id: "02".to_string(),
+            title: "map 23 msgids".to_string(),
+            // Two files, as the series sometimes records.
+            touches: "cyan_skillfish_ppt.c, amdgpu_smu.c".to_string(),
+        };
+        assert!(entry_touches(
+            &entry,
+            &["drivers/gpu/drm/amd/amdgpu/cyan_skillfish_ppt.c".to_string()]
+        ));
+        assert!(entry_touches(&entry, &["amdgpu_smu.c".to_string()]));
+        // Beside the series, not in it.
+        assert!(!entry_touches(
+            &entry,
+            &["drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c".to_string()]
+        ));
+        assert!(!entry_touches(&entry, &[]));
+        // A suffix match is not a match: `smu.c` must not answer for `amdgpu_smu.c`.
+        assert!(!entry_touches(&entry, &["smu.c".to_string()]));
+    }
+
+    fn one_patch_series() -> KernelSeries {
+        KernelSeries {
+            release: "7.2.9-1-cachyos-bore".to_string(),
+            entries: vec![
+                SeriesEntry {
+                    id: "07".to_string(),
+                    title: "CAC weight + sendraw debugfs".to_string(),
+                    touches: "cyan_skillfish_ppt.c".to_string(),
+                },
+                SeriesEntry {
+                    id: "08".to_string(),
+                    title: "CMN send-raw definitions".to_string(),
+                    touches: "cyan_skillfish_ppt.c".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn popup_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The difference, named. This is the whole point of the popup: not "here is the
+    /// series" but "here is what is different about this one".
+    #[test]
+    fn the_edit_is_attributed_to_the_patches_it_landed_in() {
+        let series = one_patch_series();
+        let changed = vec!["drivers/gpu/drm/amd/amdgpu/cyan_skillfish_ppt.c".to_string()];
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &changed,
+        ));
+
+        assert!(
+            text.contains("* 07"),
+            "the touched patch is marked:\n{text}"
+        );
+        assert!(text.contains("* 08"), "both touch that file:\n{text}");
+        assert!(text.contains("cyan_skillfish_ppt.c"), "{text}");
+        assert!(text.contains("2 patch(es)"), "{text}");
+    }
+
+    /// An edit that lands nowhere in the series must say so rather than look like
+    /// the series simply was not checked.
+    #[test]
+    fn an_edit_beside_the_series_is_reported_as_beside_it() {
+        let series = one_patch_series();
+        let changed = vec!["drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c".to_string()];
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &changed,
+        ));
+        assert!(text.contains("beside the series"), "{text}");
+        assert!(!text.contains("* 07"), "nothing should be marked:\n{text}");
+    }
+
+    /// The blade case. An extracted tree cannot diff itself, so the difference
+    /// cannot be named — and that has to be said out loud, because an unmarked list
+    /// reads as "nothing about this one is different".
+    #[test]
+    fn an_unattributable_edit_says_so_instead_of_looking_clean() {
+        let series = one_patch_series();
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "7.2.9-1-cachyos-bore",
+            Some(&series),
+            &[],
+        ));
+        assert!(
+            text.contains("does not record which files changed"),
+            "{text}"
+        );
+        assert!(!text.contains("* 07"), "nothing should be marked:\n{text}");
+        // The series itself is still listed, which is the other half of the answer.
+        assert!(text.contains("07"), "{text}");
+    }
+
+    /// A kernel with no curated series must not be shown the nearest one.
+    #[test]
+    fn an_unknown_kernel_is_told_apart_from_an_unpatched_one() {
+        let text = popup_text(&patch_popup_lines(
+            "snap-3f9a1c2b",
+            "6.18-1-cachyos",
+            None,
+            &[],
+        ));
+        assert!(text.contains("No curated series is known"), "{text}");
+        assert!(
+            !text.contains("0 patches"),
+            "must not read as 'this kernel has no patches':\n{text}"
+        );
     }
 
     /// A key that opens a confirmation must not have written anything yet.
