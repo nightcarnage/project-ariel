@@ -33,79 +33,9 @@
 
 use std::path::Path;
 
+use crate::report::{Report, Severity};
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
-
-/// How bad a finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Severity {
-    /// Nothing to do.
-    Ok,
-    /// Works, but something is not as it should be.
-    Warn,
-    /// Broken, or about to be.
-    Fail,
-}
-
-impl Severity {
-    pub fn label(self) -> &'static str {
-        match self {
-            Severity::Ok => "ok",
-            Severity::Warn => "warn",
-            Severity::Fail => "FAIL",
-        }
-    }
-}
-
-/// One line of the report.
-#[derive(Debug, Clone)]
-pub struct Finding {
-    /// Short name of what was checked, e.g. `manifests`.
-    pub key: String,
-    pub severity: Severity,
-    pub detail: String,
-}
-
-/// The whole preflight.
-#[derive(Debug, Clone, Default)]
-pub struct Report {
-    pub findings: Vec<Finding>,
-}
-
-impl Report {
-    fn note(&mut self, key: &str, severity: Severity, detail: impl Into<String>) {
-        self.findings.push(Finding {
-            key: key.to_string(),
-            severity,
-            detail: detail.into(),
-        });
-    }
-
-    /// The worst severity seen, which is what the exit gate keys off.
-    pub fn worst(&self) -> Severity {
-        self.findings
-            .iter()
-            .map(|f| f.severity)
-            .max()
-            .unwrap_or(Severity::Ok)
-    }
-
-    /// Findings a `--verify` run should refuse over.
-    pub fn failures(&self) -> Vec<&Finding> {
-        self.findings
-            .iter()
-            .filter(|f| f.severity == Severity::Fail)
-            .collect()
-    }
-
-    /// The report as printed, one line per finding.
-    pub fn lines(&self) -> Vec<String> {
-        self.findings
-            .iter()
-            .map(|f| format!("  {:<12} {:<5} {}", f.key, f.severity.label(), f.detail))
-            .collect()
-    }
-}
 
 /// Read the store and report on it. Read-only; writes nothing, anywhere.
 pub fn examine(paths: &Paths) -> Report {
@@ -468,6 +398,7 @@ fn free_bytes(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::Finding;
     use std::path::PathBuf;
 
     fn fixture(tag: &str) -> PathBuf {
