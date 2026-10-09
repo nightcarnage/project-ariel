@@ -7,14 +7,15 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// The four tabs, in fixed left-to-right order. This IS the tab order.
-pub const TAB_ORDER: [&str; 5] = ["wiki", "bios", "apu", "mem", "snapshot"];
+pub const TAB_ORDER: [&str; 5] = ["wiki", "bios", "apu", "mem", "snap"];
 
 /// Names a tab answers to besides its key in [`TAB_ORDER`].
 ///
-/// `snapshot` stays the key — it is what `--tab`, `default_tab` and the `1`-`5`
-/// routing resolve against, and scripts use it — while `snaptune` is the name the
-/// pane wears. Both must land on the same tab, so the brand costs nothing.
-const TAB_ALIASES: [(&str, &str); 1] = [("snaptune", "snapshot")];
+/// `snap` is the key — it matches the other tabs' names (`apu`, `mem`, `bios`),
+/// which is what the CLI namespace and the `1`-`5` routing resolve against — while
+/// `snapshot` is what the verb surface used to be called and `snaptune` is the
+/// module's own name. All three land on the same tab, so renaming costs nothing.
+const TAB_ALIASES: [(&str, &str); 2] = [("snapshot", "snap"), ("snaptune", "snap")];
 
 /// Resolve a tab name (case-insensitive) to its index in [`TAB_ORDER`].
 pub fn tab_index(name: &str) -> Option<usize> {
@@ -61,7 +62,7 @@ mod tests {
 
     #[test]
     fn tab_order_is_wiki_bios_apu_mem() {
-        assert_eq!(TAB_ORDER, ["wiki", "bios", "apu", "mem", "snapshot"]);
+        assert_eq!(TAB_ORDER, ["wiki", "bios", "apu", "mem", "snap"]);
     }
 
     #[test]
@@ -72,14 +73,17 @@ mod tests {
         assert_eq!(tab_index("nope"), None);
     }
 
-    /// The pane is branded SNAPTUNE; the key, the scripts and the muscle memory
-    /// stay `snapshot`. Both must reach the same tab.
+    /// The tab shell is `snap`, matching the other tabs' names. The old namespace
+    /// and the module's own name must still resolve, or every existing script and
+    /// every piece of muscle memory breaks at once.
     #[test]
     fn the_branded_name_reaches_the_same_tab() {
-        let snapshot = tab_index("snapshot");
-        assert_eq!(snapshot, Some(4), "the tab is the fifth");
-        assert_eq!(tab_index("snaptune"), snapshot);
-        assert_eq!(tab_index("SnapTune"), snapshot);
+        let snap = tab_index("snap");
+        assert_eq!(snap, Some(4), "the tab is the fifth");
+        assert_eq!(tab_index("snaptune"), snap, "the module's name");
+        assert_eq!(tab_index("snapshot"), snap, "the namespace it used to be");
+        assert_eq!(tab_index("SNAP"), snap);
+        assert_eq!(tab_index(" SnapTune "), snap);
     }
 
     #[test]

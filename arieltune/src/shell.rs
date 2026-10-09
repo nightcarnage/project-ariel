@@ -5,7 +5,7 @@
 //!
 //! Global keys (only when the active screen is not modal, and only as an `Ignored`
 //! fallback after the pane sees the key first):
-//!   1..5            -> jump to WIKI/BIOS/APU/MEM/SNAPTUNE (F1-F5 and Alt-1..5 also work)
+//!   1..5            -> jump to WIKI/BIOS/APU/MEM/SNAP (F1-F5 and Alt-1..5 also work)
 //!   Ctrl-Tab        -> next tab       Ctrl-Shift-Tab -> previous tab
 //!   Ctrl-Q          -> quit the whole suite
 //! Bare `Tab`/`Shift-Tab`/`q` are left to the panes, which bind them internally.

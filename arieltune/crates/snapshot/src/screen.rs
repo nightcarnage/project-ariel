@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! The SNAPTUNE tab.
+//! The SNAP tab.
+//!
+//! The module is snaptune, and its standalone binary keeps that name; the tab and
+//! the CLI namespace are `snap`, matching WIKI/BIOS/APU/MEM.
 //!
 //! ## What this pane may and may not do
 //!
@@ -358,7 +361,7 @@ impl SnapshotScreen {
 
 impl Screen for SnapshotScreen {
     fn title(&self) -> &'static str {
-        "SNAPTUNE"
+        "SNAP"
     }
 
     fn on_enter(&mut self) {
@@ -641,9 +644,9 @@ impl SnapshotScreen {
     /// only changes a colour and looks like it did nothing.
     fn list_title(&self) -> &'static str {
         if self.focus == Focus::List {
-            "▸ SNAPTUNE"
+            "▸ SNAP"
         } else {
-            "SNAPTUNE"
+            "SNAP"
         }
     }
 
@@ -1142,7 +1145,7 @@ mod tests {
         // The range stays — there are still 25 rows below — but it must start at
         // the first row again. Only a list that fits drops the range entirely.
         assert!(
-            text.contains("SNAPTUNE  1-"),
+            text.contains("SNAP  1-"),
             "the range should start at the first row again"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1156,7 +1159,7 @@ mod tests {
         let text = render(&mut s, 120, 30);
         assert!(text.contains("snap-aaaaaaaa"), "no scrolling was needed");
         assert!(text.contains("snap-bbbbbbbb"));
-        assert!(text.contains("SNAPTUNE─"), "no range on a short list");
+        assert!(text.contains("SNAP─"), "no range on a short list");
         assert_eq!(s.list_off, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1334,11 +1337,11 @@ mod tests {
     fn the_focused_panel_is_marked() {
         let (mut s, root) = screen("marker");
         let text = render(&mut s, 120, 30);
-        assert!(text.contains("▸ SNAPTUNE"), "the list should be marked");
+        assert!(text.contains("▸ SNAP"), "the list should be marked");
 
         s.on_key(key(KeyCode::Tab));
         let text = render(&mut s, 120, 30);
-        assert!(!text.contains("▸ SNAPTUNE"), "the list gave up focus");
+        assert!(!text.contains("▸ SNAP"), "the list gave up focus");
         assert!(text.contains("▸ provenance"), "the panel should be marked");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1564,7 +1567,7 @@ mod tests {
         let (mut s, root) = screen("render");
         let text = render(&mut s, 120, 30);
 
-        assert!(text.contains("SNAPTUNE"), "panel title missing");
+        assert!(text.contains("SNAP"), "panel title missing");
         assert!(text.contains("snap-aaaaaaaa"), "first row missing");
         assert!(text.contains("snap-bbbbbbbb"), "second row missing");
         assert!(text.contains("2 snapshot(s)"), "status line missing");

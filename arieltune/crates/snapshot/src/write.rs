@@ -273,6 +273,31 @@ pub fn plan_pin(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
     })
 }
 
+/// Mark a snapshot as the golden image.
+///
+/// The marker is a file in the store rather than a GRUB change, but it is not
+/// cosmetic: [`guard_removable`] refuses to hide or prune whatever it names, so
+/// this moves the protection from one snapshot to another and is worth a plan.
+pub fn plan_golden(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
+    let Some(_snapshot) = state.find(id) else {
+        bail!("snapshot {id} not found");
+    };
+    // Read the marker the same way `guard_removable` does, rather than the
+    // per-row flag: the two are derived from one file, and a planner that
+    // disagreed with the guard would be a trap.
+    if state.golden.as_deref() == Some(id) {
+        bail!("{id} is already the golden image");
+    }
+    Ok(Plan {
+        summary: format!("mark {id} as the golden image"),
+        actions: vec![Action::Write {
+            path: paths.root.join(".golden-snapshot"),
+            contents: format!("{id}\n"),
+            what: "the golden marker, which hide and prune then refuse to remove".to_string(),
+        }],
+    })
+}
+
 /// Revert to the distro kernel by clearing the pinned default.
 pub fn plan_unpin(paths: &Paths) -> Result<Plan> {
     Ok(Plan {
@@ -722,6 +747,29 @@ mod tests {
         assert_eq!(lines.len(), plan.actions.len());
         assert!(lines.iter().any(|l| l.starts_with("rename")));
         assert!(lines.iter().any(|l| l.starts_with("run")));
+    }
+
+    #[test]
+    fn golden_writes_the_marker_that_protects() {
+        let plan = plan_golden(&paths(), &state(), "snap-target").expect("plans");
+        match &plan.actions[0] {
+            Action::Write { path, contents, .. } => {
+                assert!(path.ends_with(".golden-snapshot"), "{path:?}");
+                assert_eq!(contents, "snap-target\n");
+            }
+            other => panic!("expected a write, got {other:?}"),
+        }
+    }
+
+    /// Re-marking the snapshot that is already golden must not be a silent no-op
+    /// the operator reads as success.
+    #[test]
+    fn golden_refuses_a_snapshot_that_is_already_golden() {
+        let err = plan_golden(&paths(), &state(), "snap-golden").unwrap_err();
+        assert!(
+            err.to_string().contains("already the golden image"),
+            "{err}"
+        );
     }
 
     /// Applying a plan writes the files and issues the commands, and the runner

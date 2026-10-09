@@ -9,6 +9,7 @@
 //!
 //! `--json` is new, and is the reason agents can stop scraping the text table.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -16,7 +17,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::grub;
-use crate::store::{Paths, Snapshot, Store};
+use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
 
 #[derive(Parser, Debug)]
@@ -88,6 +89,33 @@ pub enum Cmd {
     /// List GRUB menu entries, marking the nested ones.
     #[command(name = "grub-list", alias = "grublist", alias = "grub")]
     GrubList,
+
+    /// Compare two snapshots: which manifest fields differ, and how the boot
+    /// artefacts differ. Read-only.
+    ///
+    /// The question this answers is "what changed between the snapshot I trust and
+    /// the one I am about to boot", which the shell tool's `diff` answered from the
+    /// source tree. Doing it from the manifests means it works on a blade with no
+    /// tree at all.
+    Diff {
+        /// Snapshot id, e.g. snap-0848359a.
+        a: String,
+        /// Snapshot id to compare against.
+        b: String,
+    },
+
+    /// Show the golden image, or mark one with `gold` — the snapshot hide and
+    /// prune refuse to remove. Read-only without an id.
+    ///
+    /// Naming an id writes the store's marker file (needs root). It does not touch
+    /// GRUB or /boot: the golden image is a protection, not a boot configuration.
+    Golden {
+        /// Snapshot id to mark as golden. Omit to just report the current one.
+        id: Option<String>,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
@@ -199,6 +227,8 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Current => cmd_current(&store, json),
         Cmd::Lineage => cmd_lineage(&store, json),
         Cmd::GrubList => cmd_grub_list(&store, json),
+        Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
+        Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
         Cmd::Pin { id, dry_run } => cmd_pin(&store.paths, &id, dry_run),
         Cmd::Unpin { dry_run } => cmd_unpin(&store.paths, dry_run),
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
@@ -274,6 +304,193 @@ fn cmd_unhide(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
     write::apply(&plan, dry_run)?;
     if !dry_run {
         println!("\nUnhidden: {id} (menu entry rebuilt)");
+    }
+    Ok(0)
+}
+
+fn cmd_golden(paths: &Paths, id: Option<&str>, dry_run: bool, json: bool) -> Result<i32> {
+    let store = Store::new(paths.clone());
+    let Some(id) = id else {
+        // Read-only form.
+        let current = store.golden_id();
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "golden": current }))?
+            );
+        } else {
+            match &current {
+                Some(id) => println!("golden: {id}"),
+                None => println!(
+                    "golden: none set. `snap golden <id>` marks one; hide and prune \
+                     then refuse to remove it."
+                ),
+            }
+        }
+        return Ok(0);
+    };
+
+    let state = write::State::read(paths)?;
+    let plan = write::plan_golden(paths, &state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        println!("\nGolden: {id}");
+        println!("This replaces whatever was golden before, which is now removable.");
+    }
+    Ok(0)
+}
+
+/// One field that differs between two snapshots.
+#[derive(Debug, Serialize)]
+struct FieldDiff {
+    field: String,
+    a: String,
+    b: String,
+}
+
+/// A structural comparison of two snapshots.
+///
+/// Pure, so the diff itself is tested rather than eyeballed at a terminal.
+#[derive(Debug, Serialize)]
+struct Diff {
+    a: String,
+    b: String,
+    /// Boot artefacts: presence and total size.
+    boot: Vec<FieldDiff>,
+    /// Manifest fields present in both but with different values.
+    changed: Vec<FieldDiff>,
+    /// Manifest fields only one side has.
+    only_a: Vec<(String, String)>,
+    only_b: Vec<(String, String)>,
+}
+
+impl Diff {
+    fn is_empty(&self) -> bool {
+        self.boot.is_empty()
+            && self.changed.is_empty()
+            && self.only_a.is_empty()
+            && self.only_b.is_empty()
+    }
+}
+
+fn diff_of(paths: &Paths, left: &Snapshot, right: &Snapshot) -> Diff {
+    // BTreeMap so the output is ordered and stable, which is what makes a diff
+    // readable and what makes `--json` diffable a second time.
+    let fields = |s: &Snapshot| -> BTreeMap<String, String> {
+        s.manifest
+            .as_ref()
+            .map(|m| m.fields().into_iter().collect())
+            .unwrap_or_default()
+    };
+    let (lf, rf) = (fields(left), fields(right));
+
+    let mut changed = Vec::new();
+    let mut only_a = Vec::new();
+    let mut only_b = Vec::new();
+    for (key, lval) in &lf {
+        match rf.get(key) {
+            Some(rval) if rval == lval => {}
+            Some(rval) => changed.push(FieldDiff {
+                field: key.clone(),
+                a: lval.clone(),
+                b: rval.clone(),
+            }),
+            None => only_a.push((key.clone(), lval.clone())),
+        }
+    }
+    for (key, rval) in &rf {
+        if !lf.contains_key(key) {
+            only_b.push((key.clone(), rval.clone()));
+        }
+    }
+
+    let yn = |present: bool| {
+        if present {
+            "present".to_string()
+        } else {
+            "MISSING".to_string()
+        }
+    };
+    let mut boot = Vec::new();
+    for (field, get) in [
+        (
+            "vmlinuz",
+            (|s: &Snapshot| s.vmlinuz) as fn(&Snapshot) -> bool,
+        ),
+        ("initramfs", |s: &Snapshot| s.initramfs),
+        ("cmdline", |s: &Snapshot| s.cmdline_file),
+        ("grub_entry", |s: &Snapshot| s.grub_entry),
+    ] {
+        let (a, b) = (yn(get(left)), yn(get(right)));
+        if a != b {
+            boot.push(FieldDiff {
+                field: field.to_string(),
+                a,
+                b,
+            });
+        }
+    }
+    let (lsize, rsize) = (left.size_bytes(paths), right.size_bytes(paths));
+    if lsize != rsize {
+        boot.push(FieldDiff {
+            field: "size on disk".to_string(),
+            a: human_bytes(lsize),
+            b: human_bytes(rsize),
+        });
+    }
+
+    Diff {
+        a: left.id.clone(),
+        b: right.id.clone(),
+        boot,
+        changed,
+        only_a,
+        only_b,
+    }
+}
+
+fn cmd_diff(store: &Store, a: &str, b: &str, json: bool) -> Result<i32> {
+    let left = store
+        .get(a)?
+        .with_context(|| format!("no snapshot with id {a}"))?;
+    let right = store
+        .get(b)?
+        .with_context(|| format!("no snapshot with id {b}"))?;
+    let diff = diff_of(&store.paths, &left, &right);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diff)?);
+        return Ok(0);
+    }
+
+    println!("{}  ->  {}", diff.a, diff.b);
+    if diff.is_empty() {
+        println!("\nidentical as far as the manifests and boot artefacts go");
+        return Ok(0);
+    }
+    if !diff.boot.is_empty() {
+        println!("\nboot");
+        for d in &diff.boot {
+            println!("  {:<16} {}  ->  {}", d.field, d.a, d.b);
+        }
+    }
+    if !diff.changed.is_empty() {
+        println!("\nmanifest");
+        for d in &diff.changed {
+            println!("  {:<28} {}  ->  {}", d.field, d.a, d.b);
+        }
+    }
+    for (id, rows) in [(&diff.a, &diff.only_a), (&diff.b, &diff.only_b)] {
+        if rows.is_empty() {
+            continue;
+        }
+        println!("\nonly in {id}");
+        for (key, value) in rows.iter() {
+            println!("  {key}: {value}");
+        }
     }
     Ok(0)
 }
@@ -569,4 +786,116 @@ fn cmd_grub_list(store: &Store, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    fn snap(id: &str, manifest: &str) -> Snapshot {
+        Snapshot {
+            id: id.to_string(),
+            manifest: Some(Manifest::parse(manifest).expect("parse")),
+            manifest_error: None,
+            hidden: false,
+            golden: false,
+            booted: false,
+            grub_entry: true,
+            vmlinuz: true,
+            initramfs: true,
+            cmdline_file: true,
+        }
+    }
+
+    fn paths() -> Paths {
+        Paths::under("/fixture")
+    }
+
+    /// A diff is only useful if it stays quiet about everything that did not
+    /// change: a field-by-field dump of two manifests is not a diff.
+    #[test]
+    fn diff_reports_only_what_changed() {
+        let a = snap(
+            "snap-aaaaaaaa",
+            "snapshot:\n  id: \"snap-aaaaaaaa\"\nkernel:\n  version: \"7.2.9\"\nmodule:\n  srcversion: \"AAA\"\n",
+        );
+        let b = snap(
+            "snap-bbbbbbbb",
+            "snapshot:\n  id: \"snap-bbbbbbbb\"\nkernel:\n  version: \"7.0.9\"\nmodule:\n  srcversion: \"AAA\"\n",
+        );
+        let diff = diff_of(&paths(), &a, &b);
+
+        let fields: Vec<&str> = diff.changed.iter().map(|d| d.field.as_str()).collect();
+        assert!(fields.contains(&"snapshot.id"), "{fields:?}");
+        assert!(fields.contains(&"kernel.version"), "{fields:?}");
+        assert!(
+            !fields.contains(&"module.srcversion"),
+            "an unchanged field is not a change: {fields:?}"
+        );
+        assert!(diff.only_a.is_empty() && diff.only_b.is_empty(), "{diff:?}");
+    }
+
+    /// A field on one side only is not the same finding as a changed field, and
+    /// conflating them hides which snapshot gained something.
+    #[test]
+    fn diff_separates_asymmetric_fields_from_changed_ones() {
+        let a = snap(
+            "snap-aaaaaaaa",
+            "snapshot:\n  id: \"snap-aaaaaaaa\"\npatches:\n  applied: true\n",
+        );
+        let b = snap(
+            "snap-bbbbbbbb",
+            "snapshot:\n  id: \"snap-bbbbbbbb\"\ntest_results:\n  boot_test: PASS\n",
+        );
+        let diff = diff_of(&paths(), &a, &b);
+
+        assert_eq!(diff.changed.len(), 1, "only snapshot.id is on both sides");
+        assert_eq!(
+            diff.only_a,
+            vec![("patches.applied".to_string(), "true".to_string())]
+        );
+        assert_eq!(
+            diff.only_b,
+            vec![("test_results.boot_test".to_string(), "PASS".to_string())]
+        );
+    }
+
+    #[test]
+    fn identical_snapshots_have_no_diff() {
+        let m = "snapshot:\n  id: \"snap-aaaaaaaa\"\n  status: active\n";
+        let diff = diff_of(
+            &paths(),
+            &snap("snap-aaaaaaaa", m),
+            &snap("snap-aaaaaaaa", m),
+        );
+        assert!(diff.is_empty(), "{diff:?}");
+    }
+
+    /// The boot artefacts are the half the manifests cannot report — a snapshot
+    /// whose vmlinuz has been deleted still has a manifest claiming otherwise.
+    #[test]
+    fn diff_notices_a_missing_boot_artefact() {
+        let a = snap("snap-aaaaaaaa", "snapshot:\n  id: \"snap-aaaaaaaa\"\n");
+        let mut b = snap("snap-bbbbbbbb", "snapshot:\n  id: \"snap-bbbbbbbb\"\n");
+        b.vmlinuz = false;
+        let diff = diff_of(&paths(), &a, &b);
+
+        let fields: Vec<&str> = diff.boot.iter().map(|d| d.field.as_str()).collect();
+        assert!(fields.contains(&"vmlinuz"), "{fields:?}");
+    }
+
+    /// A manifest that will not parse still diffs: `fields()` is empty rather
+    /// than an error, which is the whole reason `Manifest::parse` never fails.
+    #[test]
+    fn an_unparseable_manifest_diffs_as_empty_rather_than_exploding() {
+        let a = snap("snap-aaaaaaaa", "snapshot:\n  id: \"snap-aaaaaaaa\"\n");
+        let b = snap("snap-bbbbbbbb", "snapshot:\n  id: x\n bad: [unclosed\n");
+        let diff = diff_of(&paths(), &a, &b);
+        assert!(
+            !diff.only_a.is_empty(),
+            "the broken side contributes nothing"
+        );
+        assert!(diff.only_b.is_empty(), "{:?}", diff.only_b);
+    }
 }
