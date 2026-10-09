@@ -36,12 +36,14 @@ use crate::write;
     long_about = "Snapshot store: list, inspect, and manage the GRUB menu entries of\n\
         kernel snapshots created by the bc-250-snapshotter.\n\
         \n\
-        Reads are safe anywhere. The four writers -- pin, unpin, hide, unhide -- edit\n\
-        /etc/grub.d/40_custom and grubenv and so need root, and each takes --dry-run to\n\
-        print exactly what it would do first.\n\
+        Reads are safe anywhere. The writers -- pin, unpin, hide, unhide, golden,\n\
+        prune, and `dev --register` -- change the boot configuration (/etc/grub.d,\n\
+        grubenv, and /boot for a registration) and so need root, and each takes\n\
+        --dry-run to print exactly what it would do first. `prune` deletes and cannot\n\
+        be undone.\n\
         \n\
-        NOT IMPLEMENTED YET: create, register, rebuild, prune, boot, verify. Those still\n\
-        belong to the shell tool, which remains authoritative."
+        NOT IMPLEMENTED YET: create, rebuild, boot, verify. Those still belong to the\n\
+        shell tool, which remains authoritative."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -210,6 +212,27 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Delete a snapshot completely: its `/boot` artefacts, its directory and its
+    /// GRUB entry. **Irreversible.** Needs root.
+    ///
+    /// Use this instead of deleting files by hand. The ordering matters and is not
+    /// obvious: the distro's `10_linux` generates a menu entry for every
+    /// `/boot/vmlinuz-*`, so the artefacts must be gone *before* `grub-mkconfig`
+    /// runs, or the regenerated menu keeps an entry pointing at a kernel that no
+    /// longer exists. That entry looks fine until GRUB tries to load it.
+    ///
+    /// Refuses the booted, golden and pinned snapshots, for the same reasons `hide`
+    /// does: each is either running, deliberately kept, or the entry GRUB would
+    /// fall back to.
+    #[command(alias = "delete", alias = "rm")]
+    Prune {
+        /// Snapshot id, e.g. snap-0848359a.
+        id: String,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl Global {
@@ -318,6 +341,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Unpin { dry_run } => cmd_unpin(&store.paths, dry_run),
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
         Cmd::Unhide { id, dry_run } => cmd_unhide(&store.paths, &id, dry_run),
+        Cmd::Prune { id, dry_run } => cmd_prune(&store.paths, &id, dry_run),
     }
 }
 
@@ -389,6 +413,23 @@ fn cmd_unhide(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
     write::apply(&plan, dry_run)?;
     if !dry_run {
         println!("\nUnhidden: {id} (menu entry rebuilt)");
+    }
+    Ok(0)
+}
+
+fn cmd_prune(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
+    let state = write::State::read(paths)?;
+    let plan = write::plan_prune(paths, &state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        println!("\nPruned: {id}");
+        println!(
+            "Its artefacts, its directory and its menu entry are gone. This cannot be undone."
+        );
+        println!(" The running kernel and the golden image were left alone.");
     }
     Ok(0)
 }

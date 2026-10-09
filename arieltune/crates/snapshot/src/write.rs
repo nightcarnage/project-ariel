@@ -61,6 +61,14 @@ pub enum Action {
     },
     /// Run a program. `argv[0]` is the program.
     Run { argv: Vec<String>, what: String },
+    /// Delete a file, or a whole directory tree.
+    ///
+    /// **Tolerant of absence**, like `rm -f`. The paths are constructed from the
+    /// snapshot id rather than typed, so a missing one is normal — a snapshot whose
+    /// artefacts were partly removed by hand, or a prune re-run after a failure
+    /// part-way through. Refusing there would strand a half-deleted snapshot that
+    /// nothing could then clean up.
+    Remove { path: PathBuf, what: String },
 }
 
 /// An ordered set of actions, plus why.
@@ -87,6 +95,9 @@ impl Plan {
                     format!("copy   {} -> {}", from.display(), to.display())
                 }
                 Action::Run { argv, what } => format!("run    {} ({})", argv.join(" "), what),
+                Action::Remove { path, what } => {
+                    format!("remove {} ({})", path.display(), what)
+                }
             })
             .collect()
     }
@@ -362,6 +373,70 @@ pub fn plan_hide(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
     })
 }
 
+/// Delete a snapshot completely: its boot artefacts, its directory, and its menu
+/// entry.
+///
+/// **The order is not cosmetic.** `10_linux` generates a `gnulinux-<id>-advanced-…`
+/// menu entry for *every* `/boot/vmlinuz-*`, so removing the tool's own entry from
+/// `40_custom` is not enough to get a snapshot off the menu. The artefacts have to
+/// be gone *before* `grub-mkconfig` runs, or the regenerated file keeps an entry
+/// pointing at a kernel that no longer exists — which looks fine until GRUB tries
+/// to load it. Doing exactly this by hand on blade 115 produced exactly that.
+///
+/// Irreversible, so it takes the same guards as removing a menu entry: the booted
+/// snapshot is running, the golden one is there on purpose, and the pinned one is
+/// the entry GRUB would fall back to.
+pub fn plan_prune(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
+    if state.find(id).is_none() {
+        bail!(
+            "snapshot {id} not found.\n\
+             `prune` deletes a snapshot; it cannot tidy up leftovers it does not \
+             know about."
+        );
+    }
+    guard_removable(state, id, "prune")?;
+
+    let mut actions: Vec<Action> = [
+        (paths.boot.join(format!("vmlinuz-{id}")), "its kernel"),
+        (
+            paths.boot.join(format!("initramfs-{id}.img")),
+            "its initramfs",
+        ),
+        (paths.boot.join(format!("{id}.cmdline")), "its command line"),
+        (paths.root.join(id), "its directory (manifest and module)"),
+    ]
+    .into_iter()
+    .map(|(path, what)| Action::Remove {
+        // Reported at plan time, so a dry run says which parts are actually there
+        // rather than implying it will delete four things that may be three.
+        what: if path.exists() {
+            what.to_string()
+        } else {
+            format!("{what} — already gone")
+        },
+        path,
+    })
+    .collect();
+
+    let (pruned, removed) = grub::remove_entry(&state.custom, id);
+    if removed {
+        actions.push(Action::Write {
+            path: paths.grub_custom.clone(),
+            contents: pruned,
+            what: "remove its entry from 40_custom".to_string(),
+        });
+    }
+    // Always regenerate, even when there was no `40_custom` entry to remove: the
+    // distro's own generated entry for this kernel is still in grub.cfg, and only
+    // a regeneration after the artefacts are gone will drop it.
+    actions.push(regen_action(paths));
+
+    Ok(Plan {
+        summary: format!("prune {id} — delete its artefacts, its directory and its menu entry"),
+        actions,
+    })
+}
+
 /// Bring a hidden snapshot back, rebuilding its menu entry from the manifest.
 pub fn plan_unhide(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
     let Some(snapshot) = state.find(id) else {
@@ -522,6 +597,22 @@ pub fn apply_with(plan: &Plan, dry_run: bool, runner: &dyn Runner) -> Result<()>
                     .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
             }
             Action::Run { argv, .. } => runner.run(argv)?,
+            Action::Remove { path, .. } => {
+                // `symlink_metadata`, not `is_dir()`: the latter follows a symlink,
+                // so a symlink to a directory would be walked and deleted instead of
+                // removed. These paths are built from the snapshot id, but a build
+                // tool that deletes the wrong thing is not a risk worth taking.
+                match std::fs::symlink_metadata(path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| format!("looking at {}", path.display()));
+                    }
+                    Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path)
+                        .with_context(|| format!("removing {}", path.display()))?,
+                    Ok(_) => std::fs::remove_file(path)
+                        .with_context(|| format!("removing {}", path.display()))?,
+                }
+            }
         }
     }
     Ok(())
@@ -632,6 +723,131 @@ mod tests {
     fn a_refusal_produces_no_actions() {
         // The point of planning first: refusing must not have written anything.
         assert!(plan_hide(&paths(), &state(), "snap-booted").is_err());
+    }
+
+    // ---- prune -------------------------------------------------------------
+
+    #[test]
+    fn prune_removes_every_artefact() {
+        let plan = plan_prune(&paths(), &state(), "snap-target").expect("plans");
+        let removed: Vec<String> = plan
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Remove { path, .. } => Some(path.display().to_string()),
+                _ => None,
+            })
+            .collect();
+        for expected in [
+            "/boot/vmlinuz-snap-target",
+            "/boot/initramfs-snap-target.img",
+            "/boot/snap-target.cmdline",
+        ] {
+            assert!(
+                removed.iter().any(|p| p.ends_with(expected)),
+                "must delete {expected}: {removed:?}"
+            );
+        }
+        // The snapshot's own directory too, or the module is left orphaned with
+        // nothing pointing at it.
+        let dir = paths().root.join("snap-target").display().to_string();
+        assert!(
+            removed.contains(&dir),
+            "must delete the snapshot directory ({dir}): {removed:?}"
+        );
+    }
+
+    /// The trap, and the reason this verb exists rather than a hand-written `rm`.
+    ///
+    /// `10_linux` writes a menu entry for every `/boot/vmlinuz-*`. Regenerating
+    /// before the artefacts are gone leaves that entry pointing at a kernel that
+    /// no longer exists — and it looks fine until GRUB tries to load it.
+    #[test]
+    fn prune_deletes_before_it_regenerates() {
+        let plan = plan_prune(&paths(), &state(), "snap-target").expect("plans");
+
+        let last_remove = plan
+            .actions
+            .iter()
+            .rposition(|a| matches!(a, Action::Remove { .. }))
+            .expect("removes the artefacts");
+        let regen = plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, Action::Run { argv, .. } if argv[0] == "grub-mkconfig"))
+            .expect("regenerates the menu");
+
+        assert!(
+            last_remove < regen,
+            "every removal must come before grub-mkconfig, or the distro's own \
+             entry for the deleted kernel survives: {:?}",
+            plan.describe()
+        );
+    }
+
+    /// Even with no `40_custom` entry to drop, the menu still has to be rebuilt:
+    /// the distro's generated entry is not in that file.
+    #[test]
+    fn prune_regenerates_even_without_a_custom_entry() {
+        let mut s = state();
+        s.custom = "#!/bin/sh\nexec tail -n +3 $0\n".to_string();
+        let plan = plan_prune(&paths(), &s, "snap-target").expect("plans");
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, Action::Run { argv, .. } if argv[0] == "grub-mkconfig")),
+            "grub.cfg must still be regenerated: {:?}",
+            plan.describe()
+        );
+    }
+
+    #[test]
+    fn prune_refuses_the_booted_golden_and_pinned_snapshots() {
+        for (id, expected) in [
+            ("snap-booted", "booted snapshot"),
+            ("snap-golden", "golden image"),
+            ("snap-pinned", "pinned GRUB default"),
+        ] {
+            let err = plan_prune(&paths(), &state(), id).unwrap_err();
+            assert!(
+                err.to_string().contains(expected),
+                "pruning {id} must be refused as the {expected}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_refuses_a_snapshot_it_does_not_know() {
+        let err = plan_prune(&paths(), &state(), "snap-absent").unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    /// A hidden snapshot must still be prunable. Its manifest is renamed, not gone,
+    /// so refusing it would leave no way to remove one except unhiding first — and
+    /// `hide` is what you do to something you are about to delete.
+    #[test]
+    fn prune_removes_a_hidden_snapshot_too() {
+        let plan = plan_prune(&paths(), &state(), "snap-hidden").expect("plans");
+        let dir = paths().root.join("snap-hidden").display().to_string();
+        assert!(
+            plan.actions.iter().any(
+                |a| matches!(a, Action::Remove { path, .. } if path.display().to_string() == dir)
+            ),
+            "the directory holding manifest.yaml.hidden must be removed: {:?}",
+            plan.describe()
+        );
+    }
+
+    /// A dry run should say which parts are actually there, not imply it will
+    /// delete four things when two are already gone.
+    #[test]
+    fn prune_says_when_a_part_is_already_gone() {
+        let plan = plan_prune(&paths(), &state(), "snap-target").expect("plans");
+        let described = plan.describe().join("\n");
+        assert!(
+            described.contains("already gone"),
+            "a missing artefact should be reported as such:\n{described}"
+        );
     }
 
     // ---- hide / unhide -----------------------------------------------------
