@@ -101,8 +101,14 @@ pub enum Cmd {
     /// 40-CU routing is OFF by default (opt-in): the build installs the patched kernel with
     /// `bc250_cc_write_mode=0` so you can validate the hardware first, then arm 40-CU with
     /// `arieltune apu cu enable` (or re-run with --full to arm it at install). Rebuilds the
-    /// kernel package and needs a REBOOT to take effect. Needs root. Preview by default; pass
-    /// --run to execute. DANGEROUS: this replaces your running kernel.
+    /// kernel package and needs a REBOOT to take effect. Needs root, including for the preview.
+    /// Preview by default; pass --run to execute. DANGEROUS: this replaces your running kernel.
+    ///
+    /// `--pkgbuild` must point at the PKGBUILD *pinned to the kernel you asked for*: each series
+    /// has its own commit in `CachyOS/linux-cachyos`, and the pin and `--kernel` have to agree.
+    /// A tree that does not match is refused before any heavy work, and running without
+    /// `--pkgbuild` prints the exact `git checkout` for the series you asked for. See the
+    /// README, "Liberation quick start" step 2.
     Build {
         /// CachyOS PKGBUILD dir (or set APUTUNE_PKGBUILD).
         #[arg(long, value_name = "DIR")]
@@ -119,7 +125,7 @@ pub enum Cmd {
         /// Both ship inside this binary — the series, the nct6687 module and the
         /// PKGBUILD pin all follow from this choice. Build 7.0.9 to validate a
         /// snapshot on the older kernel without swapping tools. Also settable via
-        /// `APUTUNE_KERNEL`.
+        /// `APUTUNE_KERNEL`; `729`/`72` and `709`/`70` are accepted spellings.
         #[arg(long, value_name = "VERSION")]
         kernel: Option<String>,
         /// Actually build and install. Default: preview the plan only.
