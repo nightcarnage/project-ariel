@@ -127,9 +127,24 @@ pub enum Cmd {
     #[command(alias = "status", alias = "which")]
     Current,
 
-    /// Follow snapshot.parent from the booted snapshot.
+    /// Follow `snapshot.parent`: the provenance of every snapshot, or of one.
+    ///
+    /// With no id it prints one line per snapshot — its whole chain, then its date and
+    /// description — which is what the shell tool's `lineage` shows. With an id it
+    /// prints that snapshot's line alone.
+    ///
+    /// The shell's shape is kept on purpose, because walking from the *booted* snapshot
+    /// printed nothing at all on a machine running the distro's kernel, which is most of
+    /// them. A lineage is a property of the store, not of what this box booted.
+    ///
+    /// A chain is printed oldest-first, root at the left. A parent that is not itself a
+    /// snapshot — the fleet's root at names like `base-7.2.9-1-cachyos-bore` — is kept
+    /// and marked, because that name is part of the answer.
     #[command(alias = "tree")]
-    Lineage,
+    Lineage {
+        /// Snapshot to trace. Default: every snapshot, one line each.
+        id: Option<String>,
+    },
 
     /// List GRUB menu entries, marking the nested ones.
     #[command(
@@ -704,7 +719,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::List { ids, all } => cmd_list(&store, ids, all, json),
         Cmd::Show { id } => cmd_show(&store, &id, json),
         Cmd::Current => cmd_current(&store, json),
-        Cmd::Lineage => cmd_lineage(&store, json),
+        Cmd::Lineage { id } => cmd_lineage(&store, id.as_deref(), json),
         Cmd::GrubList => cmd_grub_list(&store, json),
         Cmd::GrubFlatten { nest, dry_run } => cmd_grub_flatten(&store, nest, dry_run, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
@@ -3210,45 +3225,102 @@ fn cmd_current(store: &Store, json: bool) -> Result<i32> {
     }
 }
 
-fn cmd_lineage(store: &Store, json: bool) -> Result<i32> {
-    let Some(start) = store.booted_id() else {
-        if json {
-            println!("[]");
-        } else {
-            println!("Booted from a distro kernel — no snapshot lineage to walk.");
+/// The chain of ids from the oldest ancestor known in this store down to `id`.
+///
+/// Walks `snapshot.parent` upwards and then reverses, so it reads root-first. A parent
+/// that is not itself a snapshot is kept as the first element: the fleet's snapshots
+/// root at names like `base-7.2.9-1-cachyos-bore`, and that name is part of the answer
+/// rather than noise to be dropped.
+///
+/// Stops when an id repeats instead of looping. A cycle in `snapshot.parent` is a
+/// corrupted store, which is exactly when someone reaches for this verb.
+fn ancestor_ids(snapshots: &[Snapshot], id: &str) -> Vec<String> {
+    let mut chain = vec![id.to_string()];
+    let mut seen = vec![id.to_string()];
+    let mut current = id.to_string();
+
+    while let Some(parent) = snapshots
+        .iter()
+        .find(|s| s.id == current)
+        .and_then(|s| s.manifest.as_ref())
+        .and_then(|m| m.parent())
+        .filter(|p| !p.is_empty() && !seen.contains(p))
+    {
+        seen.push(parent.clone());
+        chain.push(parent.clone());
+        current = parent;
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn cmd_lineage(store: &Store, id: Option<&str>, json: bool) -> Result<i32> {
+    let snapshots = store.discover()?;
+
+    let wanted: Vec<&Snapshot> = match id {
+        Some(id) => {
+            let found: Vec<&Snapshot> = snapshots.iter().filter(|s| s.id == id).collect();
+            if found.is_empty() {
+                anyhow::bail!("snapshot {id} not found in {}", store.paths.root.display());
+            }
+            found
         }
-        return Ok(0);
+        // Hidden snapshots are excluded, as `list` does: hiding is how a snapshot comes
+        // off the menu, and the shell's `lineage` globs `manifest.yaml`, which a hidden
+        // one no longer has.
+        None => snapshots.iter().filter(|s| !s.hidden).collect(),
     };
 
-    let snapshots = store.discover()?;
-    let mut chain: Vec<Row> = Vec::new();
-    let mut current = Some(start);
-    let mut seen: Vec<String> = Vec::new();
-
-    while let Some(id) = current {
-        // A cycle would otherwise hang the tool on a corrupted store.
-        if seen.contains(&id) {
-            break;
-        }
-        seen.push(id.clone());
-        let Some(snapshot) = snapshots.iter().find(|s| s.id == id) else {
-            break;
-        };
-        chain.push(Row::of(snapshot));
-        current = snapshot.manifest.as_ref().and_then(|m| m.parent());
-    }
+    let mut rows: Vec<(Vec<String>, Row)> = wanted
+        .iter()
+        .map(|s| (ancestor_ids(&snapshots, &s.id), Row::of(s)))
+        .collect();
+    // Group each lineage together so related lines are adjacent, and tie-break on the id
+    // so two runs over the same store print the same thing.
+    rows.sort_by(|a, b| {
+        a.0.first()
+            .cmp(&b.0.first())
+            .then(a.0.len().cmp(&b.0.len()))
+            .then(a.1.id.cmp(&b.1.id))
+    });
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&chain)?);
+        let payload: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(chain, row)| {
+                serde_json::json!({
+                    "id": row.id,
+                    "chain": chain,
+                    "date": row.date,
+                    "description": row.description,
+                    "status": row.status,
+                    "booted": row.booted,
+                    "golden": row.golden,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(0);
     }
 
-    for (depth, row) in chain.iter().enumerate() {
+    if rows.is_empty() {
+        println!("No snapshots in {}.", store.paths.root.display());
+        return Ok(0);
+    }
+
+    println!("snaptune lineage");
+    println!();
+    for (chain, row) in &rows {
+        let mut parts = chain.clone();
+        if parts.len() > 1 && !snapshots.iter().any(|s| s.id == parts[0]) {
+            parts[0] = format!("{} (not in this store)", parts[0]);
+        }
         println!(
-            "{}{}  {}  {}",
-            "  ".repeat(depth),
-            row.id,
+            " {}  {}  {} {}",
+            parts.join(" → "),
             row.date.as_deref().unwrap_or("-"),
+            row.markers(),
             row.description
         );
     }
@@ -3469,7 +3541,10 @@ mod tests {
             matches!(parse(&["snaptune", "which"]), Cmd::Current),
             "which"
         );
-        assert!(matches!(parse(&["snaptune", "tree"]), Cmd::Lineage), "tree");
+        assert!(
+            matches!(parse(&["snaptune", "tree"]), Cmd::Lineage { .. }),
+            "tree"
+        );
         assert!(
             matches!(parse(&["snaptune", "grublist"]), Cmd::GrubList),
             "grublist"
@@ -3548,7 +3623,10 @@ mod tests {
         for name in ["lineage", "tree"] {
             let cmd =
                 Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert!(matches!(cmd.cmd, Cmd::Lineage), "{name} must mean lineage");
+            assert!(
+                matches!(cmd.cmd, Cmd::Lineage { .. }),
+                "{name} must mean lineage"
+            );
         }
     }
 
@@ -3729,6 +3807,60 @@ mod tests {
 
     fn paths() -> Paths {
         Paths::under("/fixture")
+    }
+
+    /// A lineage reads root-first: the oldest name at the left, the snapshot asked about
+    /// at the right. A parent outside the store is kept, because the fleet's snapshots
+    /// root at names like `base-7.2.9-1-cachyos-bore` and that name is the start of the
+    /// answer rather than noise.
+    #[test]
+    fn a_lineage_reads_root_first_and_keeps_a_parent_outside_the_store() {
+        let base = snap(
+            "snap-aaaaaaaa",
+            "snapshot:\n  id: \"snap-aaaaaaaa\"\n  parent: \"base-7.2.9\"\n",
+        );
+        let mid = snap(
+            "snap-bbbbbbbb",
+            "snapshot:\n  id: \"snap-bbbbbbbb\"\n  parent: \"snap-aaaaaaaa\"\n",
+        );
+        let tip = snap(
+            "snap-cccccccc",
+            "snapshot:\n  id: \"snap-cccccccc\"\n  parent: \"snap-bbbbbbbb\"\n",
+        );
+        let all = vec![base, mid, tip];
+        assert_eq!(
+            ancestor_ids(&all, "snap-cccccccc"),
+            vec![
+                "base-7.2.9",
+                "snap-aaaaaaaa",
+                "snap-bbbbbbbb",
+                "snap-cccccccc"
+            ],
+            "root first, and the name that is not a snapshot survives"
+        );
+        // A snapshot with no parent is its own whole chain.
+        let lone = snap("snap-dddddddd", "snapshot:\n  id: \"snap-dddddddd\"\n");
+        assert_eq!(
+            ancestor_ids(&[lone], "snap-dddddddd"),
+            vec!["snap-dddddddd"]
+        );
+    }
+
+    /// A cycle in `snapshot.parent` is a corrupted store, which is exactly when someone
+    /// reaches for this verb — so it has to stop rather than loop.
+    #[test]
+    fn a_parent_cycle_terminates_instead_of_hanging() {
+        let a = snap(
+            "snap-aaaaaaaa",
+            "snapshot:\n  id: \"snap-aaaaaaaa\"\n  parent: \"snap-bbbbbbbb\"\n",
+        );
+        let b = snap(
+            "snap-bbbbbbbb",
+            "snapshot:\n  id: \"snap-bbbbbbbb\"\n  parent: \"snap-aaaaaaaa\"\n",
+        );
+        let chain = ancestor_ids(&[a, b], "snap-aaaaaaaa");
+        assert_eq!(chain.len(), 2, "each id appears once: {chain:?}");
+        assert_eq!(chain[0], "snap-bbbbbbbb", "and it is still root-first");
     }
 
     /// A diff is only useful if it stays quiet about everything that did not

@@ -227,7 +227,7 @@ porting before that step is safe.
 | `list [--ids] [--all]` | snapshots, newest first | — | no |
 | `show <id>` | one snapshot in full | — | no |
 | `current` | the snapshot this boot came from | — | no |
-| `lineage` | follow `snapshot.parent` from the booted snapshot | — | no |
+| `lineage [<id>]` | `snapshot.parent` for every snapshot, or one — works un-booted | — | no |
 | `grub-list` | GRUB menu entries, marking the nested ones | — | no |
 | `diff <a> <b>` | manifest fields and boot artefacts that differ | — | no |
 | `golden [<id>]` | report the baseline, or mark one | marker | with id |
@@ -565,7 +565,7 @@ recollection of it. This is the table to work from before retiring `snapshot`.
 | `list`, `ls` | same + `ls` | |
 | `current`, `status`, `which` | same, all three | |
 | `show`, `info` | same + `info` | |
-| `lineage`, `tree` | same + `tree` | |
+| `lineage`, `tree` | same + `tree`, and it answers on *any* box | the shell walks all snapshots, un-booted included; so does this now |
 | `diff` | same | reads the manifests, so it works with no source tree |
 | `boot`, `reboot <id>` | `boot <id> [--reboot]` | **differs**: see below |
 | `boot --entry <grub-id>` | same | nested entries by path, which the shell refused |
@@ -585,6 +585,15 @@ recollection of it. This is the table to work from before retiring `snapshot`.
 | `hide` / `unhide` | same | |
 | `test-result`, `result <id> <t> <r>` | same + `result` | plus the read-back check |
 | `help`, `usage`, `--help`, `-h` | `--help`, `-h` | |
+
+`lineage` was a gap found by running both tools side by side rather than by reading
+either one's help: this one walked `snapshot.parent` from the **booted** snapshot, so on
+a blade running the distro's kernel it printed nothing at all, while the shell's printed
+every snapshot's chain regardless. A lineage is a property of the store, not of what this
+box happened to boot, so it now takes an optional id and defaults to the whole store —
+reading root-first, with a parent that is not itself a snapshot (the fleet's
+`base-7.2.9-1-cachyos-bore`) kept and marked, because that name is where the lineage
+starts.
 
 Environment, from the shell's own help and its `README.md`:
 
