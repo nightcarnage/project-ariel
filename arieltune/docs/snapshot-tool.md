@@ -1,0 +1,466 @@
+# snaptune — the snapshot tool: model, contracts, and workflows
+
+`snaptune` (also reachable as `arieltune snapshot`) manages the kernel snapshots
+on a BC-250 blade: what is on the disk, which one this boot came from, and the
+GRUB menu entries that boot them. It is a port of `bc-250-snapshotter/snapshot`,
+and it is now the authority for everything the shell tool used to do.
+
+This document is the design and invariants reference. The module headers assume
+it; §3 in particular is the part that must not be "improved" while snapshots
+written by the shell tool still exist.
+
+---
+
+## 1. The mental model
+
+**A snapshot is a promise that a named triple — one `amdgpu` module, one
+initramfs, one kernel — boots.** Everything else in this tool exists to keep that
+promise checkable.
+
+Three separate things identify a snapshot, and it is worth keeping them apart:
+
+| | what it is | how you see it |
+|---|---|---|
+| **the id** | `snap-` + a hash of the *content* | the directory name, the `/boot` filenames, the GRUB entry id |
+| **the manifest** | what the writer *claimed* at the moment it wrote | `/var/lib/kernel-snapshots/<id>/manifest.yaml` |
+| **the entry** | what GRUB will actually run | the block in `/etc/grub.d/40_custom` |
+
+The whole reason the id is content-addressed is that it is the only one of the
+three that cannot drift. A manifest is written once and never read back; a
+`40_custom` block is a file that can be edited. The id is a hash, so it can be
+recomputed — and `snaptune verify` does exactly that.
+
+### Why this matters on a BC-250
+
+The `amdgpu` module lives in the **early** cpio archive of the initramfs, because
+early KMS needs it before the real root is mounted. So "which module did this boot
+come from?" is not answerable from the running system: the kernel has no record of
+which file in which archive it loaded. It is answerable only from the artefacts,
+which is what a snapshot is.
+
+That also fixes the shape of the safe edit: you cannot change the module on a
+running system and hope. You make a *different* artefact, name it, and boot it
+once.
+
+### Read-only, and not
+
+| | verbs |
+|---|---|
+| **read-only, safe anywhere** | `list` `show` `current` `lineage` `grub-list` `diff` `golden`(report) `doctor` `verify` |
+| **write** (need root) | `create` `rebuild` `dev --run --register` `register` `boot` `pin` `unpin` `hide` `unhide` `golden <id>` `prune` |
+
+Every writing verb takes `--dry-run`, which prints the action plan and touches
+nothing. `--json` is global and puts one JSON value on stdout and nothing else — an
+object for the report verbs, an array for `list` and `lineage`.
+
+---
+
+## 2. What is on disk
+
+Three locations, and every verb is about relating them.
+
+```text
+/var/lib/kernel-snapshots/            the store
+├── .golden-snapshot                  one id, as text — the baseline
+├── known-good-amdgpu.ko.zst          the shell tool's safety copy (not written here)
+├── snap-<id>/
+│   ├── manifest.yaml                 the claim
+│   ├── manifest.yaml.hidden          `hide` renames it — that IS the hidden flag
+│   ├── modules/<name>.ko.zst         this snapshot's own module
+│   ├── config/                       mkinitcpio.conf + modprobe.d, shell snapshots
+│   ├── firmware/                     cyan_skillfish* blobs
+│   └── source/                       the .c/.h it was built from, when there was a tree
+
+/boot/
+├── vmlinuz-snap-<id>                 its own copy of a kernel
+├── initramfs-snap-<id>.img           its own initramfs
+├── snap-<id>.cmdline                 its own command line
+├── vmlinuz-linux-cachyos-bore        the distro's kernel, untouched
+├── initramfs-linux-cachyos-bore.img  the distro's initramfs, untouched
+└── initramfs-rescue-<kver>-<ts>.img  the shell tool's preserved copies
+
+/etc/grub.d/40_custom                 one `menuentry` block per snapshot
+/boot/grub/grub.cfg                   generated; never edited by hand here
+```
+
+A snapshot is **self-contained**: its kernel, its initramfs and its module are
+copies. That is why `prune` can delete one without touching anything else, and why
+`boot` can be one-shot — the next boot simply falls back to another entry.
+
+---
+
+## 3. The contracts with existing snapshots
+
+Everything in this section is a **contract with snapshots that already exist on
+the blades**. The ids on disk, the manifest field names and the path conventions
+cannot be changed without orphaning real snapshots, so this tool reproduces them
+byte for byte rather than tidying them up.
+
+### 3.1 The three id formulas
+
+There are three, they are not interchangeable, and which one produced an id is
+recorded in the manifest as `snapshot.kind`.
+
+| | made by | formula |
+|---|---|---|
+| **F1** | the shell's `create`, with a source tree | `md5("<hash of 4 .c files>-<symvers8>" + "\n")` |
+| **F2** | the shell's `create`, no source tree | `md5("<kver>-<module8>")` — **no** trailing newline |
+| **F3** | `register` / `import`, and this tool's `dev` / `create` / `rebuild` | `md5("<mod8>-<initrd8>-<vmlinuz8>-<symvers8>" + "\n")` |
+
+Three consequences worth stating plainly:
+
+1. **F1 and F2 hash inputs that are not the artefact.** F1 hashes *source files*,
+   F2 hashes the *installed* module. Neither is reproducible once the tree or the
+   installed module changes. That is why the shell's own comment admits "a stale
+   source tree used to be able to recompute an OLD snapshot's id and clobber it",
+   and why this tool uses F3 everywhere.
+2. **The same content can carry two ids.** Blade 115's `snap-11e61755` (a `create`)
+   and blade 104's `snap-0848359a` (a `register`) hold byte-identical content —
+   module `ecdb619e`, initramfs `f21daf6a`, kernel `ddb9f7cc` — and differ only
+   because the formulas differ. Neither is wrong and neither has drifted.
+3. **An id can only be re-derived for content-addressed kinds.** `verify` recomputes
+   the id only when `kind` is one this tool writes (`dev-build`, `created`,
+   `rebuilt`); for a shell snapshot it says "not checked" and means it. Reporting
+   that as a mismatch would be a false alarm on a perfectly good snapshot.
+
+`manifest::id_is_content_addressed` is the single place that decides this.
+
+### 3.2 Manifest field names
+
+`manifest.yaml` is emitted by the shell as a heredoc, so **field types vary**:
+`size: 5823372 bytes` is a string, `markers: 0` an integer, `files: []` a list,
+and `kernel.version` is sometimes the short `7.0.9` where the id was computed with
+`7.0.9-1-cachyos`. `Manifest` therefore parses into a `Value` tree and exposes
+*coercing* accessors, so a snapshot captured correctly is never rejected over its
+formatting. Unknown fields are preserved.
+
+Two accessors deliberately behave differently from the rest:
+
+- `source_tree_path()` has **no line-scan fallback**. The fallback takes the first
+  line *starting* with the key, and `module.path` is written before
+  `source_tree.path` in every manifest the shell produces — so a falling-back scan
+  would answer with the module's own path, plausibly and wrongly.
+- `cmdline()` is **not safe to boot with**. It is the *live* cmdline at capture
+  time, can name whichever kernel was booted then, and can contain `BOOT_IMAGE=`
+  twice (`snap-da794092` does). Regenerate it; do not reuse it.
+
+### 3.3 Path conventions
+
+The names are load-bearing in both directions:
+
+```text
+/var/lib/kernel-snapshots/snap-<id>/manifest.yaml
+/var/lib/kernel-snapshots/snap-<id>/manifest.yaml.hidden   # hide = rename
+/var/lib/kernel-snapshots/.golden-snapshot                 # id as text
+/boot/vmlinuz-snap-<id>
+/boot/initramfs-snap-<id>.img
+/boot/snap-<id>.cmdline
+```
+
+An id already starts with `snap-`: the artefacts are `/boot/vmlinuz-<id>` and
+`/boot/initramfs-<id>.img`, with **no second `snap-`**. The pairing runs both ways
+(`register::vmlinuz_for`), which is why the kernel for a snapshot is derived from
+its initramfs name rather than guessed.
+
+The distro's own files are named after the **package**, not the release: the kernel
+in `/boot` for release `7.2.9-1-cachyos-bore` is
+`initramfs-linux-cachyos-bore.img`, which `/usr/lib/modules/<kver>/pkgbase` names.
+Guessing `initramfs-<release>.img` finds nothing.
+
+### 3.4 The GRUB entry shape
+
+One `menuentry` per snapshot in `/etc/grub.d/40_custom`, with `--id '<snap-id>'`,
+a `search --fs-uuid` line, a `linux` line naming this snapshot's own vmlinuz, and
+an `initrd` line chaining `/boot/acpi_override.cpio` when it exists.
+
+Two rules:
+
+- **Append, never replace.** The file holds every other snapshot's entry;
+  writing only the new one deletes them all.
+- **Artefacts before `grub-mkconfig`.** The distro's `10_linux` generates a menu
+  entry for *every* `/boot/vmlinuz-*`, so a snapshot's files must be deleted
+  *before* the config is regenerated, or the menu keeps an entry pointing at a
+  kernel that is gone. `prune` encodes that order and is tested on it.
+
+And one trap: **`grub-reboot` exits 0 while changing nothing.** `next_entry` is
+only honoured when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. `boot` reads
+the armed value back out of grubenv before it reports success, and will not reboot
+unless that check passed.
+
+### 3.5 The name: `snaptune`, and the `snapshot` symlink
+
+The binary is `snaptune`, not `snapshot`, because `snapshot` is an unrelated
+program on the workstation (the GNOME screenshot tool answers `Unknown option
+--ids`), and because it joins `arieltune`/`llmtune` as a sibling.
+
+Blades get a `snapshot` **compat symlink** so the existing fleet scripts keep
+working. It is a symlink to this binary, so the shell tool's behaviour is not
+preserved by the symlink — only its name is. Where the two differ is §6.
+
+The same verbs are also reachable as `arieltune snapshot <verb>`, which is the
+namespaced form the TUI's other modules use.
+
+---
+
+## 4. The verbs
+
+| verb | what it does | writes | root |
+|---|---|---|---|
+| `list [--ids] [--all]` | snapshots, newest first | — | no |
+| `show <id>` | one snapshot in full | — | no |
+| `current` | the snapshot this boot came from | — | no |
+| `lineage` | follow `snapshot.parent` from the booted snapshot | — | no |
+| `grub-list` | GRUB menu entries, marking the nested ones | — | no |
+| `diff <a> <b>` | manifest fields and boot artefacts that differ | — | no |
+| `golden [<id>]` | report the baseline, or mark one | marker | with id |
+| `doctor [--verify]` | is the *store* coherent? | — | no |
+| `verify [<id>]` | is one *snapshot* what its manifest claims? | — | no |
+| `dev <desc>` | plan a dev build; `--run` builds, `--register` registers | `--register` | `--register` |
+| `create <desc>` | build or adopt a module, make it a bootable snapshot | store + `/boot` + `40_custom` | yes |
+| `rebuild <id>` | rebuild that snapshot's module as a **new** snapshot | same | yes |
+| `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
+| `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
+| `hide <id>` / `unhide <id>` | off/on the list and the menu; files kept | manifest rename | yes |
+| `prune <id>` (`delete`, `rm`) | delete files, directory and entry | everything | yes |
+
+Exit codes: `verify` returns **2** when anything failed; `doctor --verify` returns
+2 when anything is broken; `create`/`rebuild`/`dev` return 2 when they refuse to
+build. A refusal always writes nothing.
+
+---
+
+## 5. Workflows
+
+### 5.1 The dev loop — iterate on a module without a kernel build
+
+The loop is seconds, not minutes, because `make M=... modules` relinks only what
+changed. Nothing here installs into the live module tree.
+
+```bash
+# 1. What would this build? Nothing runs.
+snaptune dev "patch 25 variant" --tree ~/linux-cachyos/src/cachyos-7.2.9-2
+
+# 2. Build it, derive an image from the booted snapshot, verify the member bytes.
+snaptune dev "patch 25 variant" --tree ~/... --run
+
+# 3. Make it a real snapshot: id, manifest, /boot artefacts, GRUB entry.
+sudo snaptune dev "patch 25 variant" --tree ~/... --run --register
+
+# 4. Boot it once. It reverts by itself on the next boot.
+sudo snaptune boot snap-1a2b3c4d
+```
+
+Step 2's check is the part that matters: the derived image is opened and the member
+is compared byte for byte with what the build produced. "The image carries the
+module I built" is a fact, not an inference.
+
+`dev` refuses when the tree builds a *different* kernel from the one the parent
+image boots, because that module would be refused at load.
+
+### 5.2 A from-source snapshot
+
+```bash
+snaptune create "golden-base: patches 1-3" --tree ~/linux-cachyos/src/... --dry-run
+sudo snaptune create "golden-base: patches 1-3" --tree ~/linux-cachyos/src/...
+```
+
+The snapshot's initramfs is the base image's members with the module member
+replaced — not a fresh `mkinitcpio` run. If `/etc/mkinitcpio.conf` gained a hook
+since the base image was built, the snapshot will not carry it; choose the base
+with `--from` if that matters.
+
+### 5.3 Snapshot the running system, on a blade with no source tree
+
+The normal case for a blade provisioned from packages: the patched module is
+already installed and running.
+
+```bash
+snaptune create "running: 26/26 applied, 40 CU live" --dry-run
+sudo snaptune create "running: 26/26 applied, 40 CU live"
+```
+
+The module is adopted **byte for byte** — not re-stripped, not re-compressed.
+It is the artefact that has actually booted, and recompressing would make the
+snapshot differ from the thing that was validated. The base image is the running
+kernel's own initramfs, so the snapshot differs from the running system in exactly
+one member.
+
+The first snapshot a store ever holds becomes its baseline (`status: golden`, and
+the store's marker names it).
+
+### 5.4 Rebuild a snapshot's module
+
+"I have `snap-11e61755`; my tree has moved on; give me that snapshot's module
+rebuilt."
+
+```bash
+snaptune rebuild snap-11e61755 --dry-run        # plans against the recorded tree
+sudo snaptune rebuild snap-11e61755             # registers a NEW snapshot
+```
+
+The original is never written to. The new snapshot's `parent` is the one it came
+from, so `lineage` shows the relationship.
+
+It **refuses when the tree already produces the module the snapshot holds**: there
+is nothing to rebuild, and saying so beats a second snapshot with identical
+content (which the id would refuse as a duplicate anyway). On blade 115 this
+distinguished the two cases cleanly — rebuilding `snap-f59f7152` reported "nothing
+to rebuild", while rebuilding `snap-11e61755` found real drift
+(`ecdb619e…` → `39a2eab4…`).
+
+### 5.5 Test, then promote
+
+Nothing here ever sets the GRUB default on your behalf, because an untested
+snapshot must not become the entry the machine falls back to.
+
+```bash
+sudo snaptune boot snap-1a2b3c4d     # one boot; reverts by itself
+# ... validate ...
+sudo snaptune pin snap-1a2b3c4d      # now it is the permanent default
+```
+
+`boot` is one-shot (`grub-reboot` sets `next_entry`), so a snapshot that does not
+come up reverts on the following boot with no intervention.
+
+### 5.6 Triage: `doctor`, then `verify`
+
+`doctor` asks whether the *store* is coherent. `verify` asks whether one
+*snapshot* is what its manifest claims. Run them in that order.
+
+```bash
+snaptune doctor                      # the whole store's health
+snaptune doctor --verify; echo $?    # 2 if anything is broken — usable in a script
+snaptune doctor --json               # one object, for a caller
+
+snaptune verify                      # every snapshot; lists only the unclean ones
+snaptune verify snap-0848359a        # all five checks for one
+snaptune verify --json               # one object, incl. per-check findings
+```
+
+On the archive blade this reads as: 28 snapshots, `verify` exits 2, five of them
+fail `manifest` — and `doctor` names the same five. Two independently written
+checks agreeing is the point.
+
+### 5.7 Retire a snapshot
+
+```bash
+snaptune show snap-1a2b3c4d          # confirm it is the one you mean
+sudo snaptune prune snap-1a2b3c4d --dry-run
+sudo snaptune prune snap-1a2b3c4d
+```
+
+`prune` refuses the **booted**, **golden** and **pinned** snapshots. To retire a
+booted one, boot something else first; to retire the golden one, move the marker
+with `golden <other-id>`.
+
+`hide` is the reversible middle ground: off the list and off the menu, files kept.
+It is a rename of `manifest.yaml` to `manifest.yaml.hidden`, so it is also what
+"hidden" means when reading a store.
+
+### 5.8 Moving a snapshot between blades
+
+There are two routes, and neither needs the shell tool.
+
+**Same tree, same config, only the module differs** — which is the rule the whole
+fast path rests on. Build the module once and give it to `create`:
+
+```bash
+scp blade-a:/path/to/amdgpu.ko.zst /var/tmp/
+sudo snaptune create "vanilla twin of the RC" \
+    --module /var/tmp/amdgpu.ko.zst \
+    --from /boot/initramfs-linux-cachyos-bore.img
+```
+
+The snapshot's image is that base image with the module member replaced, so it is
+the target blade's own initramfs plus one changed member — no rebuild of anything
+else, and none of the source tree's state comes along.
+
+**The running module on a blade that has no tree** — `create` with no `--module`
+adopts what the kernel package installed (§5.3).
+
+> **Missing from this port:** the shell tool also had a `register` verb for handing
+> over a module *and an initramfs you built yourself*. `create --module` derives the
+> image rather than taking one, so an externally generated initramfs cannot be
+> registered yet. See §6.4.
+
+---
+
+## 6. What this deliberately does not do
+
+Three of the shell tool's behaviours are **not** reproduced, on purpose (§6.1–6.3).
+The fourth item is not a difference — it is a property both tools share, written
+down because it is the one that matters most if you are about to trust a snapshot
+you have not booted (§6.4).
+
+### 6.1 No live-system mutation in `create`
+
+The shell's `create` installs the new module into `/usr/lib/modules/<kver>/`, runs
+`depmod`, generates the snapshot's initramfs with `mkinitcpio -g`, then restores the
+known-good module and rebuilds *every* image on the machine with `mkinitcpio -P`.
+Between the install and the restore, the running system's module tree holds a module
+that has never booted; if that command dies in the window, the machine is left that
+way. Here the module is put into a *copy* of an image and the result is verified
+against the build. The live module tree and the live initramfs are never written.
+
+### 6.2 No in-place `rebuild`
+
+The shell writes the rebuilt module into the snapshot it names and keeps the id — so
+the id stops describing the content, which is exactly the mismatch `verify` reports.
+It then tells you to run `create`, which makes a new id anyway. This refuses to
+stage: the original is untouched and the rebuild is a new snapshot.
+
+### 6.3 No rescue-initramfs copies or `known-good-amdgpu.ko.zst` backups
+
+Those exist in the shell because it mutates the live initramfs and module. This does
+not, so there is nothing to rescue. If you want them anyway — they are cheap
+insurance and the fleet's runbooks mention them — they are a small addition.
+
+### 6.4 Nothing sets the GRUB default
+
+`boot` tries a snapshot exactly once and reverts by itself; `pin` makes it the
+permanent default. An untested snapshot never becomes the entry the machine falls
+back to.
+
+### 6.4 Shell verbs that were not ported
+
+The port covers everything the day-to-day workflows use, but it is not exhaustive.
+These shell verbs have no equivalent yet:
+
+| shell verb | what it did | covered by |
+|---|---|---|
+| `register --module --initramfs --vmlinuz` | register artefacts you built yourself | **nothing** — `create --module` derives an image instead of taking one |
+| `validate <module>` | check a module's markers, vermagic and metadata | the vermagic gate inside `dev`/`create`/`rebuild` |
+| `preserve [label]` | copy the current initramfs aside as a rescue image | **nothing**, deliberately (§6.3) |
+| `test-result <id> --boot-test ...` | record boot/GPU/rocminfo/dmesg results in the manifest | **nothing** |
+| `grub-flatten` | switch GRUB to a flat menu layout | **nothing** |
+| `extract-modules <id>` | pull the modules out of a snapshot's initramfs | the `image` module reads members; no verb exposes it |
+| `boot --entry <grub-id>` | one-shot boot into *any* GRUB entry, including the distro's | `boot` takes a snapshot id only |
+
+Of these, `register` is the one with a workflow behind it: the fleet's own
+`FAST-MODULE-SNAPSHOTS.md` documents building an initramfs by hand and registering
+it. `create --module` covers the case where only the module is new; a
+hand-generated initramfs is not covered. Likewise `boot --entry` is how you test the
+distro's own kernel through the same one-shot mechanism.
+
+None of this is a defect in what is here — it is what is left, and it is listed so
+nobody discovers it by trying.
+
+---
+
+## 7. Reading a `verify` report
+
+Five checks, in the order they appear. An `ok` means the check ran and passed; a
+`warn` can also mean *it could not run*, and the detail says which.
+
+| check | the question | a failure means |
+|---|---|---|
+| `manifest` | does it parse? | everything below would come from a line scan, so it stops here |
+| `files` | are the files it names present? | the manifest and the disk disagree; an entry will point at nothing |
+| `module` | is the stored module the one recorded? | the code in the snapshot is not the code the manifest claims |
+| `entry` | does the GRUB entry boot *this* snapshot? | a boot that succeeds and is not the one you asked for — the failure with no symptom |
+| `identity` | does the id match the content? | the module, image or kernel has been swapped since it was named |
+
+`identity` is the strongest and the only one that can notice a quiet module swap: it
+recomputes the id from the stored bytes. It runs only for kinds whose id *is* the
+content (§3.1) and says "not checked" otherwise — on most existing snapshots, which
+the shell wrote, that is the expected answer rather than a problem.

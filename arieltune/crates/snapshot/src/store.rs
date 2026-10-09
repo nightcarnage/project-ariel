@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Discovery: what snapshots exist, and what is on disk for each.
 //!
-//! **Read-only.** Nothing in this module writes, and no verb built on it can
-//! mutate a blade. That is the point of the first port phase: the shell tool is
-//! still the authority, and this has to agree with it before it is allowed to
-//! act.
+//! **Read-only.** Nothing in this module writes, which is what makes every verb
+//! built on it — `list`, `show`, `doctor`, `verify` — safe to run on a blade you
+//! are not responsible for. That is a property of *discovery*, not of the tool: the
+//! writing verbs exist and are listed in the crate docs. Nothing they do can be
+//! reached from here.
 //!
 //! Path conventions are a contract with existing snapshots, so they are
 //! reproduced rather than improved (`docs/snapshot-tool.md` §3.3):
