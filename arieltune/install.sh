@@ -16,6 +16,9 @@
 # tool being replaced. The dispatch already understands the name, so the cutover is a
 # symlink and nothing else.
 #
+# Also installs bash completion for `snaptune` (ids + verbs), from
+# completions/snaptune.bash -> /etc/bash_completion.d/.
+#
 # Needs: a Rust toolchain (cargo) to build, sudo to install.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -50,6 +53,10 @@ sudo ln -sf arieltune "$PREFIX/bin/at"
 for name in aputune memtune biostune wikitune snaptune; do
   sudo ln -sf arieltune "$PREFIX/bin/$name"
 done
+
+echo ">> bash completion (snaptune): /etc/bash_completion.d/snaptune"
+sudo install -d /etc/bash_completion.d
+sudo install -m644 completions/snaptune.bash /etc/bash_completion.d/snaptune
 
 echo ">> installed: $("$BIN" --version)"
 

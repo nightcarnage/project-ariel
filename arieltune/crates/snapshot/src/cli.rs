@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::dev;
@@ -644,6 +644,21 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Print completion candidates for the word being typed.
+    ///
+    /// Hidden, and not a user surface: this is the protocol
+    /// `completions/snaptune.bash` speaks, one candidate per line for `compgen -W`.
+    /// It is a verb rather than a table in the script because the script must not
+    /// carry its own copy of the verb list -- see [`completion_candidates`].
+    ///
+    /// `words` is the command line before the word being completed, with the
+    /// program name and this verb already stripped.
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
 }
 
 impl Global {
@@ -657,6 +672,221 @@ impl Global {
     fn store(&self) -> Store {
         Store::new(self.paths())
     }
+}
+
+/// What the word being typed could be, for `completions/snaptune.bash`.
+///
+/// The script asks this on every TAB and prints whatever comes back; it keeps no
+/// list of its own. That is the point. A second copy of a program's verbs is a
+/// second thing to forget to update, and the failure is silent -- a tab stop that
+/// has quietly stopped offering something is only noticed by whoever was relying
+/// on it.
+///
+/// `words` is the part of the command line *before* the word being completed, with
+/// the program name and this verb already removed, and the partial word left off
+/// because the shell filters by it:
+///
+/// ```text
+/// snaptune <TAB>             words = []
+/// snaptune show <TAB>        words = ["show"]
+/// snaptune show snap-a<TAB>  words = ["show"]        (compgen filters "snap-a")
+/// snaptune --json <TAB>      words = ["--json"]
+/// ```
+///
+/// `ids` is what the store holds, newest first, passed in rather than read here so
+/// that this stays pure and a test can hand it a list. Hidden snapshots are
+/// included: `unhide` and `prune` need to be able to name one, and a hidden
+/// snapshot that cannot be typed is one that cannot be restored.
+fn completion_candidates(words: &[String], ids: &[String]) -> Vec<String> {
+    // clap resolves positional indices while *building* a command, and building
+    // happens on render rather than on `get_arguments()`. Without this the id
+    // arguments report `index: None` and completion would quietly fall back to
+    // offering flags only -- which still looks like it works.
+    let mut cli = Cli::command();
+    for sub in cli.get_subcommands_mut() {
+        let _ = sub.render_usage();
+    }
+
+    let Some((verb, rest)) = split_verb(&cli, words) else {
+        // No verb yet: the verbs, then the flags that may precede one.
+        let mut out = verb_names(&cli);
+        out.extend(long_flags(&cli, &cli));
+        return out;
+    };
+    let Some(sub) = find_verb(&cli, verb) else {
+        // Not one of ours. Saying nothing beats guessing at another program's
+        // names; the script falls back to the shell's default completion.
+        return Vec::new();
+    };
+
+    // Walk what follows the verb to work out which word is being typed: either the
+    // value of a flag that was left dangling (`boot --id <TAB>`), or the Nth
+    // positional.
+    let mut positionals = 0usize;
+    let mut flag_value: Option<&clap::Arg> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let word = rest[i].as_str();
+        let Some(flag) = word.strip_prefix("--") else {
+            if word.starts_with('-') {
+                i += 1; // a short flag; nothing here binds one
+            } else {
+                positionals += 1;
+                i += 1;
+            }
+            continue;
+        };
+        let (name, inline) = match flag.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (flag, false),
+        };
+        match long_arg(sub, name) {
+            // A value-taking flag with nothing after it is the word being typed.
+            Some(arg) if takes_value(arg) && !inline => {
+                if i + 1 < rest.len() {
+                    i += 2; // the flag, then its value
+                } else {
+                    flag_value = Some(arg);
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    if let Some(arg) = flag_value {
+        if value_is_id(arg) {
+            out.extend(ids.iter().cloned());
+        }
+        return out;
+    }
+
+    let wants_id = sub
+        .get_arguments()
+        .find(|a| a.get_index() == Some(positionals + 1))
+        .is_some_and(value_is_id);
+    if wants_id {
+        out.extend(ids.iter().cloned());
+    }
+    // Flags are always worth offering: they are the other thing that can go here,
+    // and `compgen` filters them out when the word does not start with a dash.
+    out.extend(long_flags(&cli, sub));
+    out
+}
+
+fn cmd_complete(words: &[String], ids: &[String]) -> Result<i32> {
+    for candidate in completion_candidates(words, ids) {
+        println!("{candidate}");
+    }
+    Ok(0)
+}
+
+/// Whether an argument's value *is* a snapshot id.
+///
+/// Decided by `value_name`, which the derive sets from the field's type name:
+/// `id: String` reports `ID`, and `diff`'s two report `A` and `B` because that is
+/// how the docs write the verb -- both are ids. Nothing that is not an id is named
+/// `ID`: `dev` and `create` take a `DESCRIPTION`, `validate` a `MODULE`, `preserve`
+/// a `LABEL`, so offering ids there would be a wrong answer rather than a helpful
+/// one.
+fn value_is_id(arg: &clap::Arg) -> bool {
+    arg.get_value_names().is_some_and(|names| {
+        names
+            .iter()
+            .any(|name| matches!(name.as_str(), "ID" | "SNAP-ID" | "A" | "B"))
+    })
+}
+
+/// Whether a flag's value follows it as a separate word.
+///
+/// Asked of the *action*, not of `num_args`: clap leaves the arity unset for a
+/// derived `bool` field and infers `SetTrue` while building, so `--json` reports
+/// `num_args: None` — indistinguishable from "takes one value" by that route, which
+/// is how `snaptune --json show <TAB>` first came back with the verb list instead of
+/// ids. The action says what the flag actually does.
+fn takes_value(arg: &clap::Arg) -> bool {
+    use clap::ArgAction;
+    if matches!(
+        arg.get_action(),
+        ArgAction::SetTrue
+            | ArgAction::SetFalse
+            | ArgAction::Count
+            | ArgAction::Help
+            | ArgAction::Version
+    ) {
+        return false;
+    }
+    arg.get_num_args()
+        .is_none_or(|range| range.min_values() > 0)
+}
+
+fn long_arg<'a>(cmd: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+    cmd.get_arguments().find(|a| a.get_long() == Some(name))
+}
+
+fn find_verb<'a>(cmd: &'a clap::Command, verb: &str) -> Option<&'a clap::Command> {
+    cmd.get_subcommands()
+        .find(|sub| sub.get_name() == verb || sub.get_all_aliases().any(|alias| alias == verb))
+}
+
+/// Every verb and alias. Hidden ones are excluded: `__complete` completes for
+/// reading, never for typing.
+fn verb_names(cmd: &clap::Command) -> Vec<String> {
+    let mut out: Vec<String> = cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .flat_map(|sub| {
+            std::iter::once(sub.get_name().to_string())
+                .chain(sub.get_all_aliases().map(str::to_string))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The long flags to offer: the verb's own, plus the root's.
+///
+/// The root's are included because clap marks `--json` and `--root` `global`: they
+/// are accepted after any verb though only the root declares them, so
+/// `snaptune show --json <id>` parses. Reading the subcommand's arguments alone
+/// drops exactly the flags people type *after* a verb, which is when they use TAB.
+fn long_flags(root: &clap::Command, cmd: &clap::Command) -> Vec<String> {
+    let mut out: Vec<String> = [root, cmd]
+        .into_iter()
+        .flat_map(|cmd| cmd.get_arguments())
+        .filter_map(|arg| arg.get_long())
+        .map(|name| format!("--{name}"))
+        .collect();
+    out.push("--help".to_string());
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The verb and everything after it, skipping the global flags that may come first.
+///
+/// `--root` takes a value, so that value must not be mistaken for the verb:
+/// `snaptune --root /var/tmp/store show <TAB>` still has to find `show`.
+fn split_verb<'a>(cmd: &clap::Command, words: &'a [String]) -> Option<(&'a str, &'a [String])> {
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i].as_str();
+        match word.strip_prefix("--") {
+            Some(flag) => {
+                let (name, inline) = match flag.split_once('=') {
+                    Some((name, _)) => (name, true),
+                    None => (flag, false),
+                };
+                let takes = long_arg(cmd, name).is_some_and(takes_value);
+                i += if takes && !inline { 2 } else { 1 };
+            }
+            None if word.starts_with('-') => i += 1,
+            None => return Some((word, &words[i + 1..])),
+        }
+    }
+    None
 }
 
 /// A snapshot flattened for output. One struct for both formats so the JSON and
@@ -754,6 +984,16 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
         Cmd::Unhide { id, dry_run } => cmd_unhide(&store.paths, &id, dry_run),
         Cmd::Prune { id, dry_run } => cmd_prune(&store.paths, &id, dry_run),
+        Cmd::Complete { words } => {
+            // A store that cannot be read is "no ids to offer", not a failed
+            // completion: this runs on every TAB, and an error here would print
+            // noise into whatever the operator was typing.
+            let ids: Vec<String> = store
+                .discover()
+                .map(|snapshots| snapshots.into_iter().map(|s| s.id).collect())
+                .unwrap_or_default();
+            cmd_complete(&words, &ids)
+        }
         Cmd::Boot {
             id,
             entry,
@@ -3388,6 +3628,300 @@ fn cmd_grub_list(store: &Store, json: bool) -> Result<i32> {
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+
+    // ---- shell completion --------------------------------------------------
+    //
+    // The script is `completions/snaptune.bash`, and it carries no verb list: it
+    // asks the tool. So these tests are about the tool's answers, and the last one
+    // runs bash to check the plumbing between the two.
+
+    fn candidates(words: &[&str], ids: &[String]) -> Vec<String> {
+        let words: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        completion_candidates(&words, ids)
+    }
+
+    fn some_ids() -> Vec<String> {
+        vec!["snap-aaaaaaaa".into(), "snap-bbbbbbbb".into()]
+    }
+
+    /// The command tree with clap's derived positional indices resolved, the same
+    /// way the engine does it — `render_usage` is what triggers the build.
+    fn usage_of(name: &str) -> String {
+        let mut cli = Cli::command();
+        for sub in cli.get_subcommands_mut() {
+            let _ = sub.render_usage();
+        }
+        let mut sub = cli
+            .get_subcommands()
+            .find(|s| s.get_name() == name)
+            .unwrap_or_else(|| panic!("no verb {name}"))
+            .clone();
+        sub.render_usage().to_string()
+    }
+
+    /// Top level: every verb, every alias, the global flags -- and nothing invented,
+    /// no hidden protocol verb, no duplicates.
+    #[test]
+    fn the_top_level_offers_every_verb_and_alias() {
+        let out = candidates(&[], &[]);
+
+        let mut want: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .flat_map(|sub| {
+                std::iter::once(sub.get_name().to_string())
+                    .chain(sub.get_all_aliases().map(str::to_string))
+            })
+            .collect();
+        want.sort();
+        want.dedup();
+
+        for verb in &want {
+            assert!(out.contains(verb), "{verb} is not offered");
+        }
+        for word in &out {
+            assert!(
+                want.contains(word) || word.starts_with("--"),
+                "offered something that is not a verb or a flag: {word}"
+            );
+        }
+        assert!(
+            !out.iter().any(|word| word == "__complete"),
+            "the completion protocol must not be offered as something to type"
+        );
+        let mut sorted = out.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), out.len(), "duplicate candidates: {out:?}");
+    }
+
+    /// **The answer that has to be right.** Ids are offered for the verbs whose own
+    /// usage says `<ID>` -- and not for the ones that take a `DESCRIPTION`, a
+    /// `MODULE` or a `LABEL`, where an id is not a valid argument at all.
+    ///
+    /// Derived from the rendered usage, which is what the operator reads in
+    /// `--help`, rather than from the same `value_name` the engine looks at: if one
+    /// side is changed alone, this fails.
+    #[test]
+    fn ids_are_offered_exactly_where_the_usage_says_id() {
+        let ids = some_ids();
+        let names: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_string())
+            .collect();
+        assert_eq!(
+            names.len(),
+            Cli::command().get_subcommands().count(),
+            "every verb must be checked"
+        );
+
+        for name in &names {
+            let usage = usage_of(name);
+            // `<ID>` when required, `[ID]` when optional (`lineage [ID]`).
+            let advertised = ["ID", "A", "B"].iter().any(|name| {
+                usage.contains(&format!("<{name}>")) || usage.contains(&format!("[{name}]"))
+            });
+            let offered = candidates(&[name.as_str()], &ids).contains(&ids[0]);
+            assert_eq!(
+                offered, advertised,
+                "{name}: usage {usage:?} but offered ids = {offered}"
+            );
+        }
+    }
+
+    /// The positional that is *not* an id, named: this is the failure a user would
+    /// see as the completion typing something that cannot work.
+    #[test]
+    fn a_description_position_offers_no_ids() {
+        let ids = some_ids();
+        for (verb, placeholder) in [
+            ("dev", "DESCRIPTION"),
+            ("create", "DESCRIPTION"),
+            ("validate", "MODULE"),
+            ("preserve", "LABEL"),
+        ] {
+            let out = candidates(&[verb], &ids);
+            assert!(
+                !out.iter().any(|word| ids.contains(word)),
+                "{verb} takes <{placeholder}>, so it must not offer ids: {out:?}"
+            );
+            assert!(
+                out.iter().any(|word| word == "--help"),
+                "{verb} should still offer its flags"
+            );
+        }
+    }
+
+    /// Once the positionals are used up, the flags are what is left to type -- and
+    /// an id is no longer offered, because it would be a second one.
+    #[test]
+    fn flags_are_offered_after_the_positionals_run_out() {
+        let ids = some_ids();
+        let out = candidates(&["show", "snap-aaaaaaaa"], &ids);
+        assert!(out.contains(&"--json".to_string()), "{out:?}");
+        assert!(
+            !out.contains(&ids[0]),
+            "a second id is not a valid argument"
+        );
+
+        // Aliases complete the same as the verb they alias.
+        assert_eq!(
+            candidates(&["info", "snap-a"], &ids),
+            candidates(&["show", "snap-a"], &ids)
+        );
+    }
+
+    /// A flag whose value is an id completes ids, even though no positional is
+    /// being typed: `snaptune boot --id <TAB>`.
+    #[test]
+    fn an_id_flag_completes_ids() {
+        let ids = some_ids();
+        let out = candidates(&["boot", "--id"], &ids);
+        assert!(out.contains(&ids[0]), "{out:?}");
+        // ...and a path flag does not.
+        let out = candidates(&["dev", "--tree"], &ids);
+        assert!(!out.contains(&ids[0]), "a tree path is not an id: {out:?}");
+    }
+
+    /// Global flags may precede the verb, and `--root` takes a value that must not
+    /// be mistaken for the verb.
+    #[test]
+    fn the_verb_is_found_through_the_leading_global_flags() {
+        let ids = some_ids();
+        assert!(candidates(&["--json", "show"], &ids).contains(&ids[0]));
+        assert!(candidates(&["--root", "/var/tmp/store", "show"], &ids).contains(&ids[0]));
+        // `=` form takes no separate word.
+        assert!(candidates(&["--root=/var/tmp/store", "show"], &ids).contains(&ids[0]));
+    }
+
+    /// A word we do not know gets no answer, rather than a guess.
+    #[test]
+    fn an_unknown_verb_is_left_alone() {
+        assert!(candidates(&["frobnicate"], &some_ids()).is_empty());
+        assert!(candidates(&["git", "show"], &some_ids()).is_empty());
+    }
+
+    /// Hidden means hidden: it is not in the help, but the script can still call it.
+    #[test]
+    fn the_completion_protocol_is_hidden_but_callable() {
+        let mut cli = Cli::command();
+        let help = cli.render_long_help().to_string();
+        assert!(
+            !help.contains("__complete"),
+            "the protocol must not be documented"
+        );
+        assert!(Cli::try_parse_from(["snaptune", "__complete", "show"]).is_ok());
+    }
+
+    /// The half that cannot be checked by reading: that the script slices the
+    /// command line the way the tool expects, including through the suite's
+    /// multi-call name. Runs bash, with a stand-in on PATH so the assertions are
+    /// about the *words passed*, not about a store.
+    #[test]
+    fn the_script_asks_the_tool_for_the_words_before_the_cursor() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../completions/snaptune.bash"
+        );
+        if std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("no bash; skipping the completion plumbing test");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("snaptune-completion-{}", std::process::id()));
+        let shim_dir = dir.join("bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let log = dir.join("argv");
+        // A stand-in for the tool: record the words it was called with, then reply
+        // with two ids so prefix filtering can be seen to work.
+        // One stand-in, under every name the script may invoke: the bare binary,
+        // and the suite's multi-call names for the namespace form.
+        let shim = shim_dir.join("snaptune");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {log}\nprintf '%s\\n' snap-aaaaaaaa snap-bbbbbbbb\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        for name in ["arieltune", "at"] {
+            std::os::unix::fs::symlink(&shim, shim_dir.join(name)).unwrap();
+        }
+
+        // `$1` = words typed before the cursor, as a bash array literal; `$2` = the
+        // word being completed.
+        // `words` is argv as bash hands it over, with the word being completed as
+        // the last entry at `complete_at` — bash's own convention, and what the
+        // script reads. The shell's argv is the shell's argv: an empty word is
+        // empty, never a quoted `''`.
+        let run = |words: &[&str], complete_at: usize| -> (String, String, String) {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(
+                    r#"
+                    source "$SCRIPT" || exit 3
+                    COMP_WORDS=("$@")
+                    COMP_CWORD="$CWORD"
+                    COMPREPLY=()
+                    _snaptune_complete
+                    printf '%s\n' "${COMPREPLY[@]}"
+                    "#,
+                )
+                .arg("driver")
+                .args(words)
+                .env("SCRIPT", script)
+                .env("CWORD", complete_at.to_string())
+                .env("PATH", format!("{}:/usr/bin:/bin", shim_dir.display()))
+                .output()
+                .expect("bash runs");
+            let completions = String::from_utf8_lossy(&out.stdout).to_string();
+            let args = std::fs::read_to_string(&log).unwrap_or_default();
+            let _ = std::fs::remove_file(&log);
+            (
+                completions,
+                args,
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+        };
+
+        // A verb, then the ids the shim replied.
+        let (completions, args, err) = run(&["snaptune", "show", ""], 2);
+        assert_eq!(args, "__complete\nshow\n", "stderr: {err}");
+        assert!(completions.contains("snap-aaaaaaaa"), "{completions:?}");
+
+        // The user's case: a partial id filters to the matching ones.
+        let (completions, args, _) = run(&["snaptune", "show", "snap-b"], 2);
+        assert_eq!(args, "__complete\nshow\n");
+        assert_eq!(completions.trim(), "snap-bbbbbbbb");
+
+        // Through the suite's name the namespace comes off the words being
+        // completed, but is passed through to the tool so it lands in the right
+        // command tree: `arieltune snapshot __complete show`.
+        let (completions, args, _) = run(&["arieltune", "snapshot", "show", ""], 3);
+        assert_eq!(args, "snapshot\n__complete\nshow\n");
+        assert!(completions.contains("snap-aaaaaaaa"), "{completions:?}");
+        let (_, args, _) = run(&["at", "snap", "show", ""], 3);
+        assert_eq!(args, "snap\n__complete\nshow\n");
+
+        // Another namespace is not ours: no candidates, and the tool is not called.
+        let (completions, args, _) = run(&["arieltune", "apu", ""], 2);
+        assert!(completions.trim().is_empty(), "{completions:?}");
+        assert!(
+            args.is_empty(),
+            "asked the tool about another namespace: {args:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn parse_dev(args: &[&str]) -> Result<Cmd, clap::Error> {
         let mut argv = vec!["snaptune", "dev", "an iteration"];

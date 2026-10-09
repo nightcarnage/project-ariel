@@ -470,6 +470,39 @@ is also where the label comes from: `vmlinuz-snap-<id>-v3-ttm-fix` yields
 `[v3-ttm-fix] <desc>`, because that filename is the only place the variant is
 written down.
 
+### 5.12 Typing snapshot ids: TAB completion
+
+Snapshot ids are `snap-` plus eight hex characters, which nobody wants to type when
+`snap-` plus three would do. `completions/snaptune.bash` completes them:
+
+```bash
+sudo install -m 0644 completions/snaptune.bash /etc/bash_completion.d/snaptune
+exec bash                                    # or: source /etc/bash_completion.d/snaptune
+snaptune show snap-a<TAB>                    # -> snap-a7c41d02
+snaptune unhide <TAB>                        # every id, hidden ones included
+arieltune snapshot show <TAB>                # and through the suite's name
+```
+
+The script holds **no list of verbs of its own** — it asks the tool, which answers
+from `clap`, so a verb or alias added to the CLI is completable without the script
+changing and one removed cannot go on being offered. The hidden `__complete` verb is
+that protocol; it is not documented as a verb because it is not one to type.
+
+Two consequences worth knowing:
+
+- **Hidden snapshots complete too.** They have to: `unhide` and `prune` name one, and
+  an id that cannot be typed is one that cannot be restored. (`list --ids` shows only
+  the visible ones, as the shell tool does.)
+- **A position that wants something else is not given ids.** `dev` and `create` take a
+  `DESCRIPTION`, `validate` a `MODULE`, `preserve` a `LABEL` — offering ids there
+  would be a wrong answer rather than a helpful one. A test derives the id-typed
+  positions from each verb's own `--help` usage (`<ID>` / `[ID]`) and asserts the
+  completion agrees with it.
+
+`snapshot` is deliberately not registered by the script: that name belongs to the
+shell tool until it is retired, and it has its own completion file. The cutover is
+one line in `completions/snaptune.bash` (§3.5).
+
 ### 5.11 Rescue copies, test results, and getting the module back out
 
 Three verbs that are useful around the edges of the loop.
@@ -701,6 +734,14 @@ Install on a blade — `snaptune` only, never `/usr/local/bin/snapshot` (§3.5):
 scp target/debug/snaptune blade:/var/tmp/snaptune.new
 ssh blade 'sudo install -m755 -o root -g root /var/tmp/snaptune.new /usr/local/bin/snaptune \
            && rm -f /var/tmp/snaptune.new && snaptune --version'
+```
+
+`./install.sh` in the workspace installs the suite; for the standalone binary the
+completion script goes alongside it (§5.12):
+
+```bash
+sudo install -d /etc/bash_completion.d
+sudo install -m 0644 completions/snaptune.bash /etc/bash_completion.d/snaptune
 ```
 
 Note `cargo test` and `cargo clippy` do **not** refresh `target/debug/snaptune` —

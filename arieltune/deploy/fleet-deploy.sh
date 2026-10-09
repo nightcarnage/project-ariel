@@ -44,9 +44,14 @@ install_compat() {
   # the symlink the argv[0] dispatch never sees it. `snapshot` is deliberately NOT
   # installed — that name belongs to the bc-250-snapshotter shell tool until it is
   # retired, and shadowing it would replace the tool being replaced.
+  #
+  # The bash completion goes with the binary: it is what makes `snaptune show snap-a<TAB>`
+  # fill in an id, and it is inert if bash never sources it.
   ssh "$1" 'sudo install -m755 /tmp/arieltune /usr/local/bin/arieltune \
     && sudo ln -sf arieltune /usr/local/bin/at \
-    && for n in aputune memtune biostune wikitune snaptune; do sudo ln -sf arieltune /usr/local/bin/$n; done'
+    && for n in aputune memtune biostune wikitune snaptune; do sudo ln -sf arieltune /usr/local/bin/$n; done \
+    && sudo install -d /etc/bash_completion.d \
+    && sudo install -m644 /tmp/snaptune.bash /etc/bash_completion.d/snaptune'
 }
 
 deploy_one() {
@@ -56,6 +61,7 @@ deploy_one() {
     echo "   SKIP: not a BC-250 (PCI 1002:13fe not found)"; return 1
   fi
   scp -q "$BIN" "$t":/tmp/arieltune
+  scp -q completions/snaptune.bash "$t":/tmp/snaptune.bash
   install_compat "$t"
   # disable-before-enable: retire any legacy aputune-* GPU units first.
   ssh "$t" 'sudo /usr/local/bin/arieltune migrate --apply'
