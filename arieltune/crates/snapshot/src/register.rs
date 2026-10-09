@@ -426,6 +426,35 @@ pub fn now_timestamp() -> Result<String> {
     Ok(stamp)
 }
 
+/// The name of the image a snapshot was derived from.
+///
+/// ```text
+///   /boot/initramfs-snap-11e61755.img       -> snap-11e61755
+///   /boot/initramfs-linux-cachyos-bore.img  -> linux-cachyos-bore
+/// ```
+///
+/// The *derivation* parent, which is a different question from "what was booted
+/// when this ran". Recording the booted snapshot when the image actually came from
+/// somewhere else is a false provenance claim: it says one snapshot descends from
+/// another when it descends from the distro image, and the recorded lineage then
+/// describes a chain that does not exist.
+///
+/// A name that does not follow the convention is recorded in full rather than
+/// guessed at, so it stays traceable.
+pub fn parent_of(image: &Path) -> String {
+    let name = image
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    match name
+        .strip_prefix("initramfs-")
+        .and_then(|stem| stem.strip_suffix(".img"))
+    {
+        Some(stem) if !stem.is_empty() => stem.to_string(),
+        _ => image.display().to_string(),
+    }
+}
+
 /// Read the live kernel command line, with `BOOT_IMAGE=` pointed at `vmlinuz`.
 pub fn cmdline_for(vmlinuz: &Path) -> Result<String> {
     let live = std::fs::read_to_string("/proc/cmdline")
@@ -451,6 +480,32 @@ pub fn rewrite_boot_image(cmdline: &str, vmlinuz: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The provenance bug this caught on a blade: iteration 3 was derived from the
+    /// *distro* image with `--from`, while 115 happened to be booted into
+    /// `snap-b3ac853a`. Recording the booted snapshot as the parent claimed a
+    /// lineage that did not exist.
+    #[test]
+    fn the_parent_is_the_image_it_was_derived_from() {
+        assert_eq!(
+            parent_of(Path::new("/boot/initramfs-linux-cachyos-bore.img")),
+            "linux-cachyos-bore"
+        );
+        assert_eq!(
+            parent_of(Path::new("/boot/initramfs-snap-11e61755.img")),
+            "snap-11e61755"
+        );
+        // A name that does not follow the convention is kept in full rather than
+        // guessed at.
+        assert_eq!(
+            parent_of(Path::new("/var/tmp/parent.img")),
+            "/var/tmp/parent.img"
+        );
+        assert_eq!(
+            parent_of(Path::new("/boot/initramfs-.img")),
+            "/boot/initramfs-.img"
+        );
+    }
 
     /// Both naming directions, because deriving a kernel path by hand is how you
     /// boot a snapshot with a kernel that does not match its modules.

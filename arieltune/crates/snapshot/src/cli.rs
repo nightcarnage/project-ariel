@@ -695,7 +695,13 @@ fn register_dev(
         kernel_version,
         cmdline,
         root_uuid: register::root_uuid()?,
-        parent: targets.parent.clone().or_else(|| store.booted_id()),
+        // The image it was actually derived from, not whatever happens to be
+        // booted: `--from` can name any image, and claiming the booted snapshot as
+        // the parent records a lineage that does not exist.
+        parent: targets
+            .parent
+            .clone()
+            .or_else(|| Some(register::parent_of(parent_image))),
         tree: Some(tree.path.clone()),
         // Only a tree that is its own checkout can say what changed. Handing over
         // an empty list from a tree that cannot tell would record "nothing

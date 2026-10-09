@@ -1462,6 +1462,127 @@ mod tests {
         assert_eq!(section_for("something_new"), Section::Origin);
     }
 
+    /// A dev snapshot's manifest must be *readable in the pane*, not merely
+    /// well-formed on disk.
+    ///
+    /// The panel iterates the manifest's own fields, so a key renamed in
+    /// `register` would go on parsing, go on being written, and quietly stop being
+    /// displayed — which is the failure this test exists to catch, and the reason
+    /// it goes through the real `register::manifest_text` rather than a literal
+    /// that could drift from it.
+    #[test]
+    fn a_dev_snapshot_shows_its_provenance() {
+        let root = temp_root("devprovenance");
+        let id = "snap-3f9a1c2b";
+        let snap = root.join(id);
+        std::fs::create_dir_all(snap.join("modules")).unwrap();
+
+        let req = crate::register::Request {
+            id: id.to_string(),
+            description: "printf marker, iteration 3".to_string(),
+            module: snap.join("modules/module.ko.zst"),
+            initramfs: root.join("work/dev.img"),
+            vmlinuz_source: root.join("work/vmlinuz"),
+            kernel_version: "7.2.9-1-cachyos-bore".to_string(),
+            cmdline: "BOOT_IMAGE=/boot/vmlinuz-snap-3f9a1c2b root=UUID=abc rw".to_string(),
+            root_uuid: "757f018a-71b0-44fc-aac8-c5b2ed165923".to_string(),
+            parent: Some("linux-cachyos-bore".to_string()),
+            tree: Some(PathBuf::from("/home/nightcarnage/tree")),
+            changed_files: None,
+            module_md5: "016a410f8b86e1b5d10efbaa856ce22f".to_string(),
+            module_size: 7358583,
+            module_srcversion: Some("A6388DF88F71A0EE65E1EED".to_string()),
+            module_vermagic: Some("7.2.9-1-cachyos-bore SMP preempt mod_unload".to_string()),
+            store_root: root.clone(),
+            boot: root.join("boot"),
+            acpi_override: false,
+        };
+        std::fs::write(
+            snap.join("manifest.yaml"),
+            crate::register::manifest_text(&req, "2026-10-09T14:36:13Z"),
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(root.join("boot")).unwrap();
+        for name in ["vmlinuz", "initramfs", "cmdline"] {
+            let path = match name {
+                "vmlinuz" => root.join(format!("boot/vmlinuz-{id}")),
+                "initramfs" => root.join(format!("boot/initramfs-{id}.img")),
+                _ => root.join(format!("boot/{id}.cmdline")),
+            };
+            std::fs::write(path, b"x").unwrap();
+        }
+        std::fs::create_dir_all(root.join("etc/grub.d")).unwrap();
+        std::fs::create_dir_all(root.join("proc")).unwrap();
+        std::fs::write(root.join("proc/cmdline"), "BOOT_IMAGE=x\n").unwrap();
+        std::fs::write(
+            root.join("etc/grub.d/40_custom"),
+            format!("#!/bin/sh\nmenuentry 'x' --id '{id}' {{\n}}\n"),
+        )
+        .unwrap();
+
+        let mut s =
+            SnapshotScreen::with_runner(Paths::under(&root), Box::new(write::Recording::default()));
+
+        // Assert on the pane's full line list rather than on a rendered frame: the
+        // frame is a viewport, and a field pushed below the fold is still a field
+        // the pane shows. Asserting on the frame made this test fail for the wrong
+        // reason the first time it ran.
+        let lines: String = s
+            .provenance_lines()
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Identity and origin: what it is, and where it came from.
+        for field in [
+            "snapshot.id",
+            "snapshot.description",
+            "snapshot.status",
+            "snapshot.parent",
+            "kernel.version",
+            "source_tree.mode",
+            "source_tree.path",
+        ] {
+            assert!(lines.contains(field), "{field} should be shown:\n{lines}");
+        }
+        // Contents: the module's identity, which is what makes two dev snapshots
+        // distinguishable from one another.
+        for field in [
+            "module.path",
+            "module.srcversion",
+            "module.md5",
+            "module.size",
+        ] {
+            assert!(lines.contains(field), "{field} should be shown:\n{lines}");
+        }
+        // Boot record: the paths the entry actually uses.
+        for field in [
+            "boot_files.vmlinuz",
+            "boot_files.initramfs",
+            "grub.root_uuid",
+        ] {
+            assert!(lines.contains(field), "{field} should be shown:\n{lines}");
+        }
+
+        // And the sections really do lay out in a rendered frame.
+        let text = render(&mut s, 120, 50);
+        for heading in ["identity", "origin", "contents"] {
+            assert!(
+                text.contains(&format!("── {heading}")),
+                "missing section {heading}:\n{text}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn scrolling_the_provenance_panel_is_clamped_to_zero() {
         let (mut s, root) = screen("scroll");
