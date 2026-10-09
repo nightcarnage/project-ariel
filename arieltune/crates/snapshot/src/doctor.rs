@@ -194,28 +194,41 @@ pub fn examine(paths: &Paths) -> Report {
     }
 
     // --- boot artefacts ---------------------------------------------------
+    //
+    // Split by visibility, because the same missing files mean different things.
+    // A hidden snapshot has no menu entry, so GRUB is offering nothing and there is
+    // no boot to fail — but `unhide` rebuilds the entry from the manifest, and that
+    // entry would point at files that are not there. So it still matters; it just is
+    // not the emergency the visible case is.
+    let describe = |s: &Snapshot| {
+        let mut missing = Vec::new();
+        if !s.vmlinuz {
+            missing.push("vmlinuz");
+        }
+        if !s.initramfs {
+            missing.push("initramfs");
+        }
+        if !s.cmdline_file {
+            missing.push("cmdline");
+        }
+        format!("{} (no {})", s.id, missing.join("/"))
+    };
+
     let incomplete: Vec<String> = snapshots
         .iter()
-        .filter(|s| !s.boot_artifacts_complete())
-        .map(|s| {
-            let mut missing = Vec::new();
-            if !s.vmlinuz {
-                missing.push("vmlinuz");
-            }
-            if !s.initramfs {
-                missing.push("initramfs");
-            }
-            if !s.cmdline_file {
-                missing.push("cmdline");
-            }
-            format!("{} (no {})", s.id, missing.join("/"))
-        })
+        .filter(|s| !s.hidden && !s.boot_artifacts_complete())
+        .map(&describe)
         .collect();
     if incomplete.is_empty() {
+        // Say *visible*, and say the count: with hidden ones excluded above, "all 28"
+        // would be a claim the next line contradicts.
         report.note(
             "artefacts",
             Severity::Ok,
-            format!("all {} have kernel + initramfs + cmdline", snapshots.len()),
+            format!(
+                "all {} visible have kernel + initramfs + cmdline",
+                snapshots.len() - hidden
+            ),
         );
     } else {
         report.note(
@@ -225,6 +238,27 @@ pub fn examine(paths: &Paths) -> Report {
                 "{} incomplete: {} — GRUB would offer a boot it cannot finish",
                 incomplete.len(),
                 incomplete.join(", ")
+            ),
+        );
+    }
+
+    // Hidden ones are reported separately, and as a warning: this is a store with
+    // snapshots that cannot be brought back as they stand, not one that will fail to
+    // boot.
+    let incomplete_hidden: Vec<String> = snapshots
+        .iter()
+        .filter(|s| s.hidden && !s.boot_artifacts_complete())
+        .map(&describe)
+        .collect();
+    if !incomplete_hidden.is_empty() {
+        report.note(
+            "hidden",
+            Severity::Warn,
+            format!(
+                "{} hidden with no files: {} — off the menu, so nothing is offered; \
+                 `unhide` would rebuild an entry pointing at files that are gone",
+                incomplete_hidden.len(),
+                incomplete_hidden.join(", ")
             ),
         );
     }
@@ -531,6 +565,47 @@ mod tests {
             "{}",
             artefacts.detail
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hidden snapshot whose files are gone is **not** the emergency the visible
+    /// case is: it has no menu entry, so GRUB is offering nothing and there is no boot
+    /// to fail. Found on blade 104, whose two hidden snapshots had their `/boot` files
+    /// removed as part of hiding them — reported as a Fail until this test existed.
+    ///
+    /// It still matters, because `unhide` rebuilds the entry from the manifest and
+    /// that entry would point at files that are not there. So: a warning, worded
+    /// accurately.
+    #[test]
+    fn a_hidden_snapshot_with_no_files_warns_rather_than_fails() {
+        let dir = store_with("hidden-gone", "snap-aaaaaaaa", &[]);
+        // Hide it the way this tool does, then remove what hiding preserves.
+        std::fs::rename(
+            dir.join("snap-aaaaaaaa/manifest.yaml"),
+            dir.join("snap-aaaaaaaa/manifest.yaml.hidden"),
+        )
+        .unwrap();
+        for file in [
+            "vmlinuz-snap-aaaaaaaa",
+            "initramfs-snap-aaaaaaaa.img",
+            "snap-aaaaaaaa.cmdline",
+        ] {
+            std::fs::remove_file(dir.join("boot").join(file)).unwrap();
+        }
+
+        let report = examine(&Paths::under(&dir));
+        // The visible-artefact line is fine: there are no visible snapshots left.
+        assert_eq!(key(&report, "artefacts").severity, Severity::Ok);
+        let hidden = key(&report, "hidden");
+        assert_eq!(hidden.severity, Severity::Warn);
+        assert!(hidden.detail.contains("snap-aaaaaaaa"), "{}", hidden.detail);
+        assert!(
+            hidden.detail.contains("unhide"),
+            "the actionable part: {}",
+            hidden.detail
+        );
+        // And the gate must not refuse over it.
+        assert_eq!(report.worst(), Severity::Warn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
