@@ -304,6 +304,94 @@ fn entry_table(entries: &[MenuEntry]) -> String {
     out
 }
 
+/// Is this line an active assignment to `key`? Comments are not.
+fn is_active_assignment(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix(key) else {
+        return false;
+    };
+    rest.starts_with('=')
+}
+
+/// The value of the first active `key=` assignment, unquoted.
+pub fn grub_default_value(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .find(|line| is_active_assignment(line, key))
+        .and_then(|line| line.split_once('=').map(|(_, v)| v))
+        .map(|v| v.trim().trim_matches(['\'', '"']).trim().to_string())
+}
+
+/// Set `key='value'` in `/etc/default/grub`. Returns the new text and whether it
+/// differs from the old.
+///
+/// **Idempotent, byte for byte.** When the key is already set to that value the text
+/// comes back identical *and* `changed` is false, which matters because the caller
+/// regenerates `grub.cfg` only when something changed — and "changed" has to mean the
+/// file really would change.
+///
+/// Appends the assignment when there is none. A commented-out one is left commented:
+/// `# GRUB_DISABLE_SUBMENU='false'   (disabled by snaptune…)` records that someone
+/// deliberately turned something off, and rewriting it in place would erase that.
+pub fn set_grub_default(text: &str, key: &str, value: &str) -> (String, bool) {
+    let mut out: Vec<String> = Vec::new();
+    let mut written = false;
+
+    for line in text.lines() {
+        if !written && is_active_assignment(line, key) {
+            written = true;
+            if grub_default_value(line, key).as_deref() == Some(value) {
+                out.push(line.to_string());
+            } else {
+                out.push(format!("{key}='{value}'"));
+            }
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !written {
+        out.push(format!("{key}='{value}'"));
+    }
+
+    let mut rendered = out.join("\n");
+    if text.ends_with('\n') || !written {
+        rendered.push('\n');
+    }
+    let changed = rendered != text;
+    (rendered, changed)
+}
+
+/// Comment out the active `key=` assignment, with a note saying why.
+///
+/// Returns the new text and whether anything changed. Already-commented lines are left
+/// alone, so running it twice is the same as running it once.
+pub fn comment_grub_default(text: &str, key: &str, note: &str) -> (String, bool) {
+    let mut changed = false;
+    let out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if is_active_assignment(line, key) {
+                changed = true;
+                if note.is_empty() {
+                    format!("# {line}")
+                } else {
+                    format!("# {line}   ({note})")
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    let mut rendered = out.join("\n");
+    if text.ends_with('\n') {
+        rendered.push('\n');
+    }
+    // Defined the same way as `set_grub_default`: the text differing is the fact that
+    // matters, since the caller skips regenerating `grub.cfg` when nothing changed.
+    let changed = rendered != text;
+    (rendered, changed)
+}
+
 /// The argument `grub-reboot` should be given for `want`, or the reason it must
 /// not be armed at all.
 ///
@@ -532,6 +620,101 @@ submenu 'Advanced options' --id 'advanced' {
             entries[2].path(),
             "Advanced options>with Linux linux-cachyos"
         );
+    }
+
+    /// A slice of a real `/etc/default/grub`: comments, an unrelated key, and a
+    /// commented-out assignment that must stay commented.
+    const DEFAULTS: &str = r#"# GRUB boot loader configuration
+GRUB_DEFAULT=saved
+GRUB_TIMEOUT=5
+#GRUB_DISABLE_SUBMENU='false'
+GRUB_THEME="/usr/share/grub/themes/cachyos/theme.txt"
+"#;
+
+    #[test]
+    fn grub_defaults_are_read_unquoted_and_only_when_active() {
+        assert_eq!(
+            grub_default_value(DEFAULTS, "GRUB_DEFAULT").as_deref(),
+            Some("saved")
+        );
+        assert_eq!(
+            grub_default_value(DEFAULTS, "GRUB_THEME").as_deref(),
+            Some("/usr/share/grub/themes/cachyos/theme.txt")
+        );
+        assert!(
+            grub_default_value(DEFAULTS, "GRUB_DISABLE_SUBMENU").is_none(),
+            "a commented-out assignment is not the value: reading it would make \
+             flatten think it had already run"
+        );
+        assert!(grub_default_value(DEFAULTS, "GRUB_TIMEOUT_STYLE").is_none());
+    }
+
+    #[test]
+    fn flattening_sets_the_key_and_leaves_every_other_line_alone() {
+        let (out, changed) = set_grub_default(DEFAULTS, "GRUB_DISABLE_SUBMENU", "true");
+        assert!(changed, "there was no active assignment to leave alone");
+        assert!(out.contains("GRUB_DISABLE_SUBMENU='true'\n"));
+        assert!(
+            out.contains("GRUB_DEFAULT=saved"),
+            "unrelated keys untouched"
+        );
+        assert!(
+            out.contains("#GRUB_DISABLE_SUBMENU='false'"),
+            "the commented one stays commented: it records that someone turned it off"
+        );
+        assert_eq!(
+            out.lines().count(),
+            DEFAULTS.lines().count() + 1,
+            "appended, not inserted"
+        );
+    }
+
+    #[test]
+    fn flattening_replaces_an_active_key_rather_than_appending_a_second_one() {
+        let text = "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU='false'\n";
+        let (out, changed) = set_grub_default(text, "GRUB_DISABLE_SUBMENU", "true");
+        assert!(changed);
+        assert_eq!(out, "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU='true'\n");
+        assert_eq!(out.matches("GRUB_DISABLE_SUBMENU").count(), 1);
+    }
+
+    /// The caller decides whether to regenerate `grub.cfg` from `changed`, so
+    /// "changed" has to mean the file really would change — otherwise every run
+    /// regenerates and rewrites a bootloader config for nothing.
+    #[test]
+    fn flattening_what_is_already_flat_changes_nothing_at_all() {
+        let text = "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU='true'\n";
+        let (out, changed) = set_grub_default(text, "GRUB_DISABLE_SUBMENU", "true");
+        assert!(!changed, "already flattened");
+        assert_eq!(out, text, "and byte-identical, not merely equivalent");
+    }
+
+    #[test]
+    fn commenting_the_theme_records_why_and_is_idempotent() {
+        let (out, changed) = comment_grub_default(DEFAULTS, "GRUB_THEME", "because rows");
+        assert!(changed);
+        assert!(
+            out.contains(
+                "# GRUB_THEME=\"/usr/share/grub/themes/cachyos/theme.txt\"   (because rows)\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("GRUB_DEFAULT=saved"), "other keys untouched");
+        assert!(
+            grub_default_value(&out, "GRUB_THEME").is_none(),
+            "now inactive"
+        );
+
+        let (again, changed) = comment_grub_default(&out, "GRUB_THEME", "because rows");
+        assert!(!changed, "running it twice is the same as running it once");
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn commenting_a_key_that_is_not_there_changes_nothing() {
+        let (out, changed) = comment_grub_default(DEFAULTS, "GRUB_THEME_EXTRA", "note");
+        assert!(!changed);
+        assert_eq!(out, DEFAULTS);
     }
 
     /// The fixture the `resolve_boot_entry` tests read: one top-level entry with an

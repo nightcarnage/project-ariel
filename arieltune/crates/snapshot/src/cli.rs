@@ -64,6 +64,26 @@ pub struct Cli {
     pub cmd: Cmd,
 }
 
+/// Adopt the shell tool's `SOURCE_TREE` as `SNAPSHOT_TREE`, before parsing.
+///
+/// The fleet's scripts and runbooks export `SOURCE_TREE`, and clap resolves `env` as it
+/// parses, accepting one variable per option. Left unread, `snaptune create` would not
+/// fail — it would quietly adopt the *installed* module instead of building from the
+/// tree, which is a different snapshot than the one that was asked for. A silent wrong
+/// artefact is the worst outcome available here, so the old name is still honoured.
+///
+/// `SNAPSHOT_TREE` wins when both are set, because it is this tool's own name.
+pub fn adopt_source_tree() {
+    if std::env::var_os("SNAPSHOT_TREE").is_some() {
+        return;
+    }
+    let Some(value) = std::env::var_os("SOURCE_TREE").filter(|v| !v.is_empty()) else {
+        return;
+    };
+    // Safe here: this runs before any parsing, threading or logging exists.
+    std::env::set_var("SNAPSHOT_TREE", value);
+}
+
 /// Options every verb shares.
 ///
 /// Flattened into [`Cli`] for the standalone `snaptune`, and into the suite's
@@ -86,6 +106,7 @@ pub struct Global {
 pub enum Cmd {
     /// List snapshots, newest first. Hidden ones are excluded, as the shell tool
     /// does; pass --all to include them.
+    #[command(alias = "ls")]
     List {
         /// Print ids only, one per line. Machine-readable; kept for compatibility.
         #[arg(long)]
@@ -96,19 +117,27 @@ pub enum Cmd {
     },
 
     /// Show one snapshot in detail.
+    #[command(alias = "info")]
     Show {
         /// Snapshot id, e.g. snap-0848359a.
         id: String,
     },
 
     /// Report the snapshot this boot came from.
+    #[command(alias = "status", alias = "which")]
     Current,
 
     /// Follow snapshot.parent from the booted snapshot.
+    #[command(alias = "tree")]
     Lineage,
 
     /// List GRUB menu entries, marking the nested ones.
-    #[command(name = "grub-list", alias = "grublist", alias = "grub")]
+    #[command(
+        name = "grub-list",
+        alias = "grublist",
+        alias = "grub",
+        alias = "grub-entries"
+    )]
     GrubList,
 
     /// Compare two snapshots: which manifest fields differ, and how the boot
@@ -130,6 +159,7 @@ pub enum Cmd {
     ///
     /// Naming an id writes the store's marker file (needs root). It does not touch
     /// GRUB or /boot: the golden image is a protection, not a boot configuration.
+    #[command(alias = "gold")]
     Golden {
         /// Snapshot id to mark as golden. Omit to just report the current one.
         id: Option<String>,
@@ -260,6 +290,7 @@ pub enum Cmd {
     ///
     /// Exits 2 when anything failed — there is no `--verify` flag here, because
     /// gating is this verb's whole job.
+    #[command(alias = "check")]
     Verify {
         /// Snapshot id, e.g. snap-0848359a. Omit to check them all.
         id: Option<String>,
@@ -430,6 +461,7 @@ pub enum Cmd {
     },
 
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
+    #[command(alias = "default", alias = "set-default")]
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
         id: String,
@@ -534,6 +566,24 @@ pub enum Cmd {
         dry_run: bool,
     },
 
+    /// Flatten the GRUB menu, and drop the theme.
+    ///
+    /// Sets `GRUB_DISABLE_SUBMENU='true'` so every entry sits at the top level, and
+    /// comments out `GRUB_THEME` — a themed menu shows about seven rows at 720p,
+    /// which is not enough to see the entries you are choosing between. Set
+    /// `SNAPSHOT_KEEP_THEME=1` to keep the theme.
+    ///
+    /// Regenerates `grub.cfg` and then **reads it back** to report how many submenus
+    /// are actually left, because writing the setting is not the menu changing.
+    /// Flattening is also what makes `boot --entry` accept a bare nested id: once an
+    /// entry is top level there is no submenu path to need.
+    #[command(name = "grub-flatten", alias = "flatten")]
+    GrubFlatten {
+        /// Print the settings that would change and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Delete a snapshot completely: its `/boot` artefacts, its directory and its
     /// GRUB entry. **Irreversible.** Needs root.
     ///
@@ -631,6 +681,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Current => cmd_current(&store, json),
         Cmd::Lineage => cmd_lineage(&store, json),
         Cmd::GrubList => cmd_grub_list(&store, json),
+        Cmd::GrubFlatten { dry_run } => cmd_grub_flatten(&store, dry_run, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
         Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
         Cmd::Dev {
@@ -1858,6 +1909,124 @@ fn cmd_test_result(store: &Store, id: &str, name: &str, value: &str, dry_run: bo
     if !dry_run {
         println!("\n{id}: {name} = {value}");
     }
+    Ok(0)
+}
+
+/// Why the theme is commented out, recorded on the line itself.
+const THEME_NOTE: &str = "disabled by snaptune: a themed menu shows ~7 rows at 720p";
+
+/// The settings `grub-flatten` cares about, in the order they are reported.
+const FLATTEN_KEYS: [&str; 3] = ["GRUB_DEFAULT", "GRUB_DISABLE_SUBMENU", "GRUB_THEME"];
+
+/// Flatten the GRUB menu, and drop the theme.
+fn cmd_grub_flatten(store: &Store, dry_run: bool, json: bool) -> Result<i32> {
+    let defaults = &store.paths.grub_defaults;
+    let before = std::fs::read_to_string(defaults)
+        .with_context(|| format!("reading {}", defaults.display()))?;
+
+    let keep_theme = std::env::var("SNAPSHOT_KEEP_THEME").is_ok_and(|v| v == "1");
+
+    let (text, flatten_changed) = grub::set_grub_default(&before, "GRUB_DISABLE_SUBMENU", "true");
+    let (text, theme_changed) = if keep_theme {
+        (text, false)
+    } else {
+        grub::comment_grub_default(&text, "GRUB_THEME", THEME_NOTE)
+    };
+    let changed = flatten_changed || theme_changed;
+
+    let mut actions = Vec::new();
+    if changed {
+        actions.push(write::Action::Write {
+            path: defaults.clone(),
+            contents: text.clone(),
+            what: format!("flatten the menu in {}", defaults.display()),
+        });
+    }
+    // Regenerated even when nothing changed: the point of the verb is that the *menu*
+    // is flat, and a `/etc/default/grub` that already says so while `grub.cfg` still
+    // holds submenus is the state this should fix rather than report as already done.
+    actions.push(write::Action::Run {
+        argv: vec![
+            "grub-mkconfig".to_string(),
+            "-o".to_string(),
+            store.paths.grub_cfg.display().to_string(),
+        ],
+        what: "regenerate grub.cfg".to_string(),
+    });
+
+    let plan = write::Plan {
+        summary: if changed {
+            "flatten the GRUB menu and regenerate grub.cfg".to_string()
+        } else {
+            "regenerate grub.cfg (the menu is already flat)".to_string()
+        },
+        actions,
+    };
+
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if dry_run {
+        return Ok(0);
+    }
+
+    // Read back rather than assume: writing the setting is not the menu changing.
+    let cfg = std::fs::read_to_string(&store.paths.grub_cfg).unwrap_or_default();
+    let blocks = cfg
+        .lines()
+        .filter(|line| line.trim_start().starts_with("submenu"))
+        .count();
+    let nested = grub::parse_menu_entries(&cfg)
+        .iter()
+        .filter(|entry| entry.submenu.is_some())
+        .count();
+
+    let settings: Vec<(String, String)> = FLATTEN_KEYS
+        .iter()
+        .map(|key| {
+            let value = grub::grub_default_value(&text, key);
+            let shown = match (value, *key) {
+                (Some(v), _) => v,
+                (None, "GRUB_THEME") if !keep_theme => "commented out".to_string(),
+                _ => "(not set)".to_string(),
+            };
+            ((*key).to_string(), shown)
+        })
+        .collect();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "defaults": defaults,
+                "changed": changed,
+                "kept_theme": keep_theme,
+                "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+                "submenu_blocks": blocks,
+                "nested_entries": nested,
+            }))?
+        );
+        return Ok(0);
+    }
+
+    println!("\n{}:", defaults.display());
+    for (key, value) in &settings {
+        println!("  {key}={value}");
+    }
+    println!("  submenu blocks in grub.cfg: {blocks}, nested entries: {nested}");
+    if nested > 0 {
+        println!(
+            "\n  Submenus are still there. This can only set the setting — something else\n  \
+             may be writing them back — and until they go, `boot --entry` needs the full\n  \
+             `Parent>Child` path for a nested entry."
+        );
+    } else {
+        println!("\n  No nested entries left: `boot --entry` takes a bare id for every entry now.");
+    }
+
+    println!();
+    cmd_grub_list(store, false)?;
     Ok(0)
 }
 
@@ -3108,6 +3277,13 @@ mod tests {
         Cli::try_parse_from(argv).map(|cli| cli.cmd)
     }
 
+    /// Parse a command line, failing with the line in the message when it does not.
+    fn parse(args: &[&str]) -> Cmd {
+        Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("{args:?} should parse: {e}"))
+            .cmd
+    }
+
     /// Registering is only meaningful for a build that actually ran: promoting an
     /// image that was never built would register the parent under a new name.
     #[test]
@@ -3196,6 +3372,123 @@ mod tests {
                 "{label:?} put the copy outside /boot: {}",
                 dest.display()
             );
+        }
+    }
+
+    #[test]
+    fn grub_flatten_parses_and_takes_the_shell_s_aliases() {
+        let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--dry-run"]).expect("parse");
+        match cmd.cmd {
+            Cmd::GrubFlatten { dry_run } => assert!(dry_run),
+            other => panic!("expected grub-flatten, got {other:?}"),
+        }
+        let cmd = Cli::try_parse_from(["snaptune", "grub-flatten"]).expect("parse");
+        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { dry_run: false }));
+        let cmd = Cli::try_parse_from(["snaptune", "flatten"]).expect("the short spelling");
+        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { .. }));
+    }
+
+    /// The spelling the shell's users and the fleet's runbooks already type.
+    /// Every alias named in the shell tool's own usage text must resolve. The list is
+    /// taken from `snapshot --help` on the tool being replaced, not from memory — an
+    /// alias that is missing is a script that breaks on the day the shell is retired.
+    ///
+    /// One line each on purpose: the failing assert names the alias that broke.
+    #[test]
+    fn every_alias_in_the_shell_s_usage_text_resolves() {
+        assert!(matches!(parse(&["snaptune", "ls"]), Cmd::List { .. }), "ls");
+        assert!(
+            matches!(parse(&["snaptune", "info", "snap-a"]), Cmd::Show { .. }),
+            "info"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "status"]), Cmd::Current),
+            "status"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "which"]), Cmd::Current),
+            "which"
+        );
+        assert!(matches!(parse(&["snaptune", "tree"]), Cmd::Lineage), "tree");
+        assert!(
+            matches!(parse(&["snaptune", "grublist"]), Cmd::GrubList),
+            "grublist"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "grub"]), Cmd::GrubList),
+            "grub"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "grub-entries"]), Cmd::GrubList),
+            "grub-entries"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "default", "snap-a"]), Cmd::Pin { .. }),
+            "default"
+        );
+        assert!(
+            matches!(
+                parse(&["snaptune", "set-default", "snap-a"]),
+                Cmd::Pin { .. }
+            ),
+            "set-default"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "check"]), Cmd::Verify { .. }),
+            "check"
+        );
+        assert!(
+            matches!(parse(&["snaptune", "gold"]), Cmd::Golden { .. }),
+            "gold"
+        );
+    }
+
+    /// `reboot` is deliberately **not** aliased to `boot`: in the shell both arm and
+    /// restart, while here `boot` arms and `--reboot` restarts, so the name would
+    /// promise a restart that does not happen. This is a test so that adding it back
+    /// is a decision rather than a tidy-up.
+    #[test]
+    fn the_shell_s_reboot_is_not_a_silent_alias_for_arm_only_boot() {
+        assert!(
+            Cli::try_parse_from(["snaptune", "reboot", "snap-aaaaaaaa"]).is_err(),
+            "`reboot` must not resolve to a verb that only arms"
+        );
+    }
+
+    /// The shell's `SOURCE_TREE` must still select a tree, because a tree that went
+    /// unread turns `create` from "build this tree" into "adopt the installed module".
+    #[test]
+    fn the_shell_s_source_tree_variable_is_honoured_alongside_ours() {
+        // Not testable through the process environment (that is global state, and the
+        // tests run in parallel), so this checks what `adopt_source_tree` guarantees:
+        // clap itself reads SNAPSHOT_TREE, and that is the name it is given.
+        let cmd = Cli::try_parse_from(["snaptune", "dev", "desc", "--tree", "/src/linux"])
+            .expect("parse");
+        match cmd.cmd {
+            Cmd::Dev { tree, .. } => assert_eq!(tree.as_deref(), Some(Path::new("/src/linux"))),
+            other => panic!("expected dev, got {other:?}"),
+        }
+        // And the option is the one `adopt_source_tree` sets.
+        let source =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .expect("read main.rs");
+        assert!(
+            source.contains("adopt_source_tree()"),
+            "main must call it before parsing, or SOURCE_TREE is ignored"
+        );
+    }
+
+    #[test]
+    fn the_shell_s_names_for_current_and_lineage_still_work() {
+        for name in ["current", "status", "which"] {
+            let cmd =
+                Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(matches!(cmd.cmd, Cmd::Current), "{name} must mean current");
+        }
+        for name in ["lineage", "tree"] {
+            let cmd =
+                Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(matches!(cmd.cmd, Cmd::Lineage), "{name} must mean lineage");
         }
     }
 

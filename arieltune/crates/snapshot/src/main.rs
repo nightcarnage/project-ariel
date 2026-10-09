@@ -27,6 +27,8 @@ fn main() -> anyhow::Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    snapshot::cli::adopt_source_tree();
+
     let cli = snapshot::cli::Cli::parse();
     let code = snapshot::cli::run(cli)?;
     if code != 0 {

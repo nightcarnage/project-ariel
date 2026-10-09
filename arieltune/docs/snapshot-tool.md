@@ -243,6 +243,7 @@ porting before that step is safe.
 | `preserve [label]` (`save`, `backup`) | copy the current initramfs aside as a rescue image | `/boot` | yes |
 | `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
 | `boot --entry <grub-id>` | the same, into *any* GRUB entry — the distro's kernel, LTS, rescue | grubenv | yes |
+| `grub-flatten` | a flat, unthemed menu; re-lists and counts what is left | `grub_defaults` + `grub_cfg` | yes |
 | `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
 | `hide <id>` / `unhide <id>` | off/on the list and the menu; files kept | manifest rename | yes |
 | `prune <id>` (`delete`, `rm`) | delete files, directory and entry | everything | yes |
@@ -516,7 +517,8 @@ keeps the modules on these blades.
 Three of the shell tool's behaviours are **not** reproduced, on purpose (§6.1–6.3).
 The fourth item is not a difference — it is a property both tools share, written
 down because it is the one that matters most if you are about to trust a snapshot
-you have not booted (§6.4). §6.5 is the list of shell verbs with no equivalent yet.
+you have not booted (§6.4). §6.5 maps every verb the shell tool had onto its
+equivalent here — which is the thing to read before retiring it.
 
 ### 6.1 No live-system mutation in `create`
 
@@ -535,11 +537,17 @@ the id stops describing the content, which is exactly the mismatch `verify` repo
 It then tells you to run `create`, which makes a new id anyway. This refuses to
 stage: the original is untouched and the rebuild is a new snapshot.
 
-### 6.3 No rescue-initramfs copies or `known-good-amdgpu.ko.zst` backups
+### 6.3 No `known-good-amdgpu.ko.zst` backup, and no automatic rescue copy
 
-Those exist in the shell because it mutates the live initramfs and module. This does
-not, so there is nothing to rescue. If you want them anyway — they are cheap
-insurance and the fleet's runbooks mention them — they are a small addition.
+The shell keeps both because it mutates the live initramfs and the live module, so a
+failure part-way through leaves them wrong and needs a way back. This does not mutate
+either, so it has nothing to rescue on its own behalf, and it does not make copies
+nobody asked for.
+
+`preserve` (§5.11) is the deliberate version of the rescue copy: it exists, it is just
+never automatic. The `known-good-amdgpu.ko.zst` backup has no equivalent, because the
+module a snapshot was built from is already kept as that snapshot's own
+`modules/amdgpu.ko.zst`, and `extract-modules` will hand it back.
 
 ### 6.4 Nothing sets the GRUB default
 
@@ -547,20 +555,64 @@ insurance and the fleet's runbooks mention them — they are a small addition.
 permanent default. An untested snapshot never becomes the entry the machine falls
 back to.
 
-### 6.5 Shell verbs that were not ported
+### 6.5 Every shell verb, and where it went
 
-Most of the shell's surface is here. This is what is left, listed so nobody
-discovers it by trying:
+Read from the shell tool's own `snapshot --help`, so this is its list and not a
+recollection of it. This is the table to work from before retiring `snapshot`.
 
-| shell verb | what it did | covered by |
+| shell | here | note |
 |---|---|---|
-| `grub-flatten` | switch GRUB to a flat menu layout | **nothing** |
+| `list`, `ls` | same + `ls` | |
+| `current`, `status`, `which` | same, all three | |
+| `show`, `info` | same + `info` | |
+| `lineage`, `tree` | same + `tree` | |
+| `diff` | same | reads the manifests, so it works with no source tree |
+| `boot`, `reboot <id>` | `boot <id> [--reboot]` | **differs**: see below |
+| `boot --entry <grub-id>` | same | nested entries by path, which the shell refused |
+| `grub-flatten` | same | re-reads `grub.cfg` and counts what is left |
+| `grub-list`, `grublist`, `grub-entries`, `grub` | same, all four | |
+| `pin`, `default`, `set-default` | same, all three | |
+| `unpin` | same | |
+| `verify`, `check` | same + `check` | exits 2 on failure |
+| `validate`, `markers`, `check-module` | same, all three | plus the loaded-`srcversion` comparison |
+| `create <desc>` | same | **differs**: see below |
+| `register` | same (+ `import`) | same content-addressed id |
+| `rebuild <id>` | same | **differs**: see below |
+| `golden`, `gold` | same + `gold` | |
+| `preserve`, `save`, `backup [label]` | same, all three | |
+| `extract`, `extract-modules`, `extract-module <id> [dir]` | same, all three | |
+| `prune`, `delete`, `rm <id>` | same, all three | |
+| `hide` / `unhide` | same | |
+| `test-result`, `result <id> <t> <r>` | same + `result` | plus the read-back check |
+| `help`, `usage`, `--help`, `-h` | `--help`, `-h` | |
 
-Six shell verbs were on this list and are not any more: `register` (§5.9),
-`validate` (§5.5), `boot --entry` (§5.5), `preserve`, `test-result` and
-`extract-modules` (§5.11).
+Environment, from the shell's own help and its `README.md`:
 
-None of this is a defect in what is here — it is what is left.
+| shell | here |
+|---|---|
+| `SOURCE_TREE=<path>` | still honoured, and `SNAPSHOT_TREE` is the name to prefer. An empty value is ignored, because `bootstrap.sh` sets `SOURCE_TREE=""` before filling it in |
+| `SNAPSHOT_KEEP_THEME=1` | same |
+| `PINNED_VMLINUZ=<path>` | **no equivalent** — see below |
+
+Three verbs are ported but **deliberately not identical**, and none of the three is a
+gap:
+
+- **`boot` does not reboot.** The shell's `boot` and `reboot` both arm *and* restart.
+  Here `boot <id>` arms only, and `--reboot` restarts — because arming is verified
+  against grubenv first, and a machine that goes down before that check is a machine
+  that boots whatever the default happened to be. `reboot` is therefore not offered as
+  an alias: the name would promise a restart the verb does not perform.
+- **`create` does not mutate the live system** (§6.1), so its initramfs is derived
+  rather than regenerated. Same tree, same toolchain, same config, one member changed.
+- **`rebuild` does not overwrite** (§6.2): it registers a new snapshot and leaves the
+  original alone, so the id keeps describing the content.
+
+`PINNED_VMLINUZ` is the one environment variable with no home here. It names the
+kernel image a snapshot boots; the kernel is derived from the release's `pkgbase`,
+which is what the shell's *default* did too. Only a non-default override has nowhere
+to go, and expressing it would mean a `--vmlinuz` on `create` — a change to what
+`create` guarantees about the kernel and image it pairs, not an alias. Named here so
+it is a decision rather than an oversight.
 
 ---
 
