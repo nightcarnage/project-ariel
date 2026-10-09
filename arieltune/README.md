@@ -189,6 +189,19 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    version does not match `--kernel` — so a mismatched pair fails immediately
    instead of hunk-by-hunk after the expensive steps have run.
 
+   **The build does not unlock the GPU by itself.** 40-CU routing is opt-in: the
+   install writes `bc250_cc_write_mode=0`, so the first boot is a 24-CU kernel you
+   can trust, and you arm 40 CU separately:
+
+   ```sh
+   sudo arieltune apu cu status    # is 40-CU armed / persisted / routed
+   sudo arieltune apu cu enable    # persist it; takes effect on the NEXT boot
+   ```
+
+   `--full` arms it during the install instead (`bc250_cc_write_mode=3`). Staying at
+   24 CU for the first boot keeps two experiments apart: a bad route and a bad kernel
+   otherwise fail the same way.
+
 5. **Reboot and verify**:
 
    ```sh
