@@ -51,20 +51,46 @@ pub struct Tree {
     /// `include/config/kernel.release`, which is what the built module's vermagic
     /// is checked against. `None` when the tree has not been configured.
     pub release: Option<String>,
-    /// Short git revision, when the tree is a git checkout.
+    /// Short git revision, when the tree is a checkout of its own.
     pub revision: Option<String>,
-    /// Files git reports as modified or untracked, relative to the tree root.
+    /// Files git reports as modified or untracked.
+    ///
+    /// **Only meaningful when `versioned` is set.** An extracted kernel source is
+    /// routinely *not* a checkout of its own: on the blades it sits inside the
+    /// packaging repo as an untracked subdirectory, where `git status` reports the
+    /// PKGBUILD's patch files and never a driver edit. Reading `dirty` there gives
+    /// an empty list that looks exactly like "nothing has changed".
     pub dirty: Vec<String>,
+    /// Whether `dirty` reflects this tree at all — i.e. whether the tree is the
+    /// root of its own git checkout rather than a subdirectory of someone else's.
+    pub versioned: bool,
 }
 
+/// The directory to hand to `make` when the tree cannot say what changed.
+///
+/// Every patch in the series touches amdgpu, so this is the module a dev edit
+/// almost always lands in. It is not a guess about *which files* changed — `make
+/// M=` is itself incremental and decides that from timestamps. It only means the
+/// narrowing-by-diff step is skipped when there is no diff to be had.
+pub const DEFAULT_MODULE_DIR: &str = "drivers/gpu/drm/amd/amdgpu";
+
 impl Tree {
-    /// The module directories that a build would actually have to touch.
+    /// The module directories a build would actually have to touch.
     ///
-    /// Derived from the dirty files. A path outside `drivers/` cannot be expressed
-    /// as an `M=` target, so it is reported separately rather than silently
-    /// dropped: a dev build that quietly ignores half the diff is the failure mode
-    /// worth being loud about.
+    /// With a versioned tree this is derived from the changed files. Without one
+    /// there is no diff to derive it from, so the series' own directory is handed
+    /// over and **make** decides what is stale from its own dependency tracking.
+    /// That is the honest fallback: the alternative is refusing to build a tree
+    /// that is perfectly buildable.
+    ///
+    /// A path outside `drivers/` cannot be expressed as an `M=` target, so it is
+    /// reported separately rather than silently dropped: a dev build that quietly
+    /// ignores half the diff is the failure mode worth being loud about.
     pub fn build_set(&self) -> (Vec<String>, Vec<String>) {
+        if !self.versioned {
+            return (vec![DEFAULT_MODULE_DIR.to_string()], Vec::new());
+        }
+
         let mut modules: Vec<String> = Vec::new();
         let mut elsewhere: Vec<String> = Vec::new();
         for path in &self.dirty {
@@ -133,13 +159,39 @@ pub fn inspect_tree(path: &Path) -> Result<Tree> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // Is this tree the root of its own checkout, or a subdirectory of someone
+    // else's? Getting this wrong is silent: a nested tree reports the *parent*
+    // repo's changes, which for a driver edit means an empty list.
+    let toplevel = git(path, &["rev-parse", "--show-toplevel"]);
+    let versioned = match &toplevel {
+        Some(root) => {
+            let root = Path::new(root);
+            let (a, b) = (
+                std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+            );
+            a == b
+        }
+        None => false,
+    };
+
     Ok(Tree {
         path: path.to_path_buf(),
         release,
-        revision: git(path, &["rev-parse", "--short", "HEAD"]),
-        dirty: git(path, &["status", "--porcelain"])
-            .map(|out| parse_porcelain(&out))
-            .unwrap_or_default(),
+        revision: versioned
+            .then(|| git(path, &["rev-parse", "--short", "HEAD"]))
+            .flatten(),
+        // `--relative` so paths come back relative to the tree rather than to the
+        // repository root; without it a nested checkout reports names the tree
+        // cannot resolve.
+        dirty: if versioned {
+            git(path, &["status", "--porcelain", "--relative"])
+                .map(|out| parse_porcelain(&out))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        versioned,
     })
 }
 
@@ -363,7 +415,10 @@ pub fn plan(tree: Tree, running: Option<String>) -> DevPlan {
                 .to_string(),
         );
     }
-    if tree.dirty.is_empty() {
+    // "Nothing changed" is only a refusal when the tree can actually tell us that.
+    // An unversioned tree has no diff to read, and refusing it would reject the
+    // normal case of a source tree extracted for a build.
+    if tree.versioned && tree.dirty.is_empty() {
         blockers.push(
             "the tree is clean — there is nothing to rebuild. Edit a patch, or pass \
              the tree a revision is checked out for"
@@ -385,6 +440,27 @@ impl DevPlan {
         self.blockers.is_empty()
     }
 
+    /// The revision line, which has to tell "no changes" apart from "cannot tell".
+    ///
+    /// An unversioned tree reporting "clean" would be a lie with consequences: it
+    /// looks like a reason to stop, when in fact the tree simply has no diff to
+    /// read and is perfectly buildable.
+    fn revision_line(&self) -> String {
+        if !self.tree.versioned {
+            return "no VCS of its own (not a checkout — cannot diff)".to_string();
+        }
+        match self.tree.dirty.len() {
+            0 => format!(
+                "{} (clean)",
+                self.tree.revision.as_deref().unwrap_or("unversioned")
+            ),
+            n => format!(
+                "{} ({n} changed)",
+                self.tree.revision.as_deref().unwrap_or("unversioned")
+            ),
+        }
+    }
+
     /// Human-readable lines. Nothing here writes.
     pub fn describe(&self) -> Vec<String> {
         let mut out = vec![
@@ -397,15 +473,7 @@ impl DevPlan {
                 "running     {}",
                 self.running.as_deref().unwrap_or("unknown")
             ),
-            format!(
-                "revision    {}{}",
-                self.tree.revision.as_deref().unwrap_or("not a git tree"),
-                if self.tree.dirty.is_empty() {
-                    " (clean)".to_string()
-                } else {
-                    format!(" ({} changed)", self.tree.dirty.len())
-                }
-            ),
+            format!("revision    {}", self.revision_line()),
         ];
 
         if !self.tree.dirty.is_empty() {
@@ -422,6 +490,15 @@ impl DevPlan {
         } else {
             for module in &self.modules {
                 out.push(format!("build       make M={module} modules"));
+            }
+            if !self.tree.versioned {
+                // Say why the narrowing step was skipped, or the directory looks
+                // arbitrary.
+                out.push(
+                    "            (no VCS in this tree, so make decides what is \
+                     stale from timestamps)"
+                        .to_string(),
+                );
             }
         }
 
@@ -466,6 +543,19 @@ mod tests {
             release: Some("7.0.9-1-cachyos-bore".to_string()),
             revision: Some("a3f19c2".to_string()),
             dirty: dirty.iter().map(|s| s.to_string()).collect(),
+            versioned: true,
+        }
+    }
+
+    /// The shape that actually occurs on the blades: an extracted source tree
+    /// that is not a checkout of its own.
+    fn unversioned_tree() -> Tree {
+        Tree {
+            path: PathBuf::from("/tree"),
+            release: Some("7.0.9-1-cachyos-bore".to_string()),
+            revision: None,
+            dirty: Vec::new(),
+            versioned: false,
         }
     }
 
@@ -606,6 +696,7 @@ mod tests {
             release: Some("7.0.9-1-cachyos-bore".to_string()),
             revision: Some("a3f19c2".to_string()),
             dirty: dirty.iter().map(|s| s.to_string()).collect(),
+            versioned: true,
         }
     }
 
@@ -726,6 +817,50 @@ mod tests {
     }
 
     // ---- which kernel the build is for -------------------------------------
+
+    /// The case that broke on the real tree: no VCS, so no diff to read. It must
+    /// fall back to letting `make` decide rather than claiming nothing changed.
+    #[test]
+    fn an_unversioned_tree_still_builds_the_series_directory() {
+        let t = unversioned_tree();
+        let (modules, elsewhere) = t.build_set();
+        assert_eq!(modules, vec![DEFAULT_MODULE_DIR]);
+        assert!(elsewhere.is_empty());
+
+        let p = plan(t, Some("7.0.9-1-cachyos-bore".to_string()));
+        assert!(
+            p.can_build(),
+            "an unversioned tree must not be refused: {:?}",
+            p.blockers
+        );
+
+        let text = p.describe().join("\n");
+        assert!(
+            text.contains("no VCS of its own"),
+            "it must say why it cannot diff: {text}"
+        );
+        assert!(
+            !text.contains("(clean)"),
+            "reporting 'clean' would look like a reason to stop: {text}"
+        );
+        assert!(
+            text.contains("make decides what is stale"),
+            "and why it is building that directory: {text}"
+        );
+    }
+
+    /// A versioned tree really *can* tell us nothing changed, and that stays a
+    /// refusal — the fallback must not swallow the genuine case.
+    #[test]
+    fn a_clean_versioned_tree_is_still_refused() {
+        let p = plan(tree(&[]), Some("7.0.9-1-cachyos-bore".to_string()));
+        assert!(!p.can_build());
+        assert!(
+            p.blockers.iter().any(|b| b.contains("clean")),
+            "{:?}",
+            p.blockers
+        );
+    }
 
     #[test]
     fn the_kver_is_read_out_of_the_member_path() {
