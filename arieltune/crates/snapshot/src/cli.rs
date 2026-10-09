@@ -573,6 +573,22 @@ fn cmd_dev(
         );
     }
 
+    // Text mode reports the build before the registration plan, so the two outputs
+    // read in the order they actually happened.
+    if !json {
+        println!("replaced    {member}");
+        println!(
+            "image       {} -> {} bytes (delta {})",
+            derived.parent_bytes,
+            derived.image_bytes,
+            derived.delta()
+        );
+        println!("wrote       {}", dest.display());
+        println!();
+        println!("Verified: that member in the new image is byte-identical to the module built.");
+        println!("The live module tree was not written and the base kernel is untouched.");
+    }
+
     // Registration happens after verification, never before: promoting an image
     // that failed the oracle check into a boot menu entry is exactly the silent
     // wrong-image boot the whole check exists to prevent.
@@ -606,25 +622,16 @@ fn cmd_dev(
                 "image_bytes": derived.image_bytes,
                 "delta": derived.delta(),
                 "verified": true,
-                "registered": registered_id,
+                // Absent rather than null when registration was not asked for.
+                "registered": if targets.dry_run { None } else { registered_id.clone() },
+                "dry_run": targets.dry_run,
             }))?
         );
-    } else {
-        println!("replaced    {member}");
-        println!(
-            "image       {} -> {} bytes (delta {})",
-            derived.parent_bytes,
-            derived.image_bytes,
-            derived.delta()
-        );
-        println!("wrote       {}", dest.display());
-        println!();
-        println!("Verified: that member in the new image is byte-identical to the module built.");
-        println!("The live module tree was not written and the base kernel is untouched.");
-    }
-
-    if let Some(id) = &registered_id {
-        if !json {
+    } else if let Some(id) = &registered_id {
+        if targets.dry_run {
+            println!();
+            println!("That is the registration plan. Run it again without --dry-run to apply it.");
+        } else {
             println!();
             println!("Registered: {id}");
             println!("The SNAP tab lists it, and it is on the GRUB menu.");
@@ -684,12 +691,14 @@ fn register_dev(
         description: description.to_string(),
         module: prepared.compressed.clone(),
         initramfs: image.to_path_buf(),
-        vmlinuz,
+        vmlinuz_source: vmlinuz,
         kernel_version,
         cmdline,
         root_uuid: register::root_uuid()?,
         parent: targets.parent.clone().or_else(|| store.booted_id()),
         tree: Some(tree.to_path_buf()),
+        store_root: store.paths.root.clone(),
+        boot: store.paths.boot.clone(),
         acpi_override: store.paths.boot.join("acpi_override.cpio").is_file(),
     };
 

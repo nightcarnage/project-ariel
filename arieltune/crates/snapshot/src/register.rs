@@ -45,10 +45,15 @@ pub struct Request {
     pub description: String,
     /// The built, compressed module on disk.
     pub module: PathBuf,
-    /// The derived initramfs on disk.
+    /// The derived initramfs on disk, to be copied into `/boot`.
     pub initramfs: PathBuf,
-    /// The kernel image to pair with that initramfs.
-    pub vmlinuz: PathBuf,
+    /// The kernel paired with that initramfs, to be copied in as the snapshot's own.
+    ///
+    /// Named `_source` because it is where the kernel is *read from* — the
+    /// snapshot's kernel is `/boot/vmlinuz-<id>`, and conflating the two is how a
+    /// manifest ends up naming the parent's kernel and a menu entry boots the
+    /// wrong one.
+    pub vmlinuz_source: PathBuf,
     /// Kernel release the module was built for.
     pub kernel_version: String,
     /// The kernel command line, with `BOOT_IMAGE=` already pointing at the
@@ -61,8 +66,38 @@ pub struct Request {
     pub parent: Option<String>,
     /// The source tree it was built from, for provenance.
     pub tree: Option<PathBuf>,
+    /// The snapshot store root, where this snapshot's directory goes.
+    pub store_root: PathBuf,
+    /// The `/boot` directory the artefacts go into.
+    pub boot: PathBuf,
     /// Whether `/boot/acpi_override.cpio` exists and must be chained into the entry.
     pub acpi_override: bool,
+}
+
+impl Request {
+    /// Where this snapshot's own kernel goes.
+    pub fn snapshot_vmlinuz(&self) -> PathBuf {
+        self.boot.join(format!("vmlinuz-{}", self.id))
+    }
+
+    /// Where this snapshot's own initramfs goes.
+    pub fn snapshot_initramfs(&self) -> PathBuf {
+        self.boot.join(format!("initramfs-{}.img", self.id))
+    }
+
+    /// Where this snapshot's command-line file goes.
+    pub fn snapshot_cmdline_file(&self) -> PathBuf {
+        self.boot.join(format!("{}.cmdline", self.id))
+    }
+
+    /// Where the built module is kept inside the snapshot directory.
+    pub fn module_dest(&self) -> Result<PathBuf> {
+        let name = self
+            .module
+            .file_name()
+            .context("the module path has no file name")?;
+        Ok(self.store_root.join(&self.id).join("modules").join(name))
+    }
 }
 
 /// The manifest for a dev snapshot.
@@ -73,6 +108,7 @@ pub struct Request {
 /// patch block is invented here.
 pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     let mut out = String::new();
+    out.push_str(&format!("# Snapshot Manifest — {}\n", req.id));
     out.push_str("snapshot:\n");
     out.push_str(&format!("  id: \"{}\"\n", req.id));
     out.push_str(&format!("  timestamp: \"{timestamp}\"\n"));
@@ -85,8 +121,51 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     out.push_str("\nkernel:\n");
     out.push_str(&format!("  version: \"{}\"\n", req.kernel_version));
     out.push_str(&format!(
+        "  vmlinuz_source: \"{}\"\n",
+        req.vmlinuz_source.display()
+    ));
+    out.push_str(&format!(
         "  vmlinuz_snapshot: \"{}\"\n",
-        req.vmlinuz.display()
+        req.snapshot_vmlinuz().display()
+    ));
+    // The name the initramfs is registered under, which is also what the entry's
+    // `initrd` line points at.
+    out.push_str("\ninitramfs:\n");
+    out.push_str(&format!(
+        "  snapshot: \"{}\"\n",
+        req.snapshot_initramfs().display()
+    ));
+    // Unquoted, like the shell tool writes it: this is a filesystem path, not YAML
+    // data anyone reads back as a string.
+    out.push_str("\nmodule:\n");
+    if let Ok(dest) = req.module_dest() {
+        out.push_str(&format!("  path: {}\n", dest.display()));
+    }
+    // Top-level, because that is where the entry builder reads it from. Emitting it
+    // anywhere else produces a manifest that parses, looks complete, and makes the
+    // menu entry unbuildable.
+    out.push_str(&format!("\ncmdline: \"{}\"\n", req.cmdline));
+    out.push_str("\ngrub:\n");
+    out.push_str(&format!("  entry_id: \"{}\"\n", req.id));
+    out.push_str(&format!(
+        "  entry_title: \"[{}] {}\"\n",
+        req.id, req.description
+    ));
+    out.push_str(&format!("  root_uuid: \"{}\"\n", req.root_uuid));
+    // The three files the store checks for to decide whether a snapshot is
+    // bootable at all.
+    out.push_str("\nboot_files:\n");
+    out.push_str(&format!(
+        "  vmlinuz: \"{}\"\n",
+        req.snapshot_vmlinuz().display()
+    ));
+    out.push_str(&format!(
+        "  initramfs: \"{}\"\n",
+        req.snapshot_initramfs().display()
+    ));
+    out.push_str(&format!(
+        "  cmdline_file: \"{}\"\n",
+        req.snapshot_cmdline_file().display()
     ));
     out.push_str("\nsource_tree:\n");
     match &req.tree {
@@ -102,14 +181,6 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
             out.push_str("  mode: \"running-module\"\n");
         }
     }
-    // The entry builder reads `grub.root_uuid` to write the `search` line, and
-    // refuses rather than guessing when it is absent — so it is written here.
-    out.push_str("\ngrub:\n");
-    out.push_str(&format!("  root_uuid: \"{}\"\n", req.root_uuid));
-    out.push_str(&format!(
-        "  entry_title: \"[{}] {}\"\n",
-        req.id, req.description
-    ));
     out.push_str("\nbuild:\n");
     out.push_str("  initramfs: \"derived from parent, one member replaced\"\n");
     out.push_str("  patches: \"unknown until this snapshot boots\"\n");
@@ -187,7 +258,7 @@ pub fn vmlinuz_for(initramfs: &Path) -> Result<PathBuf> {
 /// and writing only the new entry would delete every other snapshot's menu entry.
 pub fn plan(paths: &Paths, req: &Request, timestamp: &str, existing_custom: &str) -> Result<Plan> {
     // Refuse before anything is written.
-    if paths.root.join(&req.id).exists() {
+    if req.store_root.join(&req.id).exists() {
         bail!(
             "{} is already registered.\n\
              Ids are content-addressed over the module, the image and the kernel, so an id \
@@ -199,21 +270,20 @@ pub fn plan(paths: &Paths, req: &Request, timestamp: &str, existing_custom: &str
     for (what, path) in [
         ("module", &req.module),
         ("initramfs", &req.initramfs),
-        ("kernel", &req.vmlinuz),
+        ("kernel", &req.vmlinuz_source),
     ] {
         if !path.is_file() {
             bail!("the {what} to register does not exist: {}", path.display());
         }
     }
 
-    let snap_dir = paths.root.join(&req.id);
-    let module_name = req
-        .module
-        .file_name()
-        .context("the module path has no file name")?;
-    let vmlinuz = paths.boot.join(format!("vmlinuz-{}", req.id));
-    let initramfs = paths.boot.join(format!("initramfs-{}.img", req.id));
-    let cmdline = paths.boot.join(format!("{}.cmdline", req.id));
+    // The destinations come from the same methods the manifest uses, so the files
+    // written and the files the manifest claims to have written cannot disagree.
+    let snap_dir = req.store_root.join(&req.id);
+    let vmlinuz = req.snapshot_vmlinuz();
+    let initramfs = req.snapshot_initramfs();
+    let cmdline = req.snapshot_cmdline_file();
+    let module_dest = req.module_dest()?;
 
     let mut actions = vec![
         Action::Mkdir {
@@ -227,13 +297,13 @@ pub fn plan(paths: &Paths, req: &Request, timestamp: &str, existing_custom: &str
         },
         Action::Copy {
             from: req.module.clone(),
-            to: snap_dir.join("modules").join(module_name),
+            to: module_dest,
             what: "the built module".to_string(),
         },
         // The kernel is copied rather than referenced, so the snapshot keeps
         // booting even if the parent's is replaced.
         Action::Copy {
-            from: req.vmlinuz.clone(),
+            from: req.vmlinuz_source.clone(),
             to: vmlinuz,
             what: "the kernel".to_string(),
         },
@@ -441,18 +511,21 @@ mod tests {
             description: "printf marker".to_string(),
             module: PathBuf::from("/work/module.ko.zst"),
             initramfs: PathBuf::from("/work/dev.img"),
-            vmlinuz: PathBuf::from("/boot/vmlinuz-linux-cachyos-bore"),
+            vmlinuz_source: PathBuf::from("/boot/vmlinuz-linux-cachyos-bore"),
             kernel_version: "7.2.9-1-cachyos-bore".to_string(),
             cmdline: "BOOT_IMAGE=/boot/vmlinuz-snap-3f9a1c2b root=UUID=abc rw".to_string(),
             root_uuid: "757f018a-71b0-44fc-aac8-c5b2ed165923".to_string(),
             parent: Some("linux-cachyos-bore".to_string()),
             tree: Some(PathBuf::from("/home/nightcarnage/tree")),
+            store_root: PathBuf::from("/var/lib/kernel-snapshots"),
+            boot: PathBuf::from("/boot"),
             acpi_override: false,
         }
     }
 
-    /// The manifest has to carry the root UUID, or the entry builder refuses —
-    /// correctly, since an entry without a working `search` line cannot boot.
+    /// The manifest has to carry everything the entry builder reads, or the plan
+    /// fails *after* the image has been built — which is exactly what happened the
+    /// first time this ran on a blade.
     #[test]
     fn the_manifest_carries_what_the_entry_needs() {
         let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
@@ -471,6 +544,134 @@ mod tests {
             parsed.root_uuid().as_deref(),
             Some("757f018a-71b0-44fc-aac8-c5b2ed165923")
         );
+
+        // The three fields `entry_from_manifest` insists on, each of which is a
+        // hard error naming the field if it is absent.
+        assert_eq!(
+            parsed.vmlinuz().as_deref(),
+            Some("/boot/vmlinuz-snap-3f9a1c2b")
+        );
+        assert_eq!(
+            parsed.initramfs().as_deref(),
+            Some("/boot/initramfs-snap-3f9a1c2b.img")
+        );
+        assert_eq!(
+            parsed.cmdline().as_deref(),
+            Some("BOOT_IMAGE=/boot/vmlinuz-snap-3f9a1c2b root=UUID=abc rw")
+        );
+
+        // And it must actually produce an entry.
+        let entry = crate::grub::entry_from_manifest(&parsed, "snap-3f9a1c2b", None)
+            .expect("the manifest must build a menu entry");
+        assert!(entry.contains("--id 'snap-3f9a1c2b'"), "{entry}");
+        assert!(
+            entry.contains("linux /boot/vmlinuz-snap-3f9a1c2b"),
+            "{entry}"
+        );
+        assert!(
+            entry.contains("initrd /boot/initramfs-snap-3f9a1c2b.img"),
+            "{entry}"
+        );
+        assert!(
+            entry.contains("search --no-floppy --fs-uuid --set=root 757f018a"),
+            "{entry}"
+        );
+    }
+
+    /// The snapshot's own kernel, not the parent's. Naming the parent's kernel in
+    /// the manifest produces a menu entry pointing at a kernel the snapshot was
+    /// not built for.
+    #[test]
+    fn the_manifest_names_the_snapshots_own_kernel() {
+        let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("vmlinuz_snapshot: \"/boot/vmlinuz-snap-3f9a1c2b\""),
+            "{text}"
+        );
+        // The parent's kernel is recorded as the *source*, under a name that says so.
+        assert!(
+            text.contains("vmlinuz_source: \"/boot/vmlinuz-linux-cachyos-bore\""),
+            "{text}"
+        );
+    }
+
+    /// The plan writes to the same paths the manifest advertises. If they can
+    /// disagree, they eventually will.
+    #[test]
+    fn the_plan_and_the_manifest_agree_on_where_things_go() {
+        let req = request();
+        assert_eq!(
+            req.snapshot_vmlinuz(),
+            PathBuf::from("/boot/vmlinuz-snap-3f9a1c2b")
+        );
+        assert_eq!(
+            req.snapshot_initramfs(),
+            PathBuf::from("/boot/initramfs-snap-3f9a1c2b.img")
+        );
+        assert_eq!(
+            req.snapshot_cmdline_file(),
+            PathBuf::from("/boot/snap-3f9a1c2b.cmdline")
+        );
+        assert_eq!(
+            req.module_dest().unwrap(),
+            PathBuf::from("/var/lib/kernel-snapshots/snap-3f9a1c2b/modules/module.ko.zst")
+        );
+
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        for path in [
+            req.snapshot_vmlinuz(),
+            req.snapshot_initramfs(),
+            req.snapshot_cmdline_file(),
+            req.module_dest().unwrap(),
+        ] {
+            assert!(
+                text.contains(&path.display().to_string()),
+                "the manifest must name {}: {text}",
+                path.display()
+            );
+        }
+    }
+
+    /// A missing artefact is caught while planning, not after the image has been
+    /// built and the tree has spent its time.
+    #[test]
+    fn planning_refuses_a_missing_artefact() {
+        let dir = std::env::temp_dir().join(format!("snapreg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths::under("/fixture");
+        let mut req = request();
+        req.store_root = dir.join("store");
+        req.boot = dir.join("boot");
+        req.module = dir.join("does-not-exist.ko.zst");
+
+        let err = plan(&paths, &req, "2026-10-09T00:00:00Z", "").unwrap_err();
+        assert!(format!("{err}").contains("does not exist"), "{err}");
+    }
+
+    /// Registering an id that already exists is refused rather than overwriting:
+    /// ids are content-addressed, so the content is already there.
+    #[test]
+    fn planning_refuses_an_id_that_already_exists() {
+        let dir = std::env::temp_dir().join(format!("snapreg-existing-{}", std::process::id()));
+        let store = dir.join("store");
+        let boot = dir.join("boot");
+        let work = dir.join("work");
+        std::fs::create_dir_all(store.join("snap-3f9a1c2b")).unwrap();
+        std::fs::create_dir_all(&boot).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut req = request();
+        req.store_root = store;
+        req.boot = boot;
+        req.module = work.join("module.ko.zst");
+        req.initramfs = work.join("dev.img");
+        req.vmlinuz_source = work.join("vmlinuz");
+        for p in [&req.module, &req.initramfs, &req.vmlinuz_source] {
+            std::fs::write(p, b"x").unwrap();
+        }
+
+        let err = plan(&Paths::under("/fixture"), &req, "2026-10-09T00:00:00Z", "").unwrap_err();
+        assert!(format!("{err}").contains("already registered"), "{err}");
     }
 
     /// Recording the patch state would be inventing it — nobody knows until it
