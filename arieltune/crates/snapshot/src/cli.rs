@@ -251,6 +251,37 @@ pub enum Cmd {
         json: bool,
     },
 
+    /// Rebuild an existing snapshot's module from its source tree, as a NEW
+    /// snapshot. Read the original's id as its promise: it is untouched.
+    ///
+    /// The shell tool's `rebuild` writes the rebuilt module into the snapshot it
+    /// names and keeps the id — so the id stops describing the content, which is
+    /// exactly the mismatch `verify` reports. It then tells you to run `create`,
+    /// which makes a new id anyway, so the in-place write was only staging.
+    ///
+    /// This refuses to stage. It builds the module for that snapshot's kernel,
+    /// derives the image from that snapshot's own, and registers the result — so
+    /// the original keeps meaning what its name says, and the rebuild is a
+    /// first-class snapshot you can boot and verify.
+    ///
+    /// Refuses when the tree already produces the module the snapshot holds: there
+    /// is nothing to rebuild, and saying so is more use than a second snapshot with
+    /// identical content — which the content-addressed id would refuse as a
+    /// duplicate in any case.
+    Rebuild {
+        /// Snapshot to rebuild for, e.g. snap-0848359a.
+        id: String,
+        /// Source tree to build in. Default: the one the snapshot recorded.
+        #[arg(long, value_name = "DIR", env = "SNAPSHOT_TREE")]
+        tree: Option<PathBuf>,
+        /// Description for the new snapshot. Default: names the one it came from.
+        #[arg(long, value_name = "TEXT")]
+        description: Option<String>,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
@@ -421,6 +452,18 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         } => cmd_boot(&store.paths, &id, dry_run, reboot),
         Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
         Cmd::Verify { id, json } => cmd_verify(&store, id.as_deref(), json),
+        Cmd::Rebuild {
+            id,
+            tree,
+            description,
+            dry_run,
+        } => cmd_rebuild(
+            &store,
+            &id,
+            tree.as_deref(),
+            description.as_deref(),
+            dry_run,
+        ),
     }
 }
 
@@ -1104,6 +1147,201 @@ fn cmd_verify(store: &Store, id: Option<&str>, json: bool) -> Result<i32> {
     Ok(if broken > 0 { 2 } else { 0 })
 }
 
+/// Rebuild one snapshot's module, as a new snapshot.
+///
+/// The parent is the snapshot being rebuilt rather than whatever is booted: the
+/// question this answers is "what does my tree produce for *that* kernel", and
+/// answering it against the running kernel would silently build for the wrong
+/// one whenever you are standing on a different snapshot — which, on a blade you
+/// are bisecting patches on, is most of the time.
+fn cmd_rebuild(
+    store: &Store,
+    id: &str,
+    tree: Option<&Path>,
+    description: Option<&str>,
+    dry_run: bool,
+) -> Result<i32> {
+    let Some(snapshot) = store.get(id)? else {
+        eprintln!("snapshot {id} not found in {}", store.paths.root.display());
+        return Ok(1);
+    };
+    let Some(manifest) = &snapshot.manifest else {
+        // Without a manifest there is no recorded tree, no kernel and no module
+        // digest — nothing to rebuild *for*. Guessing any of the three would be a
+        // build for an unknown target.
+        anyhow::bail!(
+            "{id} has no manifest, so nothing says which kernel to rebuild for or \
+             from which tree.\n\
+             `snaptune verify {id}` says what is wrong with it."
+        );
+    };
+
+    let release = manifest.kernel_version().context(format!(
+        "{id}'s manifest records no kernel version, so there is no release to \
+         rebuild for."
+    ))?;
+
+    // The tree: `--tree` wins, because a recorded path can go stale and the user
+    // may have moved the checkout.
+    let recorded = manifest.source_tree_path().filter(|p| !p.is_empty());
+    let Some(tree_path) = tree
+        .map(Path::to_path_buf)
+        .or_else(|| recorded.map(PathBuf::from))
+    else {
+        anyhow::bail!(
+            "{id} does not record a source tree, so there is nothing to rebuild \
+             from.\n\
+             Pass --tree <dir>. (Its manifest says source_tree.mode = {}, which is \
+             what a snapshot taken of the running module looks like.)",
+            manifest.source_tree_mode().as_deref().unwrap_or("nothing")
+        );
+    };
+    if !tree_path.is_dir() {
+        anyhow::bail!(
+            "the tree to rebuild in is not there: {}\n\
+             Pass --tree <dir> if it moved. Nothing was built.",
+            tree_path.display()
+        );
+    }
+
+    // Derive from *this* snapshot's own image. Its kernel and its initramfs are
+    // what make it bootable; deriving from anything else would pair the rebuilt
+    // module with a kernel it was not built for.
+    let parent_image = manifest
+        .initramfs()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .with_context(|| {
+            format!(
+                "{id}'s own initramfs is not where its manifest says it is, so the \
+                 rebuild would have nothing to derive from.\n\
+                 `snaptune verify {id}` shows which file is missing."
+            )
+        })?;
+
+    let plan = dev::plan(dev::inspect_tree(&tree_path)?, Some(release.clone()));
+
+    println!("rebuild plan — {id} (kernel {release})");
+    println!("  tree        {}", plan.tree.path.display());
+    println!("  derives from {}", parent_image.display());
+    for line in plan.describe() {
+        println!("{line}");
+    }
+
+    if !plan.can_build() {
+        println!("\nNothing was built and nothing was written.");
+        return Ok(2);
+    }
+
+    if dry_run {
+        println!("\n--dry-run: nothing was built and nothing was written.");
+        return Ok(0);
+    }
+
+    // Same privilege rule as the dev loop: `--register` needs root for the writes
+    // under /boot and the store, but the build must not be root's, or `make`
+    // leaves root-owned objects in the developer's tree.
+    let work = std::env::temp_dir().join(format!("snaprebuild-{}", std::process::id()));
+    let build_runner = match dev::build_as(&plan.tree.path) {
+        Some((uid, gid)) => {
+            std::fs::create_dir_all(&work)
+                .with_context(|| format!("creating scratch space {}", work.display()))?;
+            dev::hand_over(&work, uid, gid)?;
+            write::System::as_user(uid, gid)
+        }
+        None => write::System::default(),
+    };
+
+    let prepared = dev::build(&plan.tree, &build_runner, &work)?;
+    println!(
+        "built       {} ({} bytes, stripped)",
+        prepared.source.display(),
+        prepared.raw_bytes
+    );
+
+    // Compared *before* deriving, and before anything is written: an unchanged
+    // tree means there is nothing to rebuild, and the answer to "did my edit land"
+    // is more useful as a sentence than as a second snapshot with the same
+    // contents (which the content-addressed id would refuse as a duplicate).
+    if let Some(recorded_md5) = manifest.module_md5() {
+        if recorded_md5 == prepared.md5 {
+            println!();
+            println!(
+                "Nothing to rebuild: this tree already produces the module {id} holds \
+                 (md5 {recorded_md5})."
+            );
+            println!("{id} is unchanged, and no new snapshot was registered.");
+            return Ok(0);
+        }
+        println!("module      {recorded_md5} -> {}", prepared.md5);
+    } else {
+        println!(
+            "module      {} (nothing recorded to compare against)",
+            prepared.md5
+        );
+    }
+
+    let dest = work.join("rebuild.img");
+    // The report is not printed: the member and byte counts are already in it, and
+    // the check that matters is the oracle below, not our own arithmetic.
+    let (member, _derived) = dev::assemble(&parent_image, &prepared, &dest, &work)?;
+    let got = image::verify_member(&dest, &member).with_context(|| {
+        format!("verifying {member} in the image derived for the rebuild of {id}")
+    })?;
+    if got != prepared.bytes {
+        anyhow::bail!(
+            "the derived image does not carry the module we built \
+             ({} bytes in the image, {} bytes built) — refusing to register it",
+            got.len(),
+            prepared.bytes.len()
+        );
+    }
+    println!("replaced    {member}");
+    println!("wrote       {}", dest.display());
+
+    let description =
+        description
+            .map(str::to_string)
+            .unwrap_or_else(|| match manifest.description() {
+                Some(what) if !what.is_empty() => format!("rebuild of {id}: {what}"),
+                _ => format!("rebuild of {id}"),
+            });
+
+    let targets = DevTargets {
+        run: true,
+        // The snapshot being rebuilt is the parent: that is the lineage, and
+        // recording the booted one instead would invent a relationship.
+        parent: Some(id.to_string()),
+        from: Some(parent_image.clone()),
+        for_release: Some(release.clone()),
+        out: None,
+        register: true,
+        dry_run: false,
+    };
+
+    let new_id = register_build(
+        store,
+        &description,
+        &prepared,
+        &dest,
+        &parent_image,
+        Some(&release),
+        &targets,
+        &Provenance {
+            kind: manifest::KIND_REBUILT,
+            status: "active",
+            tree: Some(&plan.tree),
+            rebuilt_modules: &plan.modules,
+        },
+    )?;
+
+    println!();
+    println!("Registered: {new_id}");
+    println!("{id} was not modified; its module and image are as they were.");
+    println!("`snaptune boot {new_id}` tests it once. `snaptune verify {new_id}` checks it.");
+    Ok(0)
+}
+
 /// One field that differs between two snapshots.
 #[derive(Debug, Serialize)]
 struct FieldDiff {
@@ -1730,5 +1968,196 @@ mod tests {
             "the broken side contributes nothing"
         );
         assert!(diff.only_b.is_empty(), "{:?}", diff.only_b);
+    }
+
+    // ---- rebuild ---------------------------------------------------------
+
+    /// A store holding one snapshot, in a root of its own. The root is not named
+    /// `snap-*`: the snapshots live inside it, and `discover` looks for `snap-*`
+    /// entries *under* the root it is given.
+    fn store_with(tag: &str, id: &str, manifest: &str, boot_file: bool) -> Store {
+        let dir = std::env::temp_dir().join(format!("snapcli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(id).join("modules")).unwrap();
+        std::fs::create_dir_all(dir.join("boot")).unwrap();
+        std::fs::write(dir.join(id).join("manifest.yaml"), manifest).unwrap();
+        if boot_file {
+            std::fs::write(
+                dir.join("boot").join(format!("initramfs-{id}.img")),
+                b"image",
+            )
+            .unwrap();
+        }
+        Store::new(Paths::under(&dir))
+    }
+
+    /// No `source_tree.path`: the shape of a snapshot taken of the running module.
+    fn manifest_no_tree(id: &str) -> String {
+        format!(
+            "snapshot:\n  id: \"{id}\"\n  description: \"fixture\"\n  status: \"active\"\n\
+             kernel:\n  version: \"7.2.9-1-cachyos-bore\"\n\
+             module:\n  md5: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\
+             source_tree:\n  mode: \"running-module\"\n"
+        )
+    }
+
+    fn manifest_with_tree(id: &str, tree: &Path, initramfs: &Path) -> String {
+        format!(
+            "snapshot:\n  id: \"{id}\"\n  description: \"fixture\"\n  status: \"active\"\n\
+             kernel:\n  version: \"7.2.9-1-cachyos-bore\"\n\
+             module:\n  md5: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\
+             source_tree:\n  path: \"{}\"\n  mode: \"built-from-source\"\n\
+             boot_files:\n  initramfs: \"{}\"\n",
+            tree.display(),
+            initramfs.display()
+        )
+    }
+
+    /// An unknown id is reported as such, and is not silently treated as an empty
+    /// store — which would go on to build for a kernel nobody named.
+    #[test]
+    fn rebuild_reports_an_unknown_snapshot() {
+        let store = store_with(
+            "unknown",
+            "snap-aaaaaaaa",
+            &manifest_no_tree("snap-aaaaaaaa"),
+            false,
+        );
+        let rc = cmd_rebuild(&store, "snap-bbbbbbbb", None, None, false).unwrap();
+        assert_eq!(rc, 1);
+    }
+
+    /// A snapshot taken of the running module records no tree, so there is nothing
+    /// to rebuild from. Guessing one would build a module for a kernel the caller
+    /// never asked about, and the error has to say how to supply it.
+    #[test]
+    fn rebuild_refuses_a_snapshot_that_records_no_tree() {
+        let store = store_with(
+            "notree",
+            "snap-aaaaaaaa",
+            &manifest_no_tree("snap-aaaaaaaa"),
+            false,
+        );
+        let err = cmd_rebuild(&store, "snap-aaaaaaaa", None, None, false).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("does not record a source tree"), "{text}");
+        assert!(text.contains("--tree"), "it must say how to fix it: {text}");
+    }
+
+    /// `--tree` is honoured even when the manifest records one, because a checkout
+    /// that has moved is the normal reason to be passing it.
+    #[test]
+    fn rebuild_refuses_a_tree_that_is_not_there() {
+        let store = store_with(
+            "gone",
+            "snap-aaaaaaaa",
+            &manifest_no_tree("snap-aaaaaaaa"),
+            false,
+        );
+        let missing = std::env::temp_dir().join("snapcli-no-such-tree");
+        let _ = std::fs::remove_dir_all(&missing);
+        let err = cmd_rebuild(&store, "snap-aaaaaaaa", Some(&missing), None, false).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("not there"), "{text}");
+        assert!(text.contains("Nothing was built"), "{text}");
+    }
+
+    /// A tree that cannot produce a module stops the verb *before* anything is
+    /// written: the store must be exactly as it was, or a refusal is not a refusal.
+    #[test]
+    fn rebuild_stops_before_writing_when_the_tree_cannot_build() {
+        let tree = std::env::temp_dir().join(format!("snapcli-baretree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::create_dir_all(&tree).unwrap();
+
+        let id = "snap-aaaaaaaa";
+        // The store root is made first so the initramfs path the manifest records
+        // is a real file: a rebuild derives from *this* snapshot's own image, and
+        // naming one that is not there is a different refusal.
+        let boot = std::env::temp_dir().join(format!("snapcli-bareboot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&boot);
+        std::fs::create_dir_all(&boot).unwrap();
+        let initramfs = boot.join(format!("initramfs-{id}.img"));
+        std::fs::write(&initramfs, b"image").unwrap();
+
+        let store = store_with(
+            "bare",
+            id,
+            &manifest_with_tree(id, &tree, &initramfs),
+            false,
+        );
+        let before = std::fs::read_dir(&store.paths.root).unwrap().count();
+
+        // Configured, but for a different kernel: the vermagic gate has to stop
+        // this before the module is built, because a module the target kernel
+        // refuses is worse than no module — it looks like a snapshot until boot.
+        std::fs::write(tree.join(".config"), b"CONFIG_X=y\n").unwrap();
+        std::fs::create_dir_all(tree.join("include/config")).unwrap();
+        std::fs::write(tree.join("include/config/kernel.release"), b"9.9.9-nope\n").unwrap();
+
+        let rc = cmd_rebuild(&store, id, Some(&tree), None, false).unwrap();
+
+        assert_eq!(rc, 2, "a tree built for another kernel is a refusal");
+        let after = std::fs::read_dir(&store.paths.root).unwrap().count();
+        assert_eq!(after, before, "a refusal must not write anything");
+        let _ = std::fs::remove_dir_all(&store.paths.root);
+        let _ = std::fs::remove_dir_all(&tree);
+        let _ = std::fs::remove_dir_all(&boot);
+    }
+
+    /// A tree with no `.config` cannot produce a module, and finding that out from
+    /// a failed `make` half a minute in is worse than being told now. It must also
+    /// still write nothing.
+    #[test]
+    fn rebuild_reports_an_unconfigured_tree_without_writing() {
+        let tree = std::env::temp_dir().join(format!("snapcli-noconfig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::create_dir_all(&tree).unwrap();
+
+        let id = "snap-aaaaaaaa";
+        let boot = std::env::temp_dir().join(format!("snapcli-nc-boot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&boot);
+        std::fs::create_dir_all(&boot).unwrap();
+        let initramfs = boot.join(format!("initramfs-{id}.img"));
+        std::fs::write(&initramfs, b"image").unwrap();
+
+        let store = store_with(
+            "noconfig",
+            id,
+            &manifest_with_tree(id, &tree, &initramfs),
+            false,
+        );
+        let before = std::fs::read_dir(&store.paths.root).unwrap().count();
+
+        let err = cmd_rebuild(&store, id, Some(&tree), None, false).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains(".config"), "{text}");
+
+        let after = std::fs::read_dir(&store.paths.root).unwrap().count();
+        assert_eq!(after, before, "a refusal must not write anything");
+        let _ = std::fs::remove_dir_all(&store.paths.root);
+        let _ = std::fs::remove_dir_all(&tree);
+        let _ = std::fs::remove_dir_all(&boot);
+    }
+
+    /// The flags parse, including `SNAPSHOT_TREE` as the tree, matching `dev`.
+    #[test]
+    fn rebuild_parses_the_tree_from_the_flag_or_the_environment() {
+        let cmd = Cli::try_parse_from(["snaptune", "rebuild", "snap-0848359a", "--dry-run"])
+            .expect("parse");
+        match cmd.cmd {
+            Cmd::Rebuild {
+                id,
+                tree,
+                description,
+                dry_run,
+            } => {
+                assert_eq!(id, "snap-0848359a");
+                assert_eq!(tree, None);
+                assert_eq!(description, None);
+                assert!(dry_run);
+            }
+            other => panic!("expected rebuild, got {other:?}"),
+        }
     }
 }

@@ -43,6 +43,15 @@ pub const KIND_DEV: &str = "dev-build";
 /// [`id_is_content_addressed`].
 pub const KIND_CREATED: &str = "created";
 
+/// `snapshot.kind: "rebuilt"` — an existing snapshot's module was rebuilt.
+///
+/// Recorded separately from [`KIND_CREATED`] because it answers the question a
+/// reader actually asks of it — "where did this come from?" — and because the
+/// rebuild is performed against the *old* snapshot rather than against whatever
+/// happens to be running. It shares the id formula, which is the other thing
+/// `kind` decides; see [`id_is_content_addressed`].
+pub const KIND_REBUILT: &str = "rebuilt";
+
 /// Whether this `kind` names an id this tool computes.
 ///
 /// `kind` earns its place by deciding whether an id can be recomputed from the
@@ -58,7 +67,7 @@ pub const KIND_CREATED: &str = "created";
 /// `snap-0848359a` (`register`ed) hold byte-identical content and carry different
 /// ids — the same bytes, two formulas, no drift.
 pub fn id_is_content_addressed(kind: &str) -> bool {
-    matches!(kind, KIND_DEV | KIND_CREATED)
+    matches!(kind, KIND_DEV | KIND_CREATED | KIND_REBUILT)
 }
 
 /// Flatten a YAML tree into `(dotted path, scalar)` pairs.
@@ -293,6 +302,26 @@ impl Manifest {
     /// manifests written before the field existed.
     pub fn source_tree_mode(&self) -> Option<String> {
         self.field("source_tree", "mode", "mode")
+    }
+
+    /// `source_tree.path` — the tree the module was built in, when there was one.
+    ///
+    /// **No line-scan fallback**, unlike every other accessor here, and that is
+    /// deliberate. The scan answers with the first line *starting* with the key,
+    /// and every manifest the shell tool writes has `module.path` before
+    /// `source_tree.path` — so a falling-back scan would hand back the module's
+    /// own path, which looks entirely plausible to a caller. `None` has to mean
+    /// "not recorded" for `rebuild` to be able to refuse honestly.
+    pub fn source_tree_path(&self) -> Option<String> {
+        self.text(self.at("source_tree", "path"))
+    }
+
+    /// `module.md5` — the digest of the module this snapshot stores.
+    ///
+    /// The scan fallback is safe here: it requires the key to begin the line, and
+    /// neither `mkinitcpio_conf_md5` nor `cyan_skillfish_md5` is written that way.
+    pub fn module_md5(&self) -> Option<String> {
+        self.field("module", "md5", "md5")
     }
 
     /// True when the register path wrote `registered: true`.
