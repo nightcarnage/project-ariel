@@ -585,14 +585,25 @@ pub enum Cmd {
     ///
     /// What flattening buys is that `boot --entry` then takes a bare id for every entry.
     ///
+    /// **`--nest` is the layout to want, and the one the fleet runs.** It puts the
+    /// generated twins back inside the distro's submenu, leaving our own entries — the
+    /// described ones — at the top level where they can be read and chosen. `doctor`
+    /// reports when a box is flattened, since `--nest` is not applied on its own: no
+    /// verb here rewrites the boot configuration as a side effect of something else.
+    ///
     /// Regenerates `grub.cfg` and then **reads it back** to report how many submenus are
     /// actually left, because writing the setting is not the menu changing.
     #[command(name = "grub-flatten", alias = "flatten")]
     GrubFlatten {
-        /// Put the distro's submenus back instead of flattening. The theme stays
-        /// commented either way: a themed menu is one you cannot read at 720p.
-        #[arg(long)]
-        restore: bool,
+        /// Nest the duplicate entries instead of flattening — the layout to want.
+        ///
+        /// `10_linux` writes a generated entry for every `/boot/vmlinuz-*`, including
+        /// one per `vmlinuz-snap-*`, and they belong inside the distro's "Advanced
+        /// options" submenu. Ours stay at the top level, where they are the described
+        /// ones. The theme stays commented either way: a themed menu is one you cannot
+        /// read at 720p.
+        #[arg(long, alias = "restore")]
+        nest: bool,
         /// Print the settings that would change and change nothing.
         #[arg(long)]
         dry_run: bool,
@@ -695,7 +706,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Current => cmd_current(&store, json),
         Cmd::Lineage => cmd_lineage(&store, json),
         Cmd::GrubList => cmd_grub_list(&store, json),
-        Cmd::GrubFlatten { restore, dry_run } => cmd_grub_flatten(&store, restore, dry_run, json),
+        Cmd::GrubFlatten { nest, dry_run } => cmd_grub_flatten(&store, nest, dry_run, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
         Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
         Cmd::Dev {
@@ -1932,23 +1943,23 @@ const THEME_NOTE: &str = "disabled by snaptune: a themed menu shows ~7 rows at 7
 /// The settings `grub-flatten` cares about, in the order they are reported.
 const FLATTEN_KEYS: [&str; 3] = ["GRUB_DEFAULT", "GRUB_DISABLE_SUBMENU", "GRUB_THEME"];
 
-/// Flatten the GRUB menu and drop the theme — or put the submenus back.
-fn cmd_grub_flatten(store: &Store, restore: bool, dry_run: bool, json: bool) -> Result<i32> {
+/// Flatten the GRUB menu and drop the theme — or nest the duplicates, which is the
+/// layout to want.
+fn cmd_grub_flatten(store: &Store, nest: bool, dry_run: bool, json: bool) -> Result<i32> {
     let defaults = &store.paths.grub_defaults;
     let before = std::fs::read_to_string(defaults)
         .with_context(|| format!("reading {}", defaults.display()))?;
 
     let keep_theme = std::env::var("SNAPSHOT_KEEP_THEME").is_ok_and(|v| v == "1");
 
-    // `--restore` only undoes the flattening. The theme is left commented there too:
-    // the shell tool never restored it, and a themed menu is one you cannot read at
-    // 720p.
+    // `--nest` only un-flattens. The theme is left commented there too: the shell tool
+    // never restored it, and a themed menu is one you cannot read at 720p.
     let (text, flatten_changed) = grub::set_grub_default(
         &before,
         "GRUB_DISABLE_SUBMENU",
-        if restore { "false" } else { "true" },
+        if nest { "false" } else { "true" },
     );
-    let (text, theme_changed) = if keep_theme || restore {
+    let (text, theme_changed) = if keep_theme || nest {
         (text, false)
     } else {
         grub::comment_grub_default(&text, "GRUB_THEME", THEME_NOTE)
@@ -1976,7 +1987,7 @@ fn cmd_grub_flatten(store: &Store, restore: bool, dry_run: bool, json: bool) -> 
     });
 
     let plan = write::Plan {
-        summary: match (restore, changed) {
+        summary: match (nest, changed) {
             (true, true) => "restore the distro's GRUB submenus and regenerate grub.cfg",
             (true, false) => "regenerate grub.cfg (the submenus are already there)",
             (false, true) => "flatten the GRUB menu and regenerate grub.cfg",
@@ -2038,7 +2049,7 @@ fn cmd_grub_flatten(store: &Store, restore: bool, dry_run: bool, json: bool) -> 
         println!("  {key}={value}");
     }
     println!("  submenu blocks in grub.cfg: {blocks}, nested entries: {nested}");
-    match (restore, nested > 0) {
+    match (nest, nested > 0) {
         (true, true) => println!(
             "\n  The distro's submenus are back, which is where 10_linux meant them to be.\n  \
              `grub-list` prints the `Parent>Child` path `boot --entry` needs for a nested\n  \
@@ -3414,9 +3425,9 @@ mod tests {
     fn grub_flatten_parses_and_takes_the_shell_s_aliases() {
         let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--dry-run"]).expect("parse");
         match cmd.cmd {
-            Cmd::GrubFlatten { restore, dry_run } => {
+            Cmd::GrubFlatten { nest, dry_run } => {
                 assert!(dry_run);
-                assert!(!restore, "flat is the verb; --restore is the way back");
+                assert!(!nest, "flat is the verb; --nest is the layout to want");
             }
             other => panic!("expected grub-flatten, got {other:?}"),
         }
@@ -3424,12 +3435,15 @@ mod tests {
         assert!(matches!(
             cmd.cmd,
             Cmd::GrubFlatten {
-                restore: false,
+                nest: false,
                 dry_run: false
             }
         ));
+        let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--nest"]).expect("parse");
+        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { nest: true, .. }));
+        // `--restore` was the first spelling of the same thing; keep it working.
         let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--restore"]).expect("parse");
-        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { restore: true, .. }));
+        assert!(matches!(cmd.cmd, Cmd::GrubFlatten { nest: true, .. }));
         let cmd = Cli::try_parse_from(["snaptune", "flatten"]).expect("the short spelling");
         assert!(matches!(cmd.cmd, Cmd::GrubFlatten { .. }));
     }

@@ -412,6 +412,31 @@ pub fn comment_grub_default(text: &str, key: &str, note: &str) -> (String, bool)
     (rendered, changed)
 }
 
+/// Is the menu flattened by `/etc/default/grub`?
+///
+/// True for the spellings the setting is actually written in, quoted or not: the
+/// shell tool's own check accepts `true`, `yes` and `y`, so a box that says `yes` must
+/// not be reported as nested.
+pub fn submenus_disabled(defaults: &str) -> bool {
+    grub_default_value(defaults, "GRUB_DISABLE_SUBMENU").is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "yes" | "y" | "1"
+        )
+    })
+}
+
+/// Is this an id `10_linux` generated for a kernel?
+///
+/// `10_linux` enumerates every `/boot/vmlinuz-*` with no exclusion list, so it writes
+/// one `gnulinux-<name>-advanced-<uuid>` entry per installed kernel *and* one per
+/// `vmlinuz-snap-*` this tool installs. Those are the entries a flattened menu promotes
+/// to the top level — which is why a flattened store shows each snapshot twice, the
+/// twin being the one with no usable `--id` and no `BOOT_IMAGE=`.
+pub fn is_generated_id(id: Option<&str>) -> bool {
+    id.is_some_and(|id| id.starts_with("gnulinux-"))
+}
+
 /// The argument `grub-reboot` should be given for `want`, or the reason it must
 /// not be armed at all.
 ///
@@ -707,6 +732,46 @@ GRUB_THEME="/usr/share/grub/themes/cachyos/theme.txt"
         let (out, changed) = set_grub_default(text, "GRUB_DISABLE_SUBMENU", "true");
         assert!(!changed, "already flattened");
         assert_eq!(out, text, "and byte-identical, not merely equivalent");
+    }
+
+    /// The setting is written by hand as often as by a tool, and the shell tool's own
+    /// check accepts three spellings. Reading only `true` would report a correctly
+    /// nested box as flattened.
+    #[test]
+    fn every_spelling_of_the_flatten_setting_is_recognised() {
+        for flat in [
+            "GRUB_DISABLE_SUBMENU='true'\n",
+            "GRUB_DISABLE_SUBMENU=true\n",
+            "GRUB_DISABLE_SUBMENU=\"yes\"\n",
+            "GRUB_DISABLE_SUBMENU=y\n",
+            "GRUB_DISABLE_SUBMENU='TRUE'\n",
+        ] {
+            assert!(submenus_disabled(flat), "{flat:?} means flat");
+        }
+        for nested in [
+            "GRUB_DISABLE_SUBMENU='false'\n",
+            "GRUB_DISABLE_SUBMENU=false\n",
+            "GRUB_DISABLE_SUBMENU='no'\n",
+            "",
+            "#GRUB_DISABLE_SUBMENU='true'\n",
+        ] {
+            assert!(!submenus_disabled(nested), "{nested:?} does not mean flat");
+        }
+    }
+
+    /// The twins a flattened menu promotes are exactly `10_linux`'s, which is what
+    /// makes the count a measurement rather than a guess.
+    #[test]
+    fn only_ten_linux_generated_ids_count_as_duplicates() {
+        assert!(is_generated_id(Some(
+            "gnulinux-snap-11e61755-advanced-757f018a-71b0"
+        )));
+        assert!(is_generated_id(Some(
+            "gnulinux-linux-cachyos-bore-advanced-a"
+        )));
+        for ours in [Some("snap-11e61755"), Some("uefi-firmware"), None] {
+            assert!(!is_generated_id(ours), "{ours:?} is not a generated twin");
+        }
     }
 
     #[test]

@@ -231,7 +231,7 @@ porting before that step is safe.
 | `grub-list` | GRUB menu entries, marking the nested ones | — | no |
 | `diff <a> <b>` | manifest fields and boot artefacts that differ | — | no |
 | `golden [<id>]` | report the baseline, or mark one | marker | with id |
-| `doctor [--verify]` | is the *store* coherent? | — | no |
+| `doctor [--verify]` | is the *store* coherent? Reports a flattened menu, too | — | no |
 | `verify [<id>]` | is one *snapshot* what its manifest claims? | — | no |
 | `validate [<module>]` | is this *module* patched, and is it the one running? | — | no |
 | `extract-modules <id> [dir]` (`extract`) | the amdgpu module out of a snapshot's image | `[dir]` | no |
@@ -243,7 +243,7 @@ porting before that step is safe.
 | `preserve [label]` (`save`, `backup`) | copy the current initramfs aside as a rescue image | `/boot` | yes |
 | `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
 | `boot --entry <grub-id>` | the same, into *any* GRUB entry — the distro's kernel, LTS, rescue | grubenv | yes |
-| `grub-flatten` / `--restore` | a flat, unthemed menu — or the distro's submenus back | `grub_defaults` + `grub_cfg` | yes |
+| `grub-flatten` / `--nest` | a flat, unthemed menu — or the nested one, which is the layout to want | `grub_defaults` + `grub_cfg` | yes |
 | `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
 | `hide <id>` / `unhide <id>` | off/on the list and the menu; files kept | manifest rename | yes |
 | `prune <id>` (`delete`, `rm`) | delete files, directory and entry | everything | yes |
@@ -569,7 +569,7 @@ recollection of it. This is the table to work from before retiring `snapshot`.
 | `diff` | same | reads the manifests, so it works with no source tree |
 | `boot`, `reboot <id>` | `boot <id> [--reboot]` | **differs**: see below |
 | `boot --entry <grub-id>` | same | nested entries by path, which the shell refused |
-| `grub-flatten` | same (+ `--restore`) | re-reads `grub.cfg` and counts what is left |
+| `grub-flatten` | same (+ `--nest`) | re-reads `grub.cfg` and counts what is left |
 | `grub-list`, `grublist`, `grub-entries`, `grub` | same, all four | |
 | `pin`, `default`, `set-default` | same, all three | |
 | `unpin` | same | |
@@ -593,7 +593,7 @@ Environment, from the shell's own help and its `README.md`:
 | `SOURCE_TREE=<path>` | still honoured, and `SNAPSHOT_TREE` is the name to prefer. An empty value is ignored, because `bootstrap.sh` sets `SOURCE_TREE=""` before filling it in |
 | `SNAPSHOT_KEEP_THEME=1` | same |
 | `SNAPSHOT_KEEP_FLAT=1` | **no equivalent, and no need** — see below |
-| `PINNED_VMLINUZ=<path>` | **no equivalent** — see below |
+| `PINNED_VMLINUZ=<path>` | **no equivalent, decided rather than missing** — see below |
 
 Four verbs are ported but **deliberately not identical**, and none of the four is a
 gap:
@@ -609,25 +609,51 @@ gap:
   original alone, so the id keeps describing the content.
 - **Nothing here changes the menu's shape on its own.** The shell's `pin` also restores
   the distro's GRUB submenus and comments out the theme, as a side effect of pinning.
-  Those are `grub-flatten` and `grub-flatten --restore` here, so a pin pins. That is
-  also why `SNAPSHOT_KEEP_FLAT=1` has no meaning: it exists to stop the shell's implicit
-  un-flattening, and there is no implicit un-flattening to stop.
+  Those are `grub-flatten` and `grub-flatten --nest` here, so a pin pins. That is also
+  why `SNAPSHOT_KEEP_FLAT=1` has no meaning: it exists to stop the shell's implicit
+  un-flattening, and there is no implicit un-flattening to stop. Where the shell *acted*,
+  this one **reports**: `doctor` names a flattened menu, counts the duplicates it
+  promoted, and says `grub-flatten --nest`.
 
-  Flattening deserves the warning the shell learned the hard way: `10_linux` enumerates
-  every `/boot/vmlinuz-*` with no exclusion list, so it emits an entry for each
-  `vmlinuz-snap-*` as well, and those live inside the distro's "Advanced options"
-  submenu. Flattening promotes all of them to the top level — on a store with 26
-  snapshots that is 26 extra rows, and the `10_linux` twin of each snapshot is the
-  *worse* of the pair, with no `--id` and no `BOOT_IMAGE=`. Blade 115's menu is
-  already in that state, which is why it lists each snapshot twice. `--restore` is the
-  way back.
+  **The nested layout is the one to want**, and the one both blades now run:
 
-`PINNED_VMLINUZ` is the one environment variable with no home here. It names the
-kernel image a snapshot boots; the kernel is derived from the release's `pkgbase`,
-which is what the shell's *default* did too. Only a non-default override has nowhere
-to go, and expressing it would mean a `--vmlinuz` on `create` — a change to what
-`create` guarantees about the kernel and image it pairs, not an alias. Named here so
-it is a decision rather than an oversight.
+  ```text
+  CachyOS Linux                                   <- the distro's default kernel
+  [snap-11e61755] liberation-7.2.9: 26/26 …       <- ours, described, top level
+  [snap-f59f7152] rebuild of snap-11e61755: …     <- ours, described, top level
+  Advanced options for CachyOS Linux >
+      with Linux linux-cachyos-bore               <- 10_linux's twins, out of the way
+      with Linux snap-11e61755                    <- one per vmlinuz-snap-*, hidden
+  ```
+
+  Flattening puts every `10_linux` twin at the top level instead, so each snapshot
+  appears **twice** and the twin is the worse of the pair — no usable `--id`, no
+  `BOOT_IMAGE=`, and nothing to tell you which is which. `10_linux` enumerates every
+  `/boot/vmlinuz-*` with no exclusion list, which is why there is a twin per snapshot at
+  all; on blade 104 with 26 snapshots a flattened menu would be 52 rows of snapshot
+  entries. `--nest` is the way back, and it is what fixed 115.
+
+`PINNED_VMLINUZ` is the one environment variable with no home here, and that is a
+decision rather than an omission.
+
+It names the kernel image a snapshot boots. Here the kernel is read off the artefact:
+`register::vmlinuz_for` derives it from the base image's own name, and the image's
+member path is what states which release that image belongs to
+(`usr/lib/modules/7.2.9-1-cachyos-bore/…/amdgpu.ko.zst`). That is a property of the
+thing being snapshotted, not a guess that needs an override.
+
+An override could not be honoured *safely*, which is what settles it. Pairing an image
+with a kernel that is not its own is precisely the mismatch the rest of the tool
+refuses — the module's `vermagic` would not match the kernel that loads it, so the
+snapshot would be unbootable at exactly the moment it was called on. And this tool
+cannot check the pairing: a `vmlinuz` here carries no greppable `Linux version`
+banner (checked on blade 115), so `--vmlinuz` would be a value taken on faith. The
+shell took it on faith; that is not a behaviour worth porting.
+
+If the kernel and the image do not correspond, the supported route is `--for
+<release>` to record which kernel this is for, and `--from <image>` to choose the base
+image — both of which are statements about the snapshot that `verify` can go back and
+check.
 
 ---
 

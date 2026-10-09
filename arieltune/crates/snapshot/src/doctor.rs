@@ -30,9 +30,16 @@
 //! **Unparseable manifests.** These degrade quietly: the store still lists the
 //! snapshot, because every field falls back to a line scan, so the wrong answer is
 //! only slightly wrong.
+//!
+//! **A flattened menu.** Not a defect — a preference — so it warns rather than fails.
+//! It is worth saying because the cost is invisible in the menu itself: `10_linux`
+//! writes a generated entry for every `/boot/vmlinuz-*`, `vmlinuz-snap-*` included, and
+//! flattening promotes all of them to the top level, so each snapshot appears twice and
+//! its twin is the worse one. Nothing else in the tool detects that.
 
 use std::path::Path;
 
+use crate::grub;
 use crate::report::{Report, Severity};
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
@@ -354,14 +361,60 @@ fn report_grubenv(report: &mut Report, paths: &Paths, snapshots: &[Snapshot]) {
         ),
     }
 
-    if let Some(next) = write::next_entry() {
-        if !next.is_empty() {
-            report.note(
-                "one-shot",
-                Severity::Ok,
-                format!("next_entry={next} is armed for the next boot"),
-            );
+    // The menu's shape. Flattening is a preference, not a defect, so this warns
+    // rather than fails — but it is worth saying, because the cost of flat is
+    // invisible in the menu itself: `10_linux` writes one generated entry per
+    // `/boot/vmlinuz-*`, `vmlinuz-snap-*` included, and flattening promotes every one
+    // of them to the top level. Each snapshot then appears twice, and its twin is the
+    // worse of the pair — no usable `--id`, no `BOOT_IMAGE=`.
+    if grub::submenus_disabled(&defaults) {
+        match std::fs::read_to_string(&paths.grub_cfg) {
+            Ok(cfg) => {
+                let promoted = grub::parse_menu_entries(&cfg)
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.submenu.is_none() && grub::is_generated_id(entry.id.as_deref())
+                    })
+                    .count();
+                if promoted == 0 {
+                    report.note(
+                        "menu-shape",
+                        Severity::Ok,
+                        "flattened by GRUB_DISABLE_SUBMENU, but 10_linux has generated no \
+                         duplicate to promote",
+                    );
+                } else {
+                    report.note(
+                        "menu-shape",
+                        Severity::Warn,
+                        format!(
+                            "flattened by GRUB_DISABLE_SUBMENU, so {promoted} generated \
+                             entr{} sit{} at the top level — one twin per kernel, including \
+                             one per `vmlinuz-snap-*`. Every snapshot shows twice, and the \
+                             twin has no usable `--id`.\n\
+                             Nest them with `snaptune grub-flatten --nest`.",
+                            if promoted == 1 { "y" } else { "ies" },
+                            if promoted == 1 { "s" } else { "" },
+                        ),
+                    );
+                }
+            }
+            Err(_) => report.note(
+                "menu-shape",
+                Severity::Warn,
+                format!(
+                    "GRUB_DISABLE_SUBMENU is set, but {} is unreadable, so whether anything \
+                     was promoted cannot be checked",
+                    paths.grub_cfg.display()
+                ),
+            ),
         }
+    } else {
+        report.note(
+            "menu-shape",
+            Severity::Ok,
+            "the distro's submenus are in place, so the generated twins stay nested",
+        );
     }
 }
 
@@ -450,6 +503,80 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("etc/default/grub"), "GRUB_DEFAULT=saved\n").unwrap();
         dir
+    }
+
+    /// A flattened menu is a preference, not a defect, so it warns — and it counts the
+    /// promoted twins, which is the only place in the tool that measurement exists.
+    #[test]
+    fn a_flattened_menu_warns_and_names_the_fix() {
+        let dir = store_with("flat-menu", "snap-aaaaaaaa", &[]);
+        std::fs::write(
+            dir.join("etc/default/grub"),
+            "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU='true'\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("boot/grub")).unwrap();
+        std::fs::write(
+            dir.join("boot/grub/grub.cfg"),
+            "menuentry 'CachyOS Linux, with Linux snap-aaaaaaaa' $menuentry_id_option \
+             'gnulinux-snap-aaaaaaaa-advanced-1111' {\n}\n\
+             menuentry 'CachyOS Linux, with Linux linux-cachyos' $menuentry_id_option \
+             'gnulinux-linux-cachyos-advanced-2222' {\n}\n\
+             menuentry '[snap-aaaaaaaa] mine' --id 'snap-aaaaaaaa' {\n}\n",
+        )
+        .unwrap();
+
+        let report = examine(&Paths::under(&dir));
+        let finding = key(&report, "menu-shape");
+        assert_eq!(finding.severity, Severity::Warn, "{}", finding.detail);
+        assert!(
+            finding.detail.contains('2'),
+            "it must count the promoted twins: {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("grub-flatten --nest"),
+            "and name the way out: {}",
+            finding.detail
+        );
+        // A preference must not fail a gate.
+        assert_ne!(report.worst(), Severity::Fail);
+    }
+
+    #[test]
+    fn a_nested_menu_is_reported_as_fine() {
+        let dir = store_with("nested-menu", "snap-aaaaaaaa", &[]);
+        std::fs::create_dir_all(dir.join("boot/grub")).unwrap();
+        std::fs::write(
+            dir.join("boot/grub/grub.cfg"),
+            "submenu 'Advanced options' {\n\
+             \tmenuentry 'with snap-aaaaaaaa' $menuentry_id_option 'gnulinux-snap-aaaaaaaa-advanced-1111' {\n\t}\n}\n",
+        )
+        .unwrap();
+        let report = examine(&Paths::under(&dir));
+        let finding = key(&report, "menu-shape");
+        assert_eq!(finding.severity, Severity::Ok, "{}", finding.detail);
+        assert!(finding.detail.contains("nested"), "{}", finding.detail);
+    }
+
+    /// Flat, but with nothing generated to promote — an unremarkable box, and saying
+    /// "each snapshot shows twice" there would be a false alarm.
+    #[test]
+    fn a_flattened_menu_with_nothing_promoted_is_not_a_warning() {
+        let dir = store_with("flat-empty", "snap-aaaaaaaa", &[]);
+        std::fs::write(
+            dir.join("etc/default/grub"),
+            "GRUB_DISABLE_SUBMENU='true'\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("boot/grub")).unwrap();
+        std::fs::write(
+            dir.join("boot/grub/grub.cfg"),
+            "menuentry '[snap-aaaaaaaa] mine' --id 'snap-aaaaaaaa' {\n}\n",
+        )
+        .unwrap();
+        let report = examine(&Paths::under(&dir));
+        assert_eq!(key(&report, "menu-shape").severity, Severity::Ok);
     }
 
     fn key<'a>(report: &'a Report, key: &str) -> &'a Finding {

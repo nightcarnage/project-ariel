@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! `snaptune` — the standalone binary.
 //!
-//! Named `snaptune` rather than `snapshot` because `snapshot` is an unrelated
-//! binary on the workstation (the GNOME screenshot tool answers
-//! `Unknown option --ids`), and because it joins `arieltune`/`llmtune` as a
-//! sibling. Blades get a `snapshot` compat symlink so the fleet scripts keep
-//! working; see `docs/snapshot-tool.md` §3.5.
+//! Named `snaptune` rather than `snapshot` because it joins `arieltune`/`llmtune`
+//! as a sibling — and because the name `snapshot` is taken twice over: on the
+//! workstation by the GNOME screenshot tool, and on the blades by the shell tool
+//! this replaces, which stays at `/usr/local/bin/snapshot` until it is retired.
+//!
+//! There is therefore **no** `snapshot` compat symlink to install, and installing one
+//! would silently replace the tool being replaced. See `docs/snapshot-tool.md` §3.5.
 //!
 //! This build writes as well as reads: `prune`, `pin`, `hide`, `boot` and
 //! `dev --run --register` change the store, `/boot` or the boot configuration, and
