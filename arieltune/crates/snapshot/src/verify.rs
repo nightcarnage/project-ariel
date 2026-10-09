@@ -187,7 +187,7 @@ fn local(base: &Path, recorded: &Path) -> PathBuf {
 
 /// The last path component, so a GRUB path and a store path can be compared without
 /// insisting they be spelled identically.
-fn basename(path: &str) -> &str {
+pub(crate) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 

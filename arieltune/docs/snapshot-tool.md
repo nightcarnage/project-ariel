@@ -234,10 +234,13 @@ porting before that step is safe.
 | `doctor [--verify]` | is the *store* coherent? | — | no |
 | `verify [<id>]` | is one *snapshot* what its manifest claims? | — | no |
 | `validate [<module>]` | is this *module* patched, and is it the one running? | — | no |
+| `extract-modules <id> [dir]` (`extract`) | the amdgpu module out of a snapshot's image | `[dir]` | no |
 | `dev <desc>` | plan a dev build; `--run` builds, `--register` registers | `--register` | `--register` |
 | `create <desc>` | build or adopt a module, make it a bootable snapshot | store + `/boot` + `40_custom` | yes |
 | `rebuild <id>` | rebuild that snapshot's module as a **new** snapshot | same | yes |
 | `register --module … --initramfs … --vmlinuz …` | register artefacts you built yourself (`import`) | store + `/boot` + `40_custom` | yes |
+| `test-result <id> <name> <value>` (`result`) | record a test result in a manifest | manifest | yes |
+| `preserve [label]` (`save`, `backup`) | copy the current initramfs aside as a rescue image | `/boot` | yes |
 | `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
 | `boot --entry <grub-id>` | the same, into *any* GRUB entry — the distro's kernel, LTS, rescue | grubenv | yes |
 | `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
@@ -347,8 +350,9 @@ sudo snaptune pin snap-1a2b3c4d      # now it is the permanent default
 
 `validate` earns its place *after* the boot, not before: it is the only check that
 compares the file with the running kernel, so it can tell you the boot did not
-actually take even when the GRUB entry says it did. Two `srcversion`s that differ
-mean the loaded module is some other build:
+actually take even when the GRUB entry says it did. Record what you saw with
+`test-result` and the snapshot carries its own test history (§5.11). Two
+`srcversion`s that differ mean the loaded module is some other build:
 
 ```
   live         amdgpu is loaded, srcversion 11F98DC7EE7590D51AA9C9C
@@ -465,6 +469,46 @@ is also where the label comes from: `vmlinuz-snap-<id>-v3-ttm-fix` yields
 `[v3-ttm-fix] <desc>`, because that filename is the only place the variant is
 written down.
 
+### 5.11 Rescue copies, test results, and getting the module back out
+
+Three verbs that are useful around the edges of the loop.
+
+**Before a change you did not build with this tool** — a kernel package update, a
+hand-edited `mkinitcpio.conf` — take a copy of the initramfs that is currently proven
+to boot:
+
+```bash
+sudo snaptune preserve pre-7.3
+#   /boot/initramfs-preserve-pre-7.3-20261009-142657.img, 54945380 bytes
+```
+
+Nothing ever reads the copy automatically; it is insurance, and the verb reports how
+many are already in `/boot` because each is tens of megabytes and nothing prunes them.
+The shell tool took copies like this internally, before it overwrote a live module —
+this one never overwrites, so a copy is only ever made on purpose.
+
+```bash
+sudo snaptune test-result snap-11e61755 rocminfo PASS
+sudo snaptune test-result snap-11e61755 dmesg_errors INCONCLUSIVE
+```
+
+`PASS`, `FAIL` and `INCONCLUSIVE` are the three values, because those are the three the
+workflow has a meaning for; `create`'s `NOT TESTED` and `NOT CHECKED` mean there is *no*
+result yet, which is not something to record by hand. The manifest is edited, then
+**parsed back** and the value read out of the parsed tree before anything is written —
+so an edit that broke the YAML, or that did not land at all, refuses instead of
+reporting success. Diffing a manifest before and after shows only the line that
+changed: the header comment, the field order and every other value survive.
+
+```bash
+snaptune extract-modules snap-11e61755 /var/tmp/modules
+```
+
+The module inside a snapshot's image is the one that actually booted, which makes it the
+right thing to compare against, to hand to `validate`, or to copy to another blade and
+give to `create --module`. It comes out of the early archive, which is where mkinitcpio
+keeps the modules on these blades.
+
 ---
 
 ## 6. What this deliberately does not do
@@ -510,13 +554,11 @@ discovers it by trying:
 
 | shell verb | what it did | covered by |
 |---|---|---|
-| `preserve [label]` | copy the current initramfs aside as a rescue image | **nothing**, deliberately (§6.3) |
-| `test-result <id> --boot-test ...` | record boot/GPU/rocminfo/dmesg results in the manifest | **nothing** |
-| `extract-modules <id>` | pull the modules out of a snapshot's initramfs | the `image` module reads members; no verb exposes it |
 | `grub-flatten` | switch GRUB to a flat menu layout | **nothing** |
 
-Three shell verbs were on this list and are not any more: `register` (§5.9),
-`validate` (§5.5) and `boot --entry` (§5.5).
+Six shell verbs were on this list and are not any more: `register` (§5.9),
+`validate` (§5.5), `boot --entry` (§5.5), `preserve`, `test-result` and
+`extract-modules` (§5.11).
 
 None of this is a defect in what is here — it is what is left.
 

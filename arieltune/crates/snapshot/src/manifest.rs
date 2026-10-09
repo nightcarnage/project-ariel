@@ -82,6 +82,66 @@ pub fn id_is_content_addressed(kind: &str) -> bool {
     )
 }
 
+/// Set `section.child: "value"` in a manifest's text, keeping every other line —
+/// comments included — exactly as it was.
+///
+/// **Text, not a re-serialisation.** The manifest is emitted by the shell tool's
+/// heredoc, with a header comment, a field order that makes it readable and quoting
+/// that varies by field. Parsing it and printing it back would change all three, so
+/// recording one test result would rewrite the whole provenance record and make every
+/// such edit unreviewable.
+///
+/// Returns `None` when the section is not there at all. That is the case the shell
+/// tool gets wrong in the quietest way available: `sed -i "/^test_results:/a\ …"`
+/// simply does nothing when there is no anchor, so it reports success and records
+/// nothing.
+///
+/// An existing `child` is replaced in place — every occurrence, so a hand-edited
+/// manifest with a duplicate key ends up consistent rather than half-updated. A
+/// missing one is appended at the end of the section, after the results already
+/// there, so nothing is reordered.
+pub fn set_section_value(text: &str, section: &str, child: &str, value: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let header = format!("{section}:");
+    let start = lines.iter().position(|line| line.trim_end() == header)?;
+
+    // The section runs to the next line at column 0. Blank lines inside it are
+    // tolerated (the writer may emit them), but trailing ones are not part of it:
+    // inserting after them would glue the new key to whatever follows.
+    let mut end = start + 1;
+    while end < lines.len() {
+        let line = lines[end];
+        if line.trim().is_empty() || line.starts_with(' ') || line.starts_with('\t') {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    let mut insert_at = end;
+    while insert_at > start + 1 && lines[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
+    }
+
+    let needle = format!("{child}:");
+    let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+    let mut replaced = false;
+    for line in out.iter_mut().take(insert_at).skip(start + 1) {
+        if line.trim_start().starts_with(&needle) {
+            *line = format!("  {child}: \"{value}\"");
+            replaced = true;
+        }
+    }
+    if !replaced {
+        out.insert(insert_at, format!("  {child}: \"{value}\""));
+    }
+
+    let mut rendered = out.join("\n");
+    if text.ends_with('\n') || !replaced {
+        rendered.push('\n');
+    }
+    Some(rendered)
+}
+
 /// Flatten a YAML tree into `(dotted path, scalar)` pairs.
 ///
 /// Mapping keys join with `.`, sequence indices append `[0]`, so a patch list
@@ -428,6 +488,121 @@ test_results:
 
     fn real() -> Manifest {
         Manifest::parse(REAL).expect("real manifest parses")
+    }
+
+    /// Recording a result must not rewrite the provenance around it: the manifest is
+    /// the record of what a snapshot is, and a whole-file reprint would make every
+    /// such edit unreviewable.
+    #[test]
+    fn replacing_a_result_changes_that_one_line_and_nothing_else() {
+        let edited = set_section_value(REAL, "test_results", "boot_test", "FAIL").unwrap();
+
+        let before: Vec<&str> = REAL.lines().collect();
+        let after: Vec<&str> = edited.lines().collect();
+        assert_eq!(before.len(), after.len(), "no line added or lost");
+        let differing: Vec<usize> = (0..before.len())
+            .filter(|i| before[*i] != after[*i])
+            .collect();
+        assert_eq!(
+            differing.len(),
+            1,
+            "exactly one line changed: {differing:?}"
+        );
+        assert_eq!(after[differing[0]], "  boot_test: \"FAIL\"");
+        assert!(
+            edited.ends_with('\n'),
+            "the trailing newline the input had must survive"
+        );
+        // And the comment at the top is still there — this file has one on real
+        // snapshots from the shell tool, and a reprint would drop it.
+        assert!(edited.starts_with("snapshot:\n"));
+    }
+
+    #[test]
+    fn a_new_result_is_appended_inside_its_section() {
+        let edited = set_section_value(REAL, "test_results", "dmesg_errors", "PASS").unwrap();
+        let lines: Vec<&str> = edited.lines().collect();
+        let added = lines
+            .iter()
+            .position(|l| *l == "  dmesg_errors: \"PASS\"")
+            .expect("the new key is there");
+        assert_eq!(
+            lines[added - 1],
+            "  gpu_alive: \"PASS\"",
+            "appended after the results already recorded, not before them"
+        );
+        assert_eq!(added, lines.len() - 1, "and at the end of the file");
+    }
+
+    /// The case that would glue a new key to the next top-level one: a blank line
+    /// separates `test_results:` from whatever follows.
+    #[test]
+    fn a_new_result_lands_before_the_blank_line_that_ends_the_section() {
+        let text = "snapshot:\n  id: \"snap-a\"\n\ntest_results:\n  boot_test: \"PASS\"\n\nfirmware:\n  x: \"y\"\n";
+        let edited = set_section_value(text, "test_results", "gpu_alive", "PASS").unwrap();
+        assert_eq!(
+            edited,
+            "snapshot:\n  id: \"snap-a\"\n\ntest_results:\n  boot_test: \"PASS\"\n  gpu_alive: \"PASS\"\n\nfirmware:\n  x: \"y\"\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_section_still_takes_a_key() {
+        let text = "test_results:\nconfig:\n  a: \"b\"\n";
+        let edited = set_section_value(text, "test_results", "boot_test", "PASS").unwrap();
+        assert_eq!(
+            edited,
+            "test_results:\n  boot_test: \"PASS\"\nconfig:\n  a: \"b\"\n"
+        );
+    }
+
+    /// The shell tool's append arm does nothing at all here — `sed` with no anchor
+    /// writes nothing and exits 0 — so the caller has to be able to tell.
+    #[test]
+    fn a_missing_section_is_reported_rather_than_silently_skipped() {
+        assert!(
+            set_section_value("snapshot:\n  id: \"snap-a\"\n", "test_results", "x", "PASS")
+                .is_none()
+        );
+        // A section name that only appears as a value is not a section.
+        assert!(set_section_value("a: \"test_results:\"\n", "test_results", "x", "PASS").is_none());
+    }
+
+    /// `boot` is a prefix of `boot_test`. A substitution that matched on the name
+    /// alone — which is what the shell's `s|.*${test_name}:.*|` does — would rewrite
+    /// the wrong key.
+    #[test]
+    fn a_shorter_name_does_not_capture_a_longer_key() {
+        let edited = set_section_value(REAL, "test_results", "boot", "PASS").unwrap();
+        assert!(
+            edited.contains("  boot_test: \"PASS\""),
+            "boot_test must be untouched"
+        );
+        assert!(edited.contains("  boot: \"PASS\""), "a new key was added");
+    }
+
+    #[test]
+    fn a_duplicate_key_is_replaced_in_every_place_it_appears() {
+        let text = "test_results:\n  boot_test: \"PASS\"\n  boot_test: \"FAIL\"\n";
+        let edited = set_section_value(text, "test_results", "boot_test", "INCONCLUSIVE").unwrap();
+        assert_eq!(
+            edited, "test_results:\n  boot_test: \"INCONCLUSIVE\"\n  boot_test: \"INCONCLUSIVE\"\n",
+            "consistent rather than half-updated"
+        );
+    }
+
+    /// The result the edit produces must be a manifest the rest of the tool can read.
+    #[test]
+    fn the_edited_text_still_parses() {
+        let edited = set_section_value(REAL, "test_results", "rocminfo", "PASS").unwrap();
+        let parsed = Manifest::parse(&edited).expect("parses");
+        assert_eq!(parsed.parse_error(), None);
+        let got = parsed
+            .fields()
+            .into_iter()
+            .find(|(k, _)| k == "test_results.rocminfo")
+            .map(|(_, v)| v);
+        assert_eq!(got.as_deref(), Some("PASS"));
     }
 
     #[test]

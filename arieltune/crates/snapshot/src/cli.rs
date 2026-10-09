@@ -463,6 +463,77 @@ pub enum Cmd {
         dry_run: bool,
     },
 
+    /// Record a test result in a snapshot's manifest.
+    ///
+    /// Replaces what `sed` does in the shell tool with something that cannot
+    /// half-work: the manifest is edited, then **parsed back**, and the edit is
+    /// refused if the YAML no longer parses or the value did not land. A manifest is
+    /// the record of what a snapshot is, and a `sed` that matches the wrong line, or
+    /// finds no anchor at all, writes nothing and says nothing.
+    ///
+    /// Only `PASS`, `FAIL` and `INCONCLUSIVE` are accepted, because those are the
+    /// three the workflow has a meaning for. `create` writes `NOT TESTED` and
+    /// `NOT CHECKED` as the absence of a result; recording a *result* that is
+    /// neither one of those nor one of the three is a typo, not a finding.
+    #[command(alias = "result")]
+    TestResult {
+        /// Snapshot id, e.g. snap-0848359a.
+        id: String,
+        /// Which result, e.g. boot_test, gpu_alive, rocminfo, dmesg_errors.
+        name: String,
+        /// PASS, FAIL or INCONCLUSIVE.
+        value: String,
+        /// Print what would be written and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Pull the amdgpu module out of a snapshot's initramfs.
+    ///
+    /// The module inside a snapshot's image is the one that actually booted, which
+    /// makes it the right thing to compare against, to feed to `validate`, or to
+    /// hand to `create --module` on another blade.
+    ///
+    /// It comes out of the **early** archive, which is where mkinitcpio keeps the
+    /// modules on these blades: amdgpu loads from the initramfs for early KMS, so it
+    /// is stored where it can be reached first.
+    #[command(alias = "extract", alias = "extract-module")]
+    ExtractModules {
+        /// Snapshot id whose `/boot/initramfs-<id>.img` to read.
+        id: String,
+        /// Where to write it. Default: /var/tmp/snapshot-modules — persistent, so a
+        /// crash or a reboot does not take the extraction with it.
+        dir: Option<PathBuf>,
+        /// List what would be written and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Copy the current initramfs aside, as something to boot if the next change to
+    /// it does not come up.
+    ///
+    /// The shell tool does this internally before it overwrites a module, because it
+    /// mutates the live system in a window. This tool does not mutate, so there is
+    /// nothing to rescue on its behalf — but the copy is still the cheapest insurance
+    /// there is before a kernel package update or a hand-edited `mkinitcpio.conf`,
+    /// and this is the verb for taking it deliberately.
+    ///
+    /// Nothing ever reads the copy automatically. It is named
+    /// `initramfs-preserve-<label>-<timestamp>.img`, and how many are already there
+    /// is reported, because they are tens of megabytes each and nothing prunes them.
+    #[command(alias = "save", alias = "backup")]
+    Preserve {
+        /// Label for the copy, e.g. `pre-7.3`. Default: manual. Letters, digits,
+        /// '.', '-' and '_' only — it becomes part of a filename.
+        label: Option<String>,
+        /// Preserve this initramfs instead of the running kernel's.
+        #[arg(long, value_name = "IMAGE")]
+        from: Option<PathBuf>,
+        /// Print what would be copied and copy nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Delete a snapshot completely: its `/boot` artefacts, its directory and its
     /// GRUB entry. **Irreversible.** Needs root.
     ///
@@ -605,6 +676,20 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         },
         Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
         Cmd::Verify { id, json } => cmd_verify(&store, id.as_deref(), json),
+        Cmd::TestResult {
+            id,
+            name,
+            value,
+            dry_run,
+        } => cmd_test_result(&store, &id, &name, &value, dry_run),
+        Cmd::ExtractModules { id, dir, dry_run } => {
+            cmd_extract_modules(&store.paths, &id, dir.as_deref(), dry_run)
+        }
+        Cmd::Preserve {
+            label,
+            from,
+            dry_run,
+        } => cmd_preserve(&store.paths, label.as_deref(), from.as_deref(), dry_run),
         Cmd::Rebuild {
             id,
             tree,
@@ -1665,6 +1750,334 @@ fn label_from_vmlinuz(path: &Path) -> Option<String> {
     (!after_hash.is_empty() && !bare_hash).then(|| after_hash.to_string())
 }
 
+/// The value a recorded result may take, normalised.
+///
+/// Restricted rather than free text, because the failure mode is silent: `PAS` or
+/// `FALED` would be recorded as a result, and a reader comparing against `PASS` would
+/// find a snapshot that looks untested rather than one with a typo in it.
+///
+/// `create` writes `NOT TESTED` and `NOT CHECKED` to mean there is no result yet —
+/// those are the *absence* of one, which is why they are not accepted here.
+fn result_value(raw: &str) -> Result<String> {
+    let value = raw.to_ascii_uppercase();
+    if !matches!(value.as_str(), "PASS" | "FAIL" | "INCONCLUSIVE") {
+        anyhow::bail!(
+            "{value:?} is not a result.\n\
+             PASS, FAIL and INCONCLUSIVE are the three the workflow has a meaning for. \
+             `create` writes \"NOT TESTED\" and \"NOT CHECKED\" to mean there is no result \
+             yet, and that is not something to record by hand."
+        );
+    }
+    Ok(value)
+}
+
+/// Record a test result in a snapshot's manifest — and prove it landed.
+///
+/// The shell tool does this with
+///
+/// ```text
+/// grep -q "${test_name}:" "$manifest" && sed -i "s|.*${test_name}:.*|...|" \
+///                                      || sed -i "/^test_results:/a\  ..."
+/// ```
+///
+/// which fails silently in three ways at once: the `grep` matches the name anywhere in
+/// the file (so `boot` matches `boot_test:`), the substitution arm rewrites *any* line
+/// containing the name, and the append arm does nothing at all when the file has no
+/// `test_results:` anchor — while still exiting 0. A manifest is the record of what a
+/// snapshot is, so success has to mean the value is in the file.
+fn cmd_test_result(store: &Store, id: &str, name: &str, value: &str, dry_run: bool) -> Result<i32> {
+    let value = result_value(value)?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!(
+            "{name:?} is not a result name — letters, digits and '_' only, so that it is a \
+             key the manifest can carry."
+        );
+    }
+
+    let Some(snapshot) = store.get(id)? else {
+        anyhow::bail!("snapshot {id} not found");
+    };
+    if snapshot.hidden {
+        anyhow::bail!(
+            "{id} is hidden: hiding renames its manifest to manifest.yaml.hidden, so there \
+             is no manifest.yaml to record in.\n\
+             `snaptune unhide {id}` puts it back."
+        );
+    }
+
+    let path = store.paths.root.join(id).join("manifest.yaml");
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+
+    let Some(edited) = manifest::set_section_value(&text, "test_results", name, &value) else {
+        anyhow::bail!(
+            "{} has no `test_results:` section, so there is nowhere to record {name}.\n\
+             Every manifest the shell tool writes has one; if this one genuinely does not, \
+             add the section by hand rather than having this guess where it goes.",
+            path.display()
+        );
+    };
+
+    // Back through the parser before anything is written: an edit that broke the YAML
+    // would otherwise be found by the next reader, long after the cause.
+    let parsed = manifest::Manifest::parse(&edited)
+        .with_context(|| format!("re-reading {} after the edit", path.display()))?;
+    if let Some(why) = parsed.parse_error() {
+        anyhow::bail!(
+            "the edit would have left {} unparseable, so nothing was written:\n  {why}",
+            path.display()
+        );
+    }
+    let key = format!("test_results.{name}");
+    let got = parsed
+        .fields()
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v);
+    if got.as_deref() != Some(value.as_str()) {
+        anyhow::bail!(
+            "the edit did not land: {} should read {key} = {value}, and reads {}.\n\
+             Nothing was written.",
+            path.display(),
+            got.as_deref().unwrap_or("(nothing)")
+        );
+    }
+
+    let plan = write::Plan {
+        summary: format!("record {name} = {value} in {id}'s manifest"),
+        actions: vec![write::Action::Write {
+            path: path.clone(),
+            contents: edited,
+            what: format!("record {name} = {value}"),
+        }],
+    };
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        println!("\n{id}: {name} = {value}");
+    }
+    Ok(0)
+}
+
+/// Where `extract-modules` writes when no directory is given.
+///
+/// `/var/tmp`, not `/tmp`: `/tmp` is tmpfs and is wiped on a crash or a reboot, which
+/// is exactly when an extracted module is worth having.
+const DEFAULT_EXTRACT_DIR: &str = "/var/tmp/snapshot-modules";
+
+/// The amdgpu module as it sits in an initramfs's early archive.
+///
+/// Both spellings, because mkinitcpio copies the on-disk filename: a distro that
+/// ships compressed modules gives `.ko.zst` and one that ships plain modules gives
+/// `.ko`. They cannot collide — `.ko` is not a suffix of `.ko.zst`.
+fn module_members(image: &Path) -> Result<Vec<String>> {
+    let mut found = image::members_ending(image, "amdgpu.ko.zst")?;
+    found.extend(image::members_ending(image, "amdgpu.ko")?);
+    Ok(found)
+}
+
+/// Pull a snapshot's module out of its image, as the bytes that booted.
+fn cmd_extract_modules(paths: &Paths, id: &str, dir: Option<&Path>, dry_run: bool) -> Result<i32> {
+    let image = paths.boot.join(format!("initramfs-{id}.img"));
+    if !image.is_file() {
+        anyhow::bail!(
+            "no initramfs at {}.\n\
+             Is `{id}` a snapshot on this machine? `list` shows what is here, and \
+             `--root` reads a store somewhere else.",
+            image.display()
+        );
+    }
+
+    let members = module_members(&image)?;
+    if members.is_empty() {
+        // Not "nothing found": the archive was read, and had no amdgpu in it.
+        anyhow::bail!(
+            "{} carries no amdgpu module in its early archive.\n\
+             Every image this fleet boots keeps its modules there, so this is not one \
+             of them.",
+            image.display()
+        );
+    }
+
+    let dir = dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_EXTRACT_DIR));
+
+    if dry_run {
+        println!("{} module(s) in {}", members.len(), image.display());
+        for member in &members {
+            println!(
+                "    {:<46} -> {}",
+                member,
+                dir.join(verify::basename(member)).display()
+            );
+        }
+        println!("\n--dry-run: nothing was written.");
+        return Ok(0);
+    }
+
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating the output directory {}", dir.display()))?;
+
+    println!("{}", image.display());
+    let mut total = 0u64;
+    for member in &members {
+        // `verify_member` is the reader: `cpio` on the file itself, which sees the
+        // early archive and refuses rather than returning empty bytes when the member
+        // is not there.
+        let bytes = image::verify_member(&image, member)?;
+        let dest = dir.join(verify::basename(member));
+        std::fs::write(&dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
+        total += bytes.len() as u64;
+        println!("  {} bytes  {}", bytes.len(), dest.display());
+    }
+    println!(
+        "\n{} module(s), {} bytes, written to {}",
+        members.len(),
+        total,
+        dir.display()
+    );
+    Ok(0)
+}
+
+/// The name a preserved copy gets.
+fn preserve_name(label: &str, stamp: &str) -> String {
+    format!("initramfs-preserve-{label}-{stamp}.img")
+}
+
+/// A label becomes part of a filename in `/boot`, so it is checked rather than
+/// trusted. What makes a label dangerous is `/`, and that is what is refused: with no
+/// separator in it the label cannot be anything but part of one filename.
+///
+/// `.` and `..` are therefore harmless here — they are embedded in
+/// `initramfs-preserve-<label>-<stamp>.img`, never a path component of their own — but
+/// whitespace and newlines are refused too, because the shell tool's runbooks name
+/// these files by hand.
+fn check_label(label: &str) -> Result<()> {
+    if label.is_empty() {
+        anyhow::bail!(
+            "a label cannot be empty — that would name the copy \
+             initramfs-preserve--<timestamp>.img"
+        );
+    }
+    if let Some(bad) = label
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.'))
+    {
+        anyhow::bail!(
+            "a label cannot contain {bad:?}.\n\
+             It becomes part of initramfs-preserve-<label>-<timestamp>.img in /boot, so \
+             letters, digits, '.', '-' and '_' are all it can hold."
+        );
+    }
+    Ok(())
+}
+
+/// How many `initramfs-preserve-*.img` are in `boot`, and how much they hold.
+///
+/// Reported because nothing prunes them and each is tens of megabytes. Unreadable
+/// entries are skipped: this is a courtesy, not a check.
+fn preserved_count(boot: &Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(boot) else {
+        return (0, 0);
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("initramfs-preserve-") && name.ends_with(".img")
+        })
+        .fold((0, 0), |(count, bytes), entry| {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            (count + 1, bytes + size)
+        })
+}
+
+/// `YYYYmmdd-HHMMSS`, by way of `date`, so the name matches the copies the shell tool
+/// and the fleet's runbooks already leave behind.
+fn timestamp() -> Result<String> {
+    let out = std::process::Command::new("date")
+        .arg("+%Y%m%d-%H%M%S")
+        .output()
+        .context("running date")?;
+    if !out.status.success() {
+        anyhow::bail!("`date` could not produce a timestamp for the copy's name");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Copy the current initramfs aside, deliberately.
+fn cmd_preserve(
+    paths: &Paths,
+    label: Option<&str>,
+    from: Option<&Path>,
+    dry_run: bool,
+) -> Result<i32> {
+    let label = label.unwrap_or("manual");
+    check_label(label)?;
+
+    let source = match from {
+        Some(path) => {
+            if !path.is_file() {
+                anyhow::bail!("no initramfs to preserve at {}", path.display());
+            }
+            path.to_path_buf()
+        }
+        None => {
+            let release = dev::running_release().context(
+                "cannot tell which kernel's initramfs to preserve: `uname -r` did not \
+                 answer.\nPass --from <image> to name one.",
+            )?;
+            dev::distro_initramfs(&paths.boot, &release).with_context(|| {
+                format!(
+                    "no initramfs for {release} in {}.\n\
+                     Pass --from <image> to name one.",
+                    paths.boot.display()
+                )
+            })?
+        }
+    };
+
+    let dest = paths.boot.join(preserve_name(label, &timestamp()?));
+
+    let plan = write::Plan {
+        summary: format!("preserve {} as {}", source.display(), dest.display()),
+        actions: vec![write::Action::Copy {
+            from: source.clone(),
+            to: dest.clone(),
+            what: format!("preserve {} as {}", source.display(), dest.display()),
+        }],
+    };
+
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+
+    if dry_run {
+        return Ok(0);
+    }
+
+    let size = std::fs::metadata(&dest)
+        .with_context(|| format!("the copy is not there: {}", dest.display()))?
+        .len();
+    let (count, bytes) = preserved_count(&paths.boot);
+    println!("\n  size     {size} bytes");
+    println!("  from     {}", source.display());
+    println!(
+        "  in /boot {count} initramfs-preserve-*.img, {} MB — nothing prunes these",
+        bytes / 1_048_576
+    );
+    println!(
+        "\nTo restore: copy it back over {}, or point a GRUB entry at it.",
+        source.display()
+    );
+    Ok(0)
+}
+
 /// What comparing a module file against the loaded module can say.
 #[derive(Debug, PartialEq, Eq)]
 enum LiveVerdict {
@@ -2707,6 +3120,156 @@ mod tests {
             parse_dev(&["--run", "--register"]).is_ok(),
             "--run --register is the shape that works"
         );
+    }
+
+    /// The failure mode is silent: a typo recorded as a result leaves a snapshot that
+    /// looks untested rather than one that has a misspelling in it.
+    #[test]
+    fn only_the_three_real_results_are_accepted() {
+        assert_eq!(result_value("PASS").unwrap(), "PASS");
+        assert_eq!(result_value("fail").unwrap(), "FAIL", "case is normalised");
+        assert_eq!(result_value("inconclusive").unwrap(), "INCONCLUSIVE");
+
+        for bad in [
+            "PAS",
+            "FALED",
+            "MAYBE",
+            "",
+            "NOT TESTED",
+            "NOT CHECKED",
+            "yes",
+        ] {
+            let err = result_value(bad).expect_err(&format!("{bad:?} must be refused"));
+            let text = err.to_string();
+            assert!(
+                text.contains("PASS, FAIL and INCONCLUSIVE"),
+                "{bad:?}: the refusal must name the three that work: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_preserve_label_that_could_be_a_path_is_refused() {
+        assert!(check_label("manual").is_ok());
+        assert!(check_label("pre-7.3").is_ok());
+        assert!(check_label("v2_final.img").is_ok());
+
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "a/b",
+            "pre 7.3",
+            "a\nb",
+            "/etc/passwd",
+        ] {
+            assert!(
+                check_label(bad).is_err(),
+                "{bad:?} must be refused: it becomes a filename in /boot"
+            );
+        }
+        let why = check_label("/etc/passwd").unwrap_err().to_string();
+        assert!(why.contains("cannot contain"), "{why}");
+        assert!(
+            why.contains("initramfs-preserve-<label>"),
+            "the refusal should say what the label becomes: {why}"
+        );
+    }
+
+    /// The property, stated as the property rather than as a list of forbidden
+    /// characters: whatever a label survives `check_label` with, the copy lands as a
+    /// direct child of the boot directory.
+    ///
+    /// `..` is in the list on purpose — it is allowed, and it is harmless, because it
+    /// is embedded in `initramfs-preserve-..-<stamp>.img` and never a path component
+    /// of its own. A `/` is the only thing that could make it one, and that is what
+    /// `check_label` refuses. Asserting the destination's parent catches a future
+    /// refactor that stops embedding the label, which a character blacklist cannot.
+    #[test]
+    fn no_label_puts_the_copy_anywhere_but_the_boot_directory() {
+        let boot = Path::new("/boot");
+        for label in ["manual", "..", ".", "a.b", "pre-7.3", "x_1", "0"] {
+            check_label(label).unwrap_or_else(|e| panic!("{label:?} should be allowed: {e}"));
+            let dest = boot.join(preserve_name(label, "20260101-000000"));
+            assert_eq!(
+                dest.parent(),
+                Some(boot),
+                "{label:?} put the copy outside /boot: {}",
+                dest.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_verbs_parse() {
+        let cmd = Cli::try_parse_from([
+            "snaptune",
+            "test-result",
+            "snap-aaaaaaaa",
+            "boot_test",
+            "PASS",
+        ])
+        .expect("test-result must parse");
+        match cmd.cmd {
+            Cmd::TestResult {
+                id,
+                name,
+                value,
+                dry_run,
+            } => {
+                assert_eq!(id, "snap-aaaaaaaa");
+                assert_eq!(name, "boot_test");
+                assert_eq!(value, "PASS");
+                assert!(!dry_run);
+            }
+            other => panic!("expected test-result, got {other:?}"),
+        }
+
+        // The shell's shorter spelling.
+        let cmd = Cli::try_parse_from(["snaptune", "result", "snap-a", "x", "PASS"]).unwrap();
+        assert!(matches!(cmd.cmd, Cmd::TestResult { .. }), "result");
+
+        let cmd = Cli::try_parse_from(["snaptune", "extract-modules", "snap-aaaaaaaa"])
+            .expect("extract-modules must parse");
+        match cmd.cmd {
+            Cmd::ExtractModules { id, dir, dry_run } => {
+                assert_eq!(id, "snap-aaaaaaaa");
+                assert!(
+                    dir.is_none(),
+                    "the default is not spelled out on the command line"
+                );
+                assert!(!dry_run);
+            }
+            other => panic!("expected extract-modules, got {other:?}"),
+        }
+        for alias in ["extract", "extract-module"] {
+            let cmd = Cli::try_parse_from(["snaptune", alias, "snap-a"]).unwrap();
+            assert!(matches!(cmd.cmd, Cmd::ExtractModules { .. }), "{alias}");
+        }
+
+        let cmd = Cli::try_parse_from(["snaptune", "preserve"]).expect("preserve must parse");
+        match cmd.cmd {
+            Cmd::Preserve {
+                label,
+                from,
+                dry_run,
+            } => {
+                assert!(label.is_none() && from.is_none() && !dry_run);
+            }
+            other => panic!("expected preserve, got {other:?}"),
+        }
+        let cmd = Cli::try_parse_from(["snaptune", "preserve", "pre-7.3", "--from", "/i.img"])
+            .expect("preserve must parse");
+        match cmd.cmd {
+            Cmd::Preserve { label, from, .. } => {
+                assert_eq!(label.as_deref(), Some("pre-7.3"));
+                assert_eq!(from.as_deref(), Some(Path::new("/i.img")));
+            }
+            other => panic!("expected preserve, got {other:?}"),
+        }
+        for alias in ["save", "backup"] {
+            let cmd = Cli::try_parse_from(["snaptune", alias]).unwrap();
+            assert!(matches!(cmd.cmd, Cmd::Preserve { .. }), "{alias}");
+        }
     }
 
     /// A snapshot id and a GRUB entry are different things, and `boot` takes one or
