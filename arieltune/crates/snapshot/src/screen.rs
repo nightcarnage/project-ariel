@@ -2127,6 +2127,7 @@ mod tests {
             rebuilt_modules: vec!["drivers/gpu/drm/amd/amdgpu".to_string()],
             changed_files: None,
             module_md5: "016a410f8b86e1b5d10efbaa856ce22f".to_string(),
+            parent_module_md5: None,
             module_size: 7358583,
             module_srcversion: Some("A6388DF88F71A0EE65E1EED".to_string()),
             module_vermagic: Some("7.2.9-1-cachyos-bore SMP preempt mod_unload".to_string()),

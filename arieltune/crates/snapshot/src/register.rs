@@ -83,6 +83,13 @@ pub struct Request {
     pub rebuilt_modules: Vec<String>,
     /// MD5 of the compressed module, all 32 hex characters.
     pub module_md5: String,
+    /// MD5 of the module the *parent* snapshot stores, when it stores one.
+    ///
+    /// The comparison is worth recording because it answers the question a dev loop
+    /// keeps asking: did this build change anything? Two identical digests mean the
+    /// tree produced a module byte-identical to its parent's, so the snapshot is a
+    /// second copy of something that already exists.
+    pub parent_module_md5: Option<String>,
     /// Size of the compressed module.
     pub module_size: u64,
     /// `modinfo -F srcversion` for the built module, when it could be asked.
@@ -240,8 +247,62 @@ pub fn manifest_text(req: &Request, timestamp: &str) -> String {
     if req.changed_files.is_none() {
         out.push_str("  changed_files: \"unknown - this tree is not a checkout of its own\"\n");
     }
-    out.push_str("  patches: \"unknown until this snapshot boots\"\n");
+
+    // The series, **inherited rather than re-derived**.
+    //
+    // A dev snapshot replaces one member of the parent's image, so everything the
+    // series did to the rest of the kernel is untouched and still there — the list is
+    // the parent's, and re-detecting it would be both unreliable (detection needs a
+    // *booted* kernel, which this one is not yet) and a second, possibly different
+    // answer to a question that already has one.
+    //
+    // The difference is the module, so that is what this records. Naming it is the
+    // whole point: the same digest twice means the build changed nothing, which is
+    // exactly the silent no-op a dev loop has to be told about.
+    out.push_str("\npatches:\n");
+    match &req.parent {
+        Some(parent) => out.push_str(&format!("  inherited_from: \"{parent}\"\n")),
+        None => out.push_str("  inherited_from: \"\"\n"),
+    }
+    out.push_str("  series: \"the parent's, unchanged - only one module was rebuilt\"\n");
+    out.push_str("  difference:\n");
+    match &req.parent_module_md5 {
+        Some(parent_md5) if parent_md5 == &req.module_md5 => {
+            out.push_str("    module: \"identical to the parent's - this build changed nothing\"\n")
+        }
+        Some(parent_md5) => out.push_str(&format!(
+            "    module: \"differs from the parent's ({parent_md5} -> {})\"\n",
+            req.module_md5
+        )),
+        None => out.push_str(
+            "    module: \"no comparison - the parent is not a snapshot in this store\"\n",
+        ),
+    }
+    if !req.rebuilt_modules.is_empty() {
+        out.push_str(&format!(
+            "    rebuilt: \"{}\"\n",
+            req.rebuilt_modules.join(", ")
+        ));
+    }
+    out.push_str("  live_state: \"unknown until this snapshot boots\"\n");
     out
+}
+
+/// The compressed module a snapshot stores, if it has one.
+///
+/// Found by extension rather than by name: this store writes `module.ko.zst` while
+/// the shell tool wrote the built module's own name, and the *parent* of a dev
+/// snapshot may be either.
+pub fn stored_module(store_root: &Path, id: &str) -> Option<PathBuf> {
+    let dir = store_root.join(id).join("modules");
+    let mut found: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            found = Some(path);
+        }
+    }
+    found
 }
 
 /// The root filesystem's UUID, which the entry's `search --fs-uuid` line needs.
@@ -632,6 +693,7 @@ mod tests {
             rebuilt_modules: vec!["drivers/gpu/drm/amd/amdgpu".to_string()],
             changed_files: Some(vec!["drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c".to_string()]),
             module_md5: "ecdb619e5bddacf7ab37be0c563043a5".to_string(),
+            parent_module_md5: Some("ecdb619e5bddacf7ab37be0c563043a5".to_string()),
             module_size: 7357845,
             module_srcversion: Some("11F98DC7EE7590D51AA9C9C".to_string()),
             module_vermagic: Some("7.2.9-1-cachyos-bore SMP preempt mod_unload".to_string()),
@@ -639,6 +701,66 @@ mod tests {
             boot: PathBuf::from("/boot"),
             acpi_override: false,
         }
+    }
+
+    /// The series is inherited, not re-derived. A dev snapshot replaces one member of
+    /// the parent's image, so the patch set is the parent's — and detection would
+    /// need a *booted* kernel, which this one is not yet.
+    #[test]
+    fn the_manifest_inherits_the_series_from_its_parent() {
+        let text = manifest_text(&request(), "2026-10-09T00:00:00Z");
+        assert!(text.contains("patches:\n"), "{text}");
+        assert!(
+            text.contains("  inherited_from: \"linux-cachyos-bore\""),
+            "{text}"
+        );
+        assert!(text.contains("series: \"the parent's, unchanged"), "{text}");
+        assert!(
+            text.contains("live_state: \"unknown until this snapshot boots\""),
+            "{text}"
+        );
+    }
+
+    /// The difference is the point. Two identical digests mean the tree produced a
+    /// module byte-identical to its parent's, so the snapshot is a second copy of
+    /// something that already exists — and a dev loop that is not told this will
+    /// happily register no-op snapshots.
+    #[test]
+    fn an_unchanged_module_is_called_unchanged() {
+        let mut req = request();
+        req.parent_module_md5 = Some(req.module_md5.clone());
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("identical to the parent's - this build changed nothing"),
+            "{text}"
+        );
+        assert!(!text.contains("differs from the parent's"), "{text}");
+    }
+
+    #[test]
+    fn a_changed_module_names_both_digests() {
+        let mut req = request();
+        req.module_md5 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        req.parent_module_md5 = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string());
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(text.contains("differs from the parent's"), "{text}");
+        // Both, in order, so a reader can check either end of the claim.
+        assert!(text.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), "{text}");
+        assert!(text.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "{text}");
+    }
+
+    /// A distro image is not a snapshot in the store, so there is nothing to compare
+    /// against. Saying nothing would let the manifest imply the build changed
+    /// something, which is not known either.
+    #[test]
+    fn no_comparable_parent_is_stated_rather_than_implied() {
+        let mut req = request();
+        req.parent_module_md5 = None;
+        let text = manifest_text(&req, "2026-10-09T00:00:00Z");
+        assert!(
+            text.contains("no comparison - the parent is not a snapshot in this store"),
+            "{text}"
+        );
     }
 
     /// "Which module did this actually rebuild?" is answerable even when the tree

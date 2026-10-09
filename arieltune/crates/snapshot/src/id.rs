@@ -104,6 +104,17 @@ pub fn file_md5_prefix8(path: &Path) -> String {
     }
 }
 
+/// `md5sum <path>`, all 32 hex characters, or `""` when it cannot be read.
+///
+/// The full digest for recording a *comparison* — "is this module the same as the
+/// one its parent stores?" — where an unreadable file must not answer "yes".
+pub fn file_md5_hex(path: &Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => md5_hex(&bytes),
+        Err(_) => String::new(),
+    }
+}
+
 /// `cat <paths...> | md5sum | cut -c1-8`.
 ///
 /// Unreadable inputs contribute nothing; if *none* could be read this hashes

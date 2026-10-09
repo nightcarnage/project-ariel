@@ -37,12 +37,16 @@ use crate::write;
         kernel snapshots created by the bc-250-snapshotter.\n\
         \n\
         Reads are safe anywhere. The writers -- pin, unpin, hide, unhide, golden,\n\
-        prune, and `dev --register` -- change the boot configuration (/etc/grub.d,\n\
-        grubenv, and /boot for a registration) and so need root, and each takes\n\
-        --dry-run to print exactly what it would do first. `prune` deletes and cannot\n\
-        be undone.\n\
+        boot, prune, and `dev --register` -- change the boot configuration\n\
+        (/etc/grub.d, grubenv, and /boot for a registration) and so need root, and\n\
+        each takes --dry-run to print exactly what it would do first. `prune` deletes\n\
+        and cannot be undone; `boot` is one-shot and reverts on its own.\n\
         \n\
-        NOT IMPLEMENTED YET: create, rebuild, boot, verify. Those still belong to the\n\
+        The verb layout follows the other modules: flat, one word each, a report verb\n\
+        for reading and a flag for anything that writes (`dev` previews unless --run,\n\
+        as `apu build` and `mem set` do).\n\
+        \n\
+        NOT IMPLEMENTED YET: create, rebuild, verify, doctor. Those still belong to the\n\
         shell tool, which remains authoritative."
 )]
 pub struct Cli {
@@ -179,6 +183,27 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Arm a one-shot boot into a snapshot: the next boot uses it, the one after
+    /// falls back to the pinned default. Needs root.
+    ///
+    /// One-shot rather than changing `saved_entry`, so this cannot leave a blade
+    /// stuck booting a kernel that will not come up — a snapshot that fails to boot
+    /// reverts by itself. The same check `pin` does applies here: the armed value is
+    /// read back from grubenv, because `grub-reboot` exits 0 even when `grub.cfg`
+    /// was generated without `GRUB_DEFAULT=saved` and would ignore it.
+    #[command(alias = "reboot-into")]
+    Boot {
+        /// Snapshot id, e.g. snap-0848359a.
+        id: String,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Reboot as soon as the one-shot is armed and verified. Without it, only
+        /// the arming happens, and the machine reboots when you say so.
+        #[arg(long)]
+        reboot: bool,
+    },
+
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
@@ -342,6 +367,11 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
         Cmd::Unhide { id, dry_run } => cmd_unhide(&store.paths, &id, dry_run),
         Cmd::Prune { id, dry_run } => cmd_prune(&store.paths, &id, dry_run),
+        Cmd::Boot {
+            id,
+            dry_run,
+            reboot,
+        } => cmd_boot(&store.paths, &id, dry_run, reboot),
     }
 }
 
@@ -745,6 +775,14 @@ fn register_dev(
     let existing_custom = std::fs::read_to_string(&store.paths.grub_custom).unwrap_or_default();
     let cmdline = register::cmdline_for(&vmlinuz)?;
 
+    // The image it was actually derived from, not whatever happens to be booted:
+    // `--from` can name any image, and claiming the booted snapshot as the parent
+    // records a lineage that does not exist.
+    let parent_label = targets
+        .parent
+        .clone()
+        .unwrap_or_else(|| register::parent_of(parent_image));
+
     let req = register::Request {
         id: id.clone(),
         description: description.to_string(),
@@ -754,18 +792,19 @@ fn register_dev(
         kernel_version,
         cmdline,
         root_uuid: register::root_uuid()?,
-        // The image it was actually derived from, not whatever happens to be
-        // booted: `--from` can name any image, and claiming the booted snapshot as
-        // the parent records a lineage that does not exist.
-        parent: targets
-            .parent
-            .clone()
-            .or_else(|| Some(register::parent_of(parent_image))),
+        parent: Some(parent_label.clone()),
         tree: Some(tree.path.clone()),
         // What the build actually relinked. `changed_files` below is the stronger
         // claim but only a checkout of its own can make it; this one is knowable
         // either way, and it is what answers "did my edit get picked up?".
         rebuilt_modules: rebuilt_modules.to_vec(),
+        // The one comparison worth recording: a parent that is a snapshot in this
+        // store has a module on disk, and matching digests mean this build produced
+        // what the parent already had. A parent that is a distro image has nothing to
+        // compare against, and the manifest says so rather than implying a change.
+        parent_module_md5: register::stored_module(&store.paths.root, &parent_label)
+            .map(|path| id::file_md5_hex(&path))
+            .filter(|md5| !md5.is_empty()),
         // Only a tree that is its own checkout can say what changed. Handing over
         // an empty list from a tree that cannot tell would record "nothing
         // changed", which is a different and false claim.
@@ -785,6 +824,43 @@ fn register_dev(
     }
     write::apply(&plan, targets.dry_run)?;
     Ok(id)
+}
+
+/// Arm a one-shot boot, and optionally reboot into it.
+///
+/// **The reboot waits for the verification.** `grub-reboot` reports success whether
+/// or not GRUB will honour `next_entry`, so rebooting on the strength of an exit code
+/// boots whatever the default happened to be — silently, and by the time anyone
+/// notices the machine is already coming up wrong. Arming is checked the way `pin` is
+/// checked, and only then does the machine go down.
+fn cmd_boot(paths: &Paths, id: &str, dry_run: bool, reboot: bool) -> Result<i32> {
+    let state = write::State::read(paths)?;
+    let plan = write::plan_boot(&state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+
+    if dry_run {
+        if reboot {
+            println!("\n--dry-run: the one-shot was not armed, so the machine was not rebooted.");
+        }
+        return Ok(0);
+    }
+
+    write::verify_boot(id)?;
+    println!("\nArmed: {id} boots next, once. After that the pinned default returns.");
+    if !reboot {
+        println!("Reboot when you are ready — `snaptune boot {id} --reboot` does both.");
+        return Ok(0);
+    }
+
+    println!("Rebooting...");
+    // Deliberately not checked: if `reboot` is missing or refuses, the arming has
+    // already happened and the operator has been told so — reporting a failure here
+    // would suggest the one-shot did not take when it did.
+    let _ = std::process::Command::new("reboot").status();
+    Ok(0)
 }
 
 /// One field that differs between two snapshots.
@@ -1255,6 +1331,43 @@ mod tests {
             parse_dev(&["--run", "--register"]).is_ok(),
             "--run --register is the shape that works"
         );
+    }
+
+    /// Arming and rebooting are separate, because arming is useful on its own: the
+    /// one-shot stays armed until the machine actually goes down.
+    #[test]
+    fn boot_arms_by_default_and_reboots_only_when_asked() {
+        let cmd = Cli::try_parse_from(["snaptune", "boot", "snap-aaaaaaaa"]).expect("parse");
+        match cmd.cmd {
+            Cmd::Boot {
+                id,
+                dry_run,
+                reboot,
+            } => {
+                assert_eq!(id, "snap-aaaaaaaa");
+                assert!(
+                    !dry_run,
+                    "arming is the point; it is not a dry run by default"
+                );
+                assert!(!reboot, "and the machine must not go down unless asked");
+            }
+            other => panic!("expected boot, got {other:?}"),
+        }
+
+        let cmd =
+            Cli::try_parse_from(["snaptune", "boot", "snap-aaaaaaaa", "--reboot", "--dry-run"])
+                .expect("parse");
+        assert!(matches!(
+            cmd.cmd,
+            Cmd::Boot {
+                reboot: true,
+                dry_run: true,
+                ..
+            }
+        ));
+
+        // The alias, spelled the way someone would guess it.
+        assert!(Cli::try_parse_from(["snaptune", "reboot-into", "snap-aaaaaaaa"]).is_ok());
     }
 
     /// A dry run has to be expressible without also building, so the plan can be
