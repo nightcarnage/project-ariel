@@ -121,6 +121,7 @@ dependencies = [
  "mem",
  "ratatui",
  "serde",
+ "snapshot",
  "toml",
  "wiki",
 ]
@@ -781,8 +782,12 @@ name = "snapshot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arieltune-tui-kit",
  "clap",
+ "crossterm",
+ "libc",
  "md-5",
+ "ratatui",
  "serde",
  "serde_json",
  "serde_yaml",

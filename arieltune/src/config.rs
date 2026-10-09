@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// The four tabs, in fixed left-to-right order. This IS the tab order.
-pub const TAB_ORDER: [&str; 4] = ["wiki", "bios", "apu", "mem"];
+pub const TAB_ORDER: [&str; 5] = ["wiki", "bios", "apu", "mem", "snapshot"];
 
 /// Resolve a tab name (case-insensitive) to its index in [`TAB_ORDER`].
 pub fn tab_index(name: &str) -> Option<usize> {
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn tab_order_is_wiki_bios_apu_mem() {
-        assert_eq!(TAB_ORDER, ["wiki", "bios", "apu", "mem"]);
+        assert_eq!(TAB_ORDER, ["wiki", "bios", "apu", "mem", "snapshot"]);
     }
 
     #[test]

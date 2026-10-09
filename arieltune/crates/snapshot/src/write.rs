@@ -1,0 +1,674 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! The write path: pin, unpin, hide, unhide.
+//!
+//! ## Plan, then apply
+//!
+//! Unlike the shell tool — which edits files as it goes, with `sed` ranges and a
+//! `mv` in the middle — every operation here is split in two:
+//!
+//! 1. [`State::read`] gathers the facts (what is booted, pinned, golden, which
+//!    manifests exist, what the GRUB files currently say);
+//! 2. a pure `plan_*` function turns those facts into a [`Plan`] of [`Action`]s;
+//! 3. [`apply`] executes the plan, or prints it under `--dry-run`.
+//!
+//! That buys three things the shell version cannot offer: the guards are
+//! testable without a blade, `--dry-run` is free and exact, and a refusal is
+//! decided *before* anything has been written rather than half-way through.
+//!
+//! ## The guards are not decoration
+//!
+//! Removing a snapshot's menu entry while it is the booted kernel, the golden
+//! image, or the pinned `saved_entry` leaves GRUB unable to resolve
+//! `saved_entry=snap-<gone>`; it falls back to entry 0 and boots a different
+//! kernel. The shell tool gained these guards only on 2026-10-09 — `hide` could
+//! do all three before that. They are reproduced here deliberately.
+
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
+
+use crate::grub;
+use crate::store::{Paths, Snapshot, Store};
+
+/// One thing to do. Deliberately data, not a closure, so a plan can be printed
+/// before it is applied and asserted in a test without touching a disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Replace a file's contents.
+    Write {
+        path: PathBuf,
+        contents: String,
+        what: String,
+    },
+    /// Move a file (the hide/unhide mechanism).
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        what: String,
+    },
+    /// Run a program. `argv[0]` is the program.
+    Run { argv: Vec<String>, what: String },
+}
+
+/// An ordered set of actions, plus why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    pub summary: String,
+    pub actions: Vec<Action>,
+}
+
+impl Plan {
+    /// Human-readable lines, one per action. This is what `--dry-run` prints.
+    pub fn describe(&self) -> Vec<String> {
+        self.actions
+            .iter()
+            .map(|action| match action {
+                Action::Write { path, what, .. } => {
+                    format!("write  {} ({})", path.display(), what)
+                }
+                Action::Rename { from, to, what } => {
+                    format!("rename {} -> {} ({})", from.display(), to.display(), what)
+                }
+                Action::Run { argv, what } => format!("run    {} ({})", argv.join(" "), what),
+            })
+            .collect()
+    }
+}
+
+/// Everything the planners need to know, read once.
+#[derive(Debug, Clone)]
+pub struct State {
+    pub booted: Option<String>,
+    pub golden: Option<String>,
+    pub pinned: Option<String>,
+    pub snapshots: Vec<Snapshot>,
+    pub custom: String,
+    pub grub_defaults: String,
+    /// `/etc/default/grub` path, so the planner can name it in an action.
+    pub grub_defaults_path: PathBuf,
+    /// Whether `/boot/acpi_override.cpio` exists (it is chained into the initrd).
+    pub acpi_override: bool,
+}
+
+impl State {
+    /// Read the live state of a blade.
+    pub fn read(paths: &Paths) -> Result<State> {
+        let store = Store::new(paths.clone());
+        Ok(State {
+            booted: store.booted_id(),
+            golden: store.golden_id(),
+            pinned: saved_entry(),
+            snapshots: store.discover()?,
+            custom: std::fs::read_to_string(&paths.grub_custom).unwrap_or_default(),
+            grub_defaults: std::fs::read_to_string(&paths.grub_defaults).unwrap_or_default(),
+            grub_defaults_path: paths.grub_defaults.clone(),
+            acpi_override: paths.boot.join("acpi_override.cpio").is_file(),
+        })
+    }
+
+    fn find(&self, id: &str) -> Option<&Snapshot> {
+        self.snapshots.iter().find(|s| s.id == id)
+    }
+}
+
+/// `saved_entry` from grubenv, via `grub-editenv` rather than a hand-written
+/// parser: grubenv carries a checksum and is not ours to reinterpret.
+pub fn saved_entry() -> Option<String> {
+    let out = std::process::Command::new("grub-editenv")
+        .arg("list")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("saved_entry=").map(str::to_string))
+}
+
+/// Refuse the three combinations that break a pin. See the module docs.
+fn guard_removable(state: &State, id: &str, verb: &str) -> Result<()> {
+    if state.booted.as_deref() == Some(id) {
+        bail!(
+            "cannot {verb} {id}: it is the booted snapshot. Boot another one first.\n\
+             Removing its entry would leave the running kernel unbootable."
+        );
+    }
+    if state.golden.as_deref() == Some(id) {
+        bail!(
+            "cannot {verb} {id}: it is the golden image.\n\
+             Remove /var/lib/kernel-snapshots/.golden-snapshot first if you really mean it."
+        );
+    }
+    if state.pinned.as_deref() == Some(id) {
+        bail!(
+            "cannot {verb} {id}: it is the pinned GRUB default.\n\
+             GRUB resolves saved_entry to its menu entry; removing that entry makes GRUB fall\n\
+             back to entry 0 and boot a different kernel. Pin another snapshot, or unpin first."
+        );
+    }
+    Ok(())
+}
+
+/// The `/etc/default/grub` edits `pin` needs: a saved default scheme, and the
+/// distro's submenus left alone.
+///
+/// Returns the new contents only when something actually changes, so a plan does
+/// not rewrite an unchanged file.
+fn grub_defaults_for_pin(current: &str) -> Option<String> {
+    let mut text = current.to_string();
+    let mut changed = false;
+
+    // GRUB_DEFAULT=saved, or grub-set-default silently does nothing.
+    let has_saved = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("GRUB_DEFAULT=saved"));
+    if !has_saved {
+        if text
+            .lines()
+            .any(|l| l.trim_start().starts_with("GRUB_DEFAULT="))
+        {
+            text = text
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("GRUB_DEFAULT=") {
+                        "GRUB_DEFAULT=saved".to_string()
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        } else {
+            text.push_str("\nGRUB_DEFAULT=saved\n");
+        }
+        text.push('\n');
+        changed = true;
+    }
+
+    // An earlier version of the shell tool forced GRUB_DISABLE_SUBMENU=true on
+    // every pin, which promoted the generated per-snapshot entries out of the
+    // submenu that hid them. Undo that, unless the operator asks for flat.
+    let keep_flat = std::env::var("SNAPSHOT_KEEP_FLAT").as_deref() == Ok("1");
+    if !keep_flat
+        && text.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("GRUB_DISABLE_SUBMENU=")
+                && (t.ends_with("true") || t.ends_with("yes") || t.ends_with("y"))
+        })
+    {
+        text = text
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                if t.starts_with("GRUB_DISABLE_SUBMENU=") {
+                    "GRUB_DISABLE_SUBMENU='false'".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push('\n');
+        changed = true;
+    }
+
+    changed.then_some(text)
+}
+
+/// `grub-mkconfig -o <grub.cfg>`, the regeneration every menu change needs.
+fn regen_action(paths: &Paths) -> Action {
+    Action::Run {
+        argv: vec![
+            "grub-mkconfig".to_string(),
+            "-o".to_string(),
+            paths.grub_cfg.display().to_string(),
+        ],
+        what: "regenerate the GRUB menu".to_string(),
+    }
+}
+
+/// Pin a snapshot as the permanent GRUB default.
+pub fn plan_pin(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
+    let Some(snapshot) = state.find(id) else {
+        bail!("snapshot {id} not found");
+    };
+    if snapshot.hidden {
+        bail!(
+            "cannot pin {id}: it is hidden. Unhide it first — a hidden snapshot has no menu entry."
+        );
+    }
+    if !snapshot.boot_artifacts_complete() {
+        bail!(
+            "cannot pin {id}: its boot artefacts are incomplete (vmlinuz {}, initramfs {}, cmdline {}).",
+            yn(snapshot.vmlinuz),
+            yn(snapshot.initramfs),
+            yn(snapshot.cmdline_file)
+        );
+    }
+    if !snapshot.grub_entry {
+        bail!(
+            "cannot pin {id}: it has no block in {} — regenerate the entry first.",
+            paths.grub_custom.display()
+        );
+    }
+
+    let mut actions = Vec::new();
+    if let Some(contents) = grub_defaults_for_pin(&state.grub_defaults) {
+        actions.push(Action::Write {
+            path: state.grub_defaults_path.clone(),
+            contents,
+            what: "use the saved-default scheme (GRUB_DEFAULT=saved)".to_string(),
+        });
+    }
+    actions.push(Action::Run {
+        argv: vec!["grub-set-default".to_string(), id.to_string()],
+        what: format!("set saved_entry={id}"),
+    });
+    actions.push(regen_action(paths));
+
+    Ok(Plan {
+        summary: format!("pin {id} as the permanent GRUB default"),
+        actions,
+    })
+}
+
+/// Revert to the distro kernel by clearing the pinned default.
+pub fn plan_unpin(paths: &Paths) -> Result<Plan> {
+    Ok(Plan {
+        summary: "unpin: revert the GRUB default to entry 0".to_string(),
+        actions: vec![
+            Action::Run {
+                argv: vec!["grub-set-default".to_string(), "0".to_string()],
+                what: "clear saved_entry".to_string(),
+            },
+            regen_action(paths),
+        ],
+    })
+}
+
+/// Take a snapshot off the list and off the menu. Reversible: `unhide` rebuilds.
+pub fn plan_hide(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
+    let Some(snapshot) = state.find(id) else {
+        bail!("snapshot {id} not found");
+    };
+    if snapshot.hidden {
+        bail!("{id} is already hidden");
+    }
+    guard_removable(state, id, "hide")?;
+
+    let dir = paths.root.join(id);
+    let mut actions = vec![Action::Rename {
+        from: dir.join("manifest.yaml"),
+        to: dir.join("manifest.yaml.hidden"),
+        what: "hide the manifest (data preserved)".to_string(),
+    }];
+
+    let (pruned, removed) = grub::remove_entry(&state.custom, id);
+    if removed {
+        actions.push(Action::Write {
+            path: paths.grub_custom.clone(),
+            contents: pruned,
+            what: "remove its menu entry".to_string(),
+        });
+        actions.push(regen_action(paths));
+    }
+
+    Ok(Plan {
+        summary: format!("hide {id} (off the list and off the menu; data preserved)"),
+        actions,
+    })
+}
+
+/// Bring a hidden snapshot back, rebuilding its menu entry from the manifest.
+pub fn plan_unhide(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
+    let Some(snapshot) = state.find(id) else {
+        bail!("snapshot {id} not found");
+    };
+    if !snapshot.hidden {
+        bail!("{id} is not hidden");
+    }
+
+    let dir = paths.root.join(id);
+    let mut actions = vec![Action::Rename {
+        from: dir.join("manifest.yaml.hidden"),
+        to: dir.join("manifest.yaml"),
+        what: "restore the manifest".to_string(),
+    }];
+
+    let manifest = snapshot
+        .manifest
+        .as_ref()
+        .context("cannot rebuild the entry: no readable manifest")?;
+    let entry = grub::entry_from_manifest(
+        manifest,
+        id,
+        if state.acpi_override {
+            Some(paths.boot.join("acpi_override.cpio"))
+        } else {
+            None
+        },
+    )?;
+    actions.push(Action::Write {
+        path: paths.grub_custom.clone(),
+        contents: format!("{}{}", state.custom, entry),
+        what: "rebuild its menu entry".to_string(),
+    });
+    actions.push(regen_action(paths));
+
+    Ok(Plan {
+        summary: format!("unhide {id} (menu entry rebuilt from the manifest)"),
+        actions,
+    })
+}
+
+fn yn(present: bool) -> &'static str {
+    if present {
+        "present"
+    } else {
+        "MISSING"
+    }
+}
+
+/// Execute a plan. With `dry_run`, print it and touch nothing.
+pub fn apply(plan: &Plan, dry_run: bool) -> Result<()> {
+    println!("{}", plan.summary);
+    for line in plan.describe() {
+        println!("  {line}");
+    }
+    if dry_run {
+        println!("\n--dry-run: nothing was changed.");
+        return Ok(());
+    }
+
+    for action in &plan.actions {
+        match action {
+            Action::Write { path, contents, .. } => {
+                std::fs::write(path, contents)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+            Action::Rename { from, to, .. } => {
+                std::fs::rename(from, to)
+                    .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            }
+            Action::Run { argv, .. } => {
+                let (program, args) = argv.split_first().context("empty argv")?;
+                let out = std::process::Command::new(program)
+                    .args(args)
+                    .output()
+                    .with_context(|| format!("running {program}"))?;
+                if !out.status.success() {
+                    // Stop at the first failure: a half-applied plan is worse
+                    // than a refused one, and the caller sees which step it was.
+                    bail!(
+                        "{} failed: {}",
+                        argv.join(" "),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Confirm a pin actually took, the way the shell tool does — `grub-set-default`
+/// can succeed while `GRUB_DEFAULT` (not `saved`) makes it inert.
+pub fn verify_pin(id: &str) -> Result<()> {
+    let now = saved_entry();
+    if now.as_deref() != Some(id) {
+        bail!(
+            "pin did not take: grubenv has saved_entry={}, expected {id}.\n\
+             Check that GRUB_DEFAULT=saved is in /etc/default/grub and that grub-mkconfig ran.",
+            now.as_deref().unwrap_or("<unset>")
+        );
+    }
+    Ok(())
+}
+
+/// Build a manifest for tests without touching a disk.
+#[cfg(test)]
+fn manifest_with(id: &str) -> crate::manifest::Manifest {
+    crate::manifest::Manifest::parse(&format!(
+            "snapshot:\n  id: \"{id}\"\n  description: \"test {id}\"\ngrub:\n  root_uuid: \"8387e4a0-b18f-4142-b61d-59fa9acc3865\"\nboot_files:\n  vmlinuz: \"/boot/vmlinuz-{id}\"\n  initramfs: \"/boot/initramfs-{id}.img\"\ncmdline: \"BOOT_IMAGE=/boot/vmlinuz-other root=UUID=8387e4a0 rw\"\n"
+        ))
+        .expect("parse")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths() -> Paths {
+        Paths::under("/fixture")
+    }
+
+    fn snapshot(id: &str, hidden: bool) -> Snapshot {
+        Snapshot {
+            id: id.to_string(),
+            manifest: Some(manifest_with(id)),
+            manifest_error: None,
+            hidden,
+            golden: false,
+            booted: false,
+            grub_entry: true,
+            vmlinuz: true,
+            initramfs: true,
+            cmdline_file: true,
+        }
+    }
+
+    fn state() -> State {
+        State {
+            booted: Some("snap-booted".to_string()),
+            golden: Some("snap-golden".to_string()),
+            pinned: Some("snap-pinned".to_string()),
+            snapshots: vec![
+                snapshot("snap-booted", false),
+                snapshot("snap-golden", false),
+                snapshot("snap-pinned", false),
+                snapshot("snap-target", false),
+                snapshot("snap-hidden", true),
+            ],
+            custom: grub::entry_from_manifest(&manifest_with("snap-target"), "snap-target", None)
+                .expect("render the existing entry"),
+            grub_defaults: "GRUB_DEFAULT=0\nGRUB_DISABLE_SUBMENU='false'\nGRUB_TIMEOUT=5\n"
+                .to_string(),
+            grub_defaults_path: PathBuf::from("/fixture/etc/default/grub"),
+            acpi_override: false,
+        }
+    }
+
+    // ---- guards ------------------------------------------------------------
+
+    #[test]
+    fn hide_refuses_the_booted_snapshot() {
+        let err = plan_hide(&paths(), &state(), "snap-booted").unwrap_err();
+        assert!(err.to_string().contains("booted snapshot"), "{err}");
+    }
+
+    #[test]
+    fn hide_refuses_the_golden_image() {
+        let err = plan_hide(&paths(), &state(), "snap-golden").unwrap_err();
+        assert!(err.to_string().contains("golden image"), "{err}");
+    }
+
+    #[test]
+    fn hide_refuses_the_pinned_default() {
+        let err = plan_hide(&paths(), &state(), "snap-pinned").unwrap_err();
+        assert!(err.to_string().contains("pinned GRUB default"), "{err}");
+        // ...and says the way out, because that is the actionable part.
+        assert!(err.to_string().contains("unpin"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_produces_no_actions() {
+        // The point of planning first: refusing must not have written anything.
+        assert!(plan_hide(&paths(), &state(), "snap-booted").is_err());
+    }
+
+    // ---- hide / unhide -----------------------------------------------------
+
+    #[test]
+    fn hide_renames_and_removes_the_entry() {
+        let plan = plan_hide(&paths(), &state(), "snap-target").expect("plans");
+        assert!(matches!(plan.actions[0], Action::Rename { .. }));
+        let removed = plan
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Write { contents, .. } => Some(contents.clone()),
+                _ => None,
+            })
+            .expect("writes 40_custom");
+        assert!(!removed.contains("snap-target"), "entry must be gone");
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::Run { argv, .. }
+            if argv[0] == "grub-mkconfig")));
+    }
+
+    #[test]
+    fn hide_of_an_already_hidden_snapshot_is_refused() {
+        let err = plan_hide(&paths(), &state(), "snap-hidden").unwrap_err();
+        assert!(err.to_string().contains("already hidden"), "{err}");
+    }
+
+    #[test]
+    fn unhide_restores_the_manifest_and_rebuilds_the_entry() {
+        let plan = plan_unhide(&paths(), &state(), "snap-hidden").expect("plans");
+        assert!(matches!(&plan.actions[0], Action::Rename { from, .. }
+            if from.ends_with("manifest.yaml.hidden")));
+        let written = plan
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Write { contents, .. } => Some(contents.clone()),
+                _ => None,
+            })
+            .expect("writes 40_custom");
+        assert!(
+            written.contains("# === snap-hidden:"),
+            "header our tool removes by"
+        );
+        assert!(written.contains("--id 'snap-hidden'"));
+    }
+
+    /// The rebuilt entry must carry the snapshot's OWN vmlinuz, because the
+    /// recorded cmdline names whichever kernel was booted at capture time.
+    #[test]
+    fn rebuilt_entry_rewrites_boot_image() {
+        let plan = plan_unhide(&paths(), &state(), "snap-hidden").expect("plans");
+        let written = plan
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Write { contents, .. } => Some(contents.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        // Scope to the block we appended: the file legitimately holds one
+        // BOOT_IMAGE per entry, so counting across the whole file proves nothing.
+        let rebuilt = written
+            .split("# === snap-hidden:")
+            .nth(1)
+            .expect("the new block is appended to the file");
+        assert!(rebuilt.contains("BOOT_IMAGE=/boot/vmlinuz-snap-hidden"));
+        assert!(!rebuilt.contains("vmlinuz-other"));
+        assert_eq!(rebuilt.matches("BOOT_IMAGE=").count(), 1);
+    }
+
+    // ---- pin / unpin -------------------------------------------------------
+
+    #[test]
+    fn pin_sets_saved_default_scheme_and_verifies() {
+        let mut st = state();
+        st.grub_defaults = "GRUB_DEFAULT=0\n".to_string();
+        let plan = plan_pin(&paths(), &st, "snap-target").expect("plans");
+
+        let defaults = plan
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Write { contents, .. } => Some(contents.clone()),
+                _ => None,
+            })
+            .expect("rewrites /etc/default/grub");
+        assert!(defaults.contains("GRUB_DEFAULT=saved"));
+        assert!(!defaults.contains("GRUB_DEFAULT=0"));
+
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::Run { argv, .. }
+            if argv == &vec!["grub-set-default".to_string(), "snap-target".to_string()])));
+    }
+
+    /// Nothing to change means no Write action — a pin must not rewrite an
+    /// already-correct /etc/default/grub.
+    #[test]
+    fn pin_leaves_grub_defaults_alone_when_already_saved() {
+        let mut st = state();
+        st.grub_defaults = "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU='false'\n".to_string();
+        let plan = plan_pin(&paths(), &st, "snap-target").expect("plans");
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Write { .. })),
+            "nothing needed writing: {:?}",
+            plan.describe()
+        );
+    }
+
+    /// The over-broad flattening an earlier shell version forced gets undone.
+    #[test]
+    fn pin_restores_submenus_when_they_were_forced_flat() {
+        let mut st = state();
+        st.grub_defaults = "GRUB_DEFAULT=saved\nGRUB_DISABLE_SUBMENU=true\n".to_string();
+        let plan = plan_pin(&paths(), &st, "snap-target").expect("plans");
+        let defaults = plan
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Write { contents, .. } => Some(contents.clone()),
+                _ => None,
+            })
+            .expect("rewrites defaults");
+        assert!(defaults.contains("GRUB_DISABLE_SUBMENU='false'"));
+    }
+
+    #[test]
+    fn pin_refuses_a_hidden_or_artefact_less_snapshot() {
+        let err = plan_pin(&paths(), &state(), "snap-hidden").unwrap_err();
+        assert!(err.to_string().contains("hidden"), "{err}");
+
+        let mut st = state();
+        if let Some(s) = st.snapshots.iter_mut().find(|s| s.id == "snap-target") {
+            s.initramfs = false;
+        }
+        let err = plan_pin(&paths(), &st, "snap-target").unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err}");
+    }
+
+    #[test]
+    fn unpin_clears_the_saved_entry() {
+        let plan = plan_unpin(&paths()).expect("plans");
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::Run { argv, .. }
+            if argv == &vec!["grub-set-default".to_string(), "0".to_string()])));
+    }
+
+    #[test]
+    fn plan_describe_names_every_action() {
+        let plan = plan_hide(&paths(), &state(), "snap-target").unwrap();
+        let lines = plan.describe();
+        assert_eq!(lines.len(), plan.actions.len());
+        assert!(lines.iter().any(|l| l.starts_with("rename")));
+        assert!(lines.iter().any(|l| l.starts_with("run")));
+    }
+}

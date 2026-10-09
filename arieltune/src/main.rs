@@ -22,10 +22,10 @@ use shell::Shell;
 #[command(
     name = "arieltune",
     version,
-    about = "BC-250 tuning suite: WIKI (manual), BIOS (CBS/OEM Setup), APU (liberation+clocks), MEM (GDDR6 timings).",
+    about = "BC-250 tuning suite: WIKI (manual), BIOS (CBS/OEM Setup), APU (liberation+clocks), MEM (GDDR6 timings), SNAPSHOTS (kernel snapshots).",
     long_about = "arieltune is the unified tuner for the ASRock BC-250 (Cyan Skillfish, gfx1013, PCI 1002:13FE).\n\
         \n\
-        Tabs (each is also a CLI namespace): apu, mem, bios, wiki.\n\
+        Tabs (each is also a CLI namespace): apu, mem, bios, wiki, snapshot.\n\
         Bare `arieltune` or `arieltune <tab>` opens the TUI; `arieltune <tab> <subcommand>` runs a CLI action.\n\
         \n\
         Safety model, common across tabs: most hardware-writing commands PREVIEW by default and only act\n\
@@ -37,7 +37,7 @@ use shell::Shell;
         Migrate/uninstall are suite-level and dry-run by default (need --apply)."
 )]
 struct Cli {
-    /// Open the TUI at this tab: wiki, bios, apu, or mem. Overrides the config default_tab.
+    /// Open the TUI at this tab: wiki, bios, apu, mem, or snapshot. Overrides the config default_tab.
     #[arg(long, global = true)]
     tab: Option<String>,
 
@@ -86,6 +86,22 @@ enum Top {
     Wiki {
         #[command(subcommand)]
         cmd: Option<wiki::Cmd>,
+    },
+    /// SNAPSHOTS tab: the kernel snapshot store and its GRUB entries. Bare `snapshot` opens the tab.
+    ///
+    /// `arieltune snapshot <subcommand>` runs the CLI. Reads are safe anywhere; `pin`, `unpin`,
+    /// `hide` and `unhide` change the boot configuration (/etc/grub.d, grubenv) and need root,
+    /// and every one of them takes --dry-run to print the plan first. The guards refuse to hide
+    /// the booted, golden, or pinned snapshot, because removing that menu entry makes GRUB fall
+    /// back to entry 0 and boot a different kernel.
+    ///
+    /// NOT IMPLEMENTED YET: create, register, rebuild, prune, boot. Those still belong to the
+    /// bc-250-snapshotter shell tool, which remains authoritative.
+    Snapshot {
+        #[command(flatten)]
+        global: snapshot::cli::Global,
+        #[command(subcommand)]
+        cmd: Option<snapshot::Cmd>,
     },
     /// Migrate a box from the four standalone tools onto the suite. Dry-run unless --apply.
     ///
@@ -186,6 +202,18 @@ fn real_main() -> Result<()> {
         // WIKI CLI is wired: a subcommand runs it; bare `arieltune wiki` opens the tab.
         Some(Top::Wiki { cmd: Some(c) }) => return wiki::run_cli(c),
         Some(Top::Wiki { cmd: None }) => Some("wiki"),
+        // SNAPSHOTS CLI is wired: a subcommand runs it; bare `snapshot` opens the tab.
+        Some(Top::Snapshot {
+            global,
+            cmd: Some(c),
+        }) => {
+            let code = snapshot::cli::run_with(global, c)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+        Some(Top::Snapshot { cmd: None, .. }) => Some("snapshot"),
         Some(Top::Tui) | None => None,
     };
 

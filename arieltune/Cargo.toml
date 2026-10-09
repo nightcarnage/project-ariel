@@ -24,6 +24,7 @@ wiki = { path = "crates/wiki" }
 bios = { path = "crates/bios" }
 mem = { path = "crates/mem" }
 apu = { path = "crates/apu" }
+snapshot = { path = "crates/snapshot" }
 
 [workspace]
 resolver = "2"

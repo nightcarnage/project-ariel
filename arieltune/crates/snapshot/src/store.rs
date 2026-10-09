@@ -37,6 +37,8 @@ pub const DEFAULT_BOOT: &str = "/boot";
 pub const DEFAULT_GRUB_CUSTOM: &str = "/etc/grub.d/40_custom";
 /// The generated GRUB menu.
 pub const DEFAULT_GRUB_CFG: &str = "/boot/grub/grub.cfg";
+/// GRUB's own settings, where `GRUB_DEFAULT=saved` must live for a pin to work.
+pub const DEFAULT_GRUB_DEFAULTS: &str = "/etc/default/grub";
 /// The kernel command line, read to learn which snapshot this boot came from.
 pub const DEFAULT_CMDLINE: &str = "/proc/cmdline";
 
@@ -48,6 +50,7 @@ pub struct Paths {
     pub grub_custom: PathBuf,
     pub grub_cfg: PathBuf,
     pub cmdline: PathBuf,
+    pub grub_defaults: PathBuf,
 }
 
 impl Default for Paths {
@@ -58,6 +61,7 @@ impl Default for Paths {
             grub_custom: PathBuf::from(DEFAULT_GRUB_CUSTOM),
             grub_cfg: PathBuf::from(DEFAULT_GRUB_CFG),
             cmdline: PathBuf::from(DEFAULT_CMDLINE),
+            grub_defaults: PathBuf::from(DEFAULT_GRUB_DEFAULTS),
         }
     }
 }
@@ -76,6 +80,7 @@ impl Paths {
             grub_custom: root.join("etc/grub.d/40_custom"),
             grub_cfg: root.join("boot/grub/grub.cfg"),
             cmdline: root.join("proc/cmdline"),
+            grub_defaults: root.join("etc/default/grub"),
             root,
         }
     }

@@ -63,12 +63,16 @@ impl Screen for StubScreen {
     }
 }
 
-/// The four tabs in fixed order WIKI | BIOS | APU | MEM.
+/// The five tabs in fixed order WIKI | BIOS | APU | MEM | SNAPSHOTS.
+///
+/// Order is the shell's business, not each screen's: it is what the `1`-`5` keys
+/// and `--tab` resolve against, so appending here is what makes a tab reachable.
 pub fn screens() -> Vec<Box<dyn Screen>> {
     vec![
         Box::new(wiki::screen()),
         Box::new(bios::screen()),
         Box::new(apu::screen()),
         Box::new(mem::screen()),
+        Box::new(snapshot::screen()),
     ]
 }

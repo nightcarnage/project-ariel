@@ -25,6 +25,11 @@
 
 use serde::Serialize;
 
+use anyhow::{Context, Result};
+use std::path::PathBuf;
+
+use crate::manifest::Manifest;
+
 /// One of our blocks in `/etc/grub.d/40_custom`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CustomEntry {
@@ -278,6 +283,75 @@ pub fn parse_menu_entries(grub_cfg: &str) -> Vec<MenuEntry> {
     entries
 }
 
+/// Rebuild a snapshot's `40_custom` block from its manifest.
+///
+/// Mirrors the shell tool's `grub_write_entry_from_manifest`, including the
+/// header and `--id` forms that [`remove_entry`] and the shell's `sed` both key
+/// on, so the two tools can edit the same file during a transition.
+///
+/// `BOOT_IMAGE=` is rewritten to this snapshot's own vmlinuz. The manifest's
+/// `cmdline` is the **live** one captured at the time, so it names whichever
+/// kernel was booted then — `snap-da794092`'s contains it twice, both pointing at
+/// a different snapshot. Every occurrence is dropped and exactly one is added.
+///
+/// Refuses rather than guessing: a manifest missing a field the entry needs is an
+/// error naming that field, because a half-written entry is not bootable and is
+/// hard to notice afterwards.
+pub fn entry_from_manifest(
+    manifest: &Manifest,
+    id: &str,
+    acpi_override: Option<PathBuf>,
+) -> Result<String> {
+    let description = manifest.description().unwrap_or_else(|| id.to_string());
+    let title = manifest
+        .entry_title()
+        .unwrap_or_else(|| format!("[{id}] {description}"));
+    let root_uuid = manifest
+        .root_uuid()
+        .context("cannot rebuild the entry: manifest has no grub.root_uuid")?;
+    let vmlinuz = manifest
+        .vmlinuz()
+        .context("cannot rebuild the entry: manifest has no boot_files.vmlinuz")?;
+    let initramfs = manifest
+        .initramfs()
+        .context("cannot rebuild the entry: manifest has no boot_files.initramfs")?;
+    let cmdline = manifest
+        .cmdline()
+        .context("cannot rebuild the entry: manifest has no cmdline")?;
+
+    let rest = strip_boot_image(&cmdline);
+    let initrd_prefix = match &acpi_override {
+        Some(path) => format!("{} ", path.display()),
+        None => String::new(),
+    };
+
+    Ok(format!(
+        "\n# === {id}: {description} ===\n\
+         # Restored by: snaptune\n\
+         menuentry '{title}' --id '{id}' {{\n\
+         \x20   insmod gzio\n\
+         \x20   insmod part_gpt\n\
+         \x20   insmod ext2\n\
+         \x20   search --no-floppy --fs-uuid --set=root {root_uuid}\n\
+         \x20   linux {vmlinuz} BOOT_IMAGE={vmlinuz}{rest}\n\
+         \x20   initrd {initrd_prefix}{initramfs}\n\
+         }}\n"
+    ))
+}
+
+/// Drop every `BOOT_IMAGE=` token, keeping the rest in order.
+///
+/// A whitespace split rather than a substitution, because the defect being
+/// defended against is a *duplicated* token and a regex replace would leave a
+/// doubled space or a stray one at the end.
+pub fn strip_boot_image(cmdline: &str) -> String {
+    cmdline
+        .split_whitespace()
+        .filter(|word| !word.starts_with("BOOT_IMAGE="))
+        .map(|word| format!(" {word}"))
+        .collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +473,83 @@ submenu 'Advanced options' --id 'advanced' {
             "Advanced options for CachyOS Linux>CachyOS Linux, with Linux linux-cachyos"
         );
         assert_eq!(entries[0].display_id(), "x-advanced-y");
+    }
+
+    // ---- entry rendering ---------------------------------------------------
+
+    fn manifest(id: &str, cmdline: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "snapshot:\n  id: \"{id}\"\n  description: \"a test snapshot\"\ngrub:\n  entry_title: \"[{id}] a test snapshot\"\n  root_uuid: \"8387e4a0-b18f-4142-b61d-59fa9acc3865\"\nboot_files:\n  vmlinuz: \"/boot/vmlinuz-{id}\"\n  initramfs: \"/boot/initramfs-{id}.img\"\ncmdline: \"{cmdline}\"\n"
+        ))
+        .expect("parse")
+    }
+
+    /// The block we write must be one our own parser removes — that is the
+    /// interop contract, and the shell tool matches the same header line.
+    #[test]
+    fn entry_round_trips_through_the_parser() {
+        let m = manifest(
+            "snap-abc12345",
+            "BOOT_IMAGE=/boot/vmlinuz-other root=UUID=x rw",
+        );
+        let entry = entry_from_manifest(&m, "snap-abc12345", None).expect("renders");
+
+        assert!(entry.contains("# === snap-abc12345: a test snapshot ==="));
+        assert!(entry.contains("--id 'snap-abc12345'"));
+
+        let parsed = parse_custom(&entry);
+        assert_eq!(parsed.len(), 1, "exactly one block: {entry}");
+        assert_eq!(parsed[0].id, "snap-abc12345");
+
+        // ...and removing it from a file that contains it works.
+        let file = format!("#!/bin/sh\nexec tail -n +3 $0\n{entry}");
+        let (after, removed) = remove_entry(&file, "snap-abc12345");
+        assert!(removed);
+        assert!(!after.contains("snap-abc12345"));
+        assert!(after.contains("exec tail -n +3 $0"));
+    }
+
+    /// The recorded cmdline names whichever kernel was booted at capture time, so
+    /// the rebuilt entry must carry this snapshot's own vmlinuz — exactly once.
+    #[test]
+    fn entry_rewrites_boot_image_to_the_snapshots_own_vmlinuz() {
+        let m = manifest(
+            "snap-abc12345",
+            "BOOT_IMAGE=/boot/vmlinuz-snap-2d2b1734 BOOT_IMAGE=/boot/vmlinuz-snap-2d2b1734 root=UUID=8387e4a0 rw",
+        );
+        let entry = entry_from_manifest(&m, "snap-abc12345", None).expect("renders");
+        assert_eq!(entry.matches("BOOT_IMAGE=").count(), 1);
+        assert!(entry.contains("BOOT_IMAGE=/boot/vmlinuz-snap-abc12345"));
+        assert!(!entry.contains("vmlinuz-snap-2d2b1734"));
+        assert!(entry.contains(" root=UUID=8387e4a0 rw\n"));
+    }
+
+    #[test]
+    fn entry_chains_the_acpi_override_when_present() {
+        let m = manifest("snap-abc12345", "root=UUID=x rw");
+        let entry = entry_from_manifest(
+            &m,
+            "snap-abc12345",
+            Some(PathBuf::from("/boot/acpi_override.cpio")),
+        )
+        .expect("renders");
+        assert!(entry.contains("initrd /boot/acpi_override.cpio /boot/initramfs-snap-abc12345.img"));
+    }
+
+    #[test]
+    fn entry_refuses_a_manifest_missing_a_field() {
+        let bare = Manifest::parse("snapshot:\n  id: \"snap-x\"\n").expect("parses");
+        let err = entry_from_manifest(&bare, "snap-x", None).unwrap_err();
+        assert!(err.to_string().contains("root_uuid"), "{err}");
+    }
+
+    #[test]
+    fn strip_boot_image_drops_every_occurrence() {
+        assert_eq!(
+            strip_boot_image("BOOT_IMAGE=/a BOOT_IMAGE=/a root=UUID=x rw"),
+            " root=UUID=x rw"
+        );
+        assert_eq!(strip_boot_image("root=UUID=x"), " root=UUID=x");
+        assert_eq!(strip_boot_image(""), "");
     }
 }

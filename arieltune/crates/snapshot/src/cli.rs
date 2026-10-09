@@ -17,21 +17,38 @@ use serde::Serialize;
 
 use crate::grub;
 use crate::store::{Paths, Snapshot, Store};
+use crate::write;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "snaptune",
     version,
     about = "BC-250 snapshots: what is on this blade, and which one did I boot?",
-    long_about = "Read-only view of the bc-250-snapshotter store.\n\
+    long_about = "Snapshot store: list, inspect, and manage the GRUB menu entries of\n\
+        kernel snapshots created by the bc-250-snapshotter.\n\
         \n\
-        Lists snapshots and their boot artefacts, reports which snapshot the running kernel\n\
-        came from, walks the parent lineage, and shows GRUB menu entries with their nesting.\n\
+        Reads are safe anywhere. The four writers -- pin, unpin, hide, unhide -- edit\n\
+        /etc/grub.d/40_custom and grubenv and so need root, and each takes --dry-run to\n\
+        print exactly what it would do first.\n\
         \n\
-        This build cannot modify anything. Snapshot creation, pinning and removal still belong\n\
-        to the shell tool until this agrees with it on every blade."
+        NOT IMPLEMENTED YET: create, register, rebuild, prune, boot, verify. Those still\n\
+        belong to the shell tool, which remains authoritative."
 )]
 pub struct Cli {
+    #[command(flatten)]
+    pub global: Global,
+
+    #[command(subcommand)]
+    pub cmd: Cmd,
+}
+
+/// Options every verb shares.
+///
+/// Flattened into [`Cli`] for the standalone `snaptune`, and into the suite's
+/// `arieltune snapshot` namespace too — the same arrangement `bios::Global` uses,
+/// so the two entry points cannot drift apart.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct Global {
     /// Read a snapshot store from this root instead of /var/lib/kernel-snapshots.
     /// Boot, GRUB and cmdline paths are taken from under it too, so a fixture is
     /// readable end to end.
@@ -41,9 +58,6 @@ pub struct Cli {
     /// Emit JSON instead of a text table.
     #[arg(long, global = true)]
     pub json: bool,
-
-    #[command(subcommand)]
-    pub cmd: Cmd,
 }
 
 #[derive(Subcommand, Debug)]
@@ -74,9 +88,43 @@ pub enum Cmd {
     /// List GRUB menu entries, marking the nested ones.
     #[command(name = "grub-list", alias = "grublist", alias = "grub")]
     GrubList,
+
+    /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
+    Pin {
+        /// Snapshot id, e.g. snap-0848359a.
+        id: String,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Revert the GRUB default to entry 0 (the distro kernel). Needs root.
+    Unpin {
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Take a snapshot off the list AND off the GRUB menu. Data is preserved.
+    Hide {
+        /// Snapshot id to hide.
+        id: String,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Restore a hidden snapshot, rebuilding its GRUB entry from the manifest.
+    Unhide {
+        /// Snapshot id to restore.
+        id: String,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
-impl Cli {
+impl Global {
     fn paths(&self) -> Paths {
         match &self.root {
             Some(root) => Paths::under(root),
@@ -134,17 +182,100 @@ impl Row {
     }
 }
 
-/// Run a command. Returns a process exit code so callers can shell out to this
-/// the way they shell out to `snapshot`.
+/// Run a command from the standalone binary. Returns a process exit code so
+/// callers can shell out to this the way they shell out to `snapshot`.
 pub fn run(cli: Cli) -> Result<i32> {
-    let store = cli.store();
-    match cli.cmd {
-        Cmd::List { ids, all } => cmd_list(&store, ids, all, cli.json),
-        Cmd::Show { id } => cmd_show(&store, &id, cli.json),
-        Cmd::Current => cmd_current(&store, cli.json),
-        Cmd::Lineage => cmd_lineage(&store, cli.json),
-        Cmd::GrubList => cmd_grub_list(&store, cli.json),
+    run_with(cli.global, cli.cmd)
+}
+
+/// Run a command from a namespaced entry point (`arieltune snapshot …`), which
+/// owns its own flattened [`Global`].
+pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
+    let store = global.store();
+    let json = global.json;
+    match cmd {
+        Cmd::List { ids, all } => cmd_list(&store, ids, all, json),
+        Cmd::Show { id } => cmd_show(&store, &id, json),
+        Cmd::Current => cmd_current(&store, json),
+        Cmd::Lineage => cmd_lineage(&store, json),
+        Cmd::GrubList => cmd_grub_list(&store, json),
+        Cmd::Pin { id, dry_run } => cmd_pin(&store.paths, &id, dry_run),
+        Cmd::Unpin { dry_run } => cmd_unpin(&store.paths, dry_run),
+        Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
+        Cmd::Unhide { id, dry_run } => cmd_unhide(&store.paths, &id, dry_run),
     }
+}
+
+/// The writers touch /etc/grub.d, /boot/grub and grubenv. Say so up front rather
+/// than letting the first write fail with a bare EACCES.
+fn require_root() -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        anyhow::bail!(
+            "this verb changes the boot configuration and needs root.\n\
+             Re-run with sudo (or use --dry-run, which only prints the plan)."
+        );
+    }
+    Ok(())
+}
+
+fn cmd_pin(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
+    // The plan refuses anything unsafe BEFORE a single byte is written.
+    let state = write::State::read(paths)?;
+    let plan = write::plan_pin(paths, &state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        write::verify_pin(id)?;
+        println!("\nPinned: {id}");
+    }
+    Ok(0)
+}
+
+fn cmd_unpin(paths: &Paths, dry_run: bool) -> Result<i32> {
+    let plan = write::plan_unpin(paths)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        let now = write::saved_entry().unwrap_or_else(|| "<unset>".to_string());
+        if now != "0" {
+            eprintln!("warning: saved_entry is '{now}' after unpin, expected '0'");
+        }
+        println!("\nUnpinned: the GRUB default is entry 0 again.");
+    }
+    Ok(0)
+}
+
+fn cmd_hide(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
+    let state = write::State::read(paths)?;
+    let plan = write::plan_hide(paths, &state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        println!("\nHidden: {id}");
+        println!("Data preserved — 'snaptune unhide {id}' rebuilds the menu entry.");
+        println!(" Note: the distro's OWN generated entry for this kernel, if any, is not");
+        println!(" this tool's to remove — it sits under the distro's 'Advanced options'.");
+    }
+    Ok(0)
+}
+
+fn cmd_unhide(paths: &Paths, id: &str, dry_run: bool) -> Result<i32> {
+    let state = write::State::read(paths)?;
+    let plan = write::plan_unhide(paths, &state, id)?;
+    if !dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, dry_run)?;
+    if !dry_run {
+        println!("\nUnhidden: {id} (menu entry rebuilt)");
+    }
+    Ok(0)
 }
 
 fn cmd_list(store: &Store, ids_only: bool, all: bool, json: bool) -> Result<i32> {

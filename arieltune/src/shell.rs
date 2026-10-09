@@ -5,7 +5,7 @@
 //!
 //! Global keys (only when the active screen is not modal, and only as an `Ignored`
 //! fallback after the pane sees the key first):
-//!   1..4            -> jump to WIKI/BIOS/APU/MEM (F1-F4 and Alt-1..4 also work)
+//!   1..5            -> jump to WIKI/BIOS/APU/MEM/SNAPSHOTS (F1-F5 and Alt-1..5 also work)
 //!   Ctrl-Tab        -> next tab       Ctrl-Shift-Tab -> previous tab
 //!   Ctrl-Q          -> quit the whole suite
 //! Bare `Tab`/`Shift-Tab`/`q` are left to the panes, which bind them internally.
@@ -103,18 +103,20 @@ impl Shell {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         match k.code {
-            // Bare 1-4 jump directly to a tab. The shell only sees these when the
+            // Bare 1-5 jump directly to a tab. The shell only sees these when the
             // active pane returned Ignored (i.e. it is not modal and does not want
             // the digit), so a pane's own number use is never stolen. The `Char`
-            // arms also match Alt-1..4, and F1-F4 stay as aliases.
+            // arms also match Alt-1..5, and F1-F5 stay as aliases.
             KeyCode::Char('1') => self.switch_to(0),
             KeyCode::Char('2') => self.switch_to(1),
             KeyCode::Char('3') => self.switch_to(2),
             KeyCode::Char('4') => self.switch_to(3),
+            KeyCode::Char('5') => self.switch_to(4),
             KeyCode::F(1) => self.switch_to(0),
             KeyCode::F(2) => self.switch_to(1),
             KeyCode::F(3) => self.switch_to(2),
             KeyCode::F(4) => self.switch_to(3),
+            KeyCode::F(5) => self.switch_to(4),
             KeyCode::Char('q') if ctrl => return Some(Flow::Quit),
             KeyCode::BackTab if ctrl => self.cycle(-1),
             KeyCode::Tab if ctrl && shift => self.cycle(-1),
@@ -174,7 +176,7 @@ impl Shell {
 
     fn draw_status(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let mut spans: Vec<Span> = Vec::new();
-        spans.extend(widgets::key_hint("1-4", "tabs"));
+        spans.extend(widgets::key_hint("1-5", "tabs"));
         spans.push(Span::raw("   "));
         spans.extend(widgets::key_hint("^Q", "quit"));
         if let Some(hint) = self.screens[self.active].status_hint() {
