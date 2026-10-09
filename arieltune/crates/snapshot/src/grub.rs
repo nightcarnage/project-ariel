@@ -25,7 +25,7 @@
 
 use serde::Serialize;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 use crate::manifest::Manifest;
@@ -283,6 +283,84 @@ pub fn parse_menu_entries(grub_cfg: &str) -> Vec<MenuEntry> {
     entries
 }
 
+/// A table of entries, for when the caller has to say what was available.
+fn entry_table(entries: &[MenuEntry]) -> String {
+    if entries.is_empty() {
+        return "  (grub.cfg has no menu entries at all)".to_string();
+    }
+    let mut out = String::new();
+    for entry in entries {
+        let nested = if entry.submenu.is_some() {
+            "  [nested]"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "  {:<50} {}{nested}\n",
+            entry.display_id(),
+            entry.title
+        ));
+    }
+    out
+}
+
+/// The argument `grub-reboot` should be given for `want`, or the reason it must
+/// not be armed at all.
+///
+/// **Why this is a lookup and not a pass-through.** `grub-reboot` writes
+/// `next_entry` whether or not GRUB can resolve what it was handed, and an
+/// unresolvable value does not fail: GRUB boots **entry 0** instead — silently,
+/// and taking the place of a correctly-saved default. Confirmed on blade 115,
+/// where arming a bare nested id (a real `--id` present in the file) booted
+/// "CachyOS Linux". So the entry is resolved here first and anything that cannot
+/// be resolved is refused rather than written.
+///
+/// A nested entry is accepted only under its full `Parent>Child` path, which is
+/// what GRUB's `get_entry_number()` needs; the bare id is the thing that
+/// silently boots entry 0.
+///
+/// Refuses ambiguity rather than taking the first match: a title that appears in
+/// two submenus would otherwise arm whichever happens to come first in the file,
+/// which is not a coin worth flipping on a machine you may only reach over the
+/// network.
+pub fn resolve_boot_entry(entries: &[MenuEntry], want: &str) -> Result<String> {
+    let matches: Vec<&MenuEntry> = entries
+        .iter()
+        .filter(|e| e.id.as_deref() == Some(want) || e.title == want || e.path() == want)
+        .collect();
+
+    let entry = match matches.as_slice() {
+        [] => bail!(
+            "no GRUB entry is called '{want}'.\n{}",
+            entry_table(entries)
+        ),
+        [one] => *one,
+        many => bail!(
+            "'{want}' matches {} entries, so which to boot is ambiguous:\n{}\n\
+             Name the one you mean by its full path.",
+            many.len(),
+            many.iter()
+                .map(|e| format!("  {}", e.path()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
+
+    if let Some(parent) = &entry.submenu {
+        if want != entry.path() {
+            bail!(
+                "cannot arm '{want}': it is inside the submenu '{parent}'.\n\n\
+                 grub-reboot needs the submenu path, not a bare nested id. Given the bare\n\
+                 id it matches nothing and boots entry 0 — silently, and it takes the place\n\
+                 of a correctly-saved default.\n\n\
+                 Use: snaptune boot --entry '{}'",
+                entry.path()
+            );
+        }
+    }
+    Ok(want.to_string())
+}
+
 /// Rebuild a snapshot's `40_custom` block from its manifest.
 ///
 /// Mirrors the shell tool's `grub_write_entry_from_manifest`, including the
@@ -453,6 +531,117 @@ submenu 'Advanced options' --id 'advanced' {
         assert_eq!(
             entries[2].path(),
             "Advanced options>with Linux linux-cachyos"
+        );
+    }
+
+    /// The fixture the `resolve_boot_entry` tests read: one top-level entry with an
+    /// id, one submenu holding a real nested entry, and one title-only entry.
+    const CFG: &str = r#"menuentry 'CachyOS Linux' --id 'cachyos' {
+	linux /vmlinuz-linux-cachyos
+}
+submenu 'Advanced options for CachyOS' --id 'advanced' {
+	menuentry 'CachyOS Linux, with Linux linux-cachyos-lts' --id 'gnulinux-lts-advanced-3f2a' {
+		linux /vmlinuz-linux-cachyos-lts
+	}
+}
+menuentry 'Memory Test (memtest86+)' {
+	tar
+}
+"#;
+
+    #[test]
+    fn a_top_level_entry_resolves_by_id_and_by_title() {
+        let entries = parse_menu_entries(CFG);
+        assert_eq!(
+            resolve_boot_entry(&entries, "cachyos").unwrap(),
+            "cachyos",
+            "the --id is what grub-reboot is usually given"
+        );
+        assert_eq!(
+            resolve_boot_entry(&entries, "CachyOS Linux").unwrap(),
+            "CachyOS Linux",
+            "the exact title is the other thing grub-reboot accepts"
+        );
+        assert_eq!(
+            resolve_boot_entry(&entries, "Memory Test (memtest86+)").unwrap(),
+            "Memory Test (memtest86+)",
+            "an entry with no --id is still reachable by title"
+        );
+    }
+
+    /// The refusal this exists for: a real nested `--id`, present in the file, that
+    /// grub-reboot cannot resolve. Arming it boots entry 0 instead, silently, and
+    /// takes the place of a correctly-saved default.
+    #[test]
+    fn a_bare_nested_id_is_refused_with_the_path_to_use_instead() {
+        let entries = parse_menu_entries(CFG);
+        let why = resolve_boot_entry(&entries, "gnulinux-lts-advanced-3f2a")
+            .expect_err("the bare nested id must not be armed");
+        assert!(
+            why.to_string()
+                .contains("inside the submenu 'Advanced options"),
+            "the refusal must name the submenu: {why}"
+        );
+        assert!(
+            why.to_string().contains(
+                "Advanced options for CachyOS>CachyOS Linux, with Linux linux-cachyos-lts"
+            ),
+            "and give the exact path to use instead: {why}"
+        );
+    }
+
+    #[test]
+    fn a_nested_entry_resolves_when_named_by_its_full_path() {
+        let entries = parse_menu_entries(CFG);
+        let path = "Advanced options for CachyOS>CachyOS Linux, with Linux linux-cachyos-lts";
+        assert_eq!(
+            resolve_boot_entry(&entries, path).unwrap(),
+            path,
+            "the path is what get_entry_number() needs, so it is the way through"
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_is_refused_before_anything_is_written() {
+        let entries = parse_menu_entries(CFG);
+        let why = resolve_boot_entry(&entries, "linux-lts")
+            .expect_err("a substring must not count as a match");
+        let text = why.to_string();
+        assert!(
+            text.contains("no GRUB entry is called 'linux-lts'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("cachyos"),
+            "and it should list what there is: {text}"
+        );
+        assert!(text.contains("[nested]"), "marking the nested ones: {text}");
+    }
+
+    /// Two entries with the same title in different submenus: taking the first
+    /// would arm whichever happens to come first in the file.
+    #[test]
+    fn an_ambiguous_title_is_refused_rather_than_guessed() {
+        let cfg = r#"submenu 'A' {
+	menuentry 'Same Title' --id 'a-same' { linux /vmlinuz }
+}
+submenu 'B' {
+	menuentry 'Same Title' --id 'b-same' { linux /vmlinuz }
+}
+"#;
+        let entries = parse_menu_entries(cfg);
+        let why = resolve_boot_entry(&entries, "Same Title").expect_err("ambiguous");
+        let text = why.to_string();
+        assert!(text.contains("ambiguous"), "{text}");
+        assert!(
+            text.contains("A>Same Title") && text.contains("B>Same Title"),
+            "{text}"
+        );
+
+        // ...and the path resolves it.
+        assert_eq!(
+            resolve_boot_entry(&entries, "B>Same Title").unwrap(),
+            "B>Same Title"
         );
     }
 

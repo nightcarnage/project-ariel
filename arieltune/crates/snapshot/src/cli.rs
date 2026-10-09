@@ -201,7 +201,21 @@ pub enum Cmd {
     #[command(alias = "reboot-into")]
     Boot {
         /// Snapshot id, e.g. snap-0848359a.
-        id: String,
+        #[arg(required_unless_present = "entry")]
+        id: Option<String>,
+        /// Boot any GRUB entry — the distro's kernel, an LTS kernel, a rescue
+        /// entry — by its `--id` or its title, on the next boot only.
+        ///
+        /// The entry is looked up in `grub.cfg` first and refused if it is not
+        /// there, because `grub-reboot` writes `next_entry` either way: handed
+        /// something GRUB cannot resolve it boots **entry 0**, silently, in place
+        /// of a correctly-saved default.
+        ///
+        /// An entry inside a submenu must be named by its full `Parent>Child`
+        /// path. Its bare `--id` is exactly the value that boots entry 0, so it is
+        /// refused with the path to use instead.
+        #[arg(long, value_name = "ID", conflicts_with = "id")]
+        entry: Option<String>,
         /// Print the plan and change nothing.
         #[arg(long)]
         dry_run: bool,
@@ -580,9 +594,15 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::Prune { id, dry_run } => cmd_prune(&store.paths, &id, dry_run),
         Cmd::Boot {
             id,
+            entry,
             dry_run,
             reboot,
-        } => cmd_boot(&store.paths, &id, dry_run, reboot),
+        } => match (id, entry) {
+            (_, Some(entry)) => cmd_boot_entry(&store.paths, &entry, dry_run, reboot),
+            (Some(id), None) => cmd_boot(&store.paths, &id, dry_run, reboot),
+            // clap requires one of them, so this is unreachable via the parser.
+            (None, None) => anyhow::bail!("boot needs a snapshot id or --entry <grub-id>"),
+        },
         Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
         Cmd::Verify { id, json } => cmd_verify(&store, id.as_deref(), json),
         Cmd::Rebuild {
@@ -1135,20 +1155,51 @@ fn register_build(
     Ok(id)
 }
 
-/// Arm a one-shot boot, and optionally reboot into it.
+/// Arm a one-shot boot into a snapshot, and optionally reboot into it.
+fn cmd_boot(paths: &Paths, id: &str, dry_run: bool, reboot: bool) -> Result<i32> {
+    let state = write::State::read(paths)?;
+    let plan = write::plan_boot(&state, id)?;
+    arm_and_maybe_reboot(&plan, id, dry_run, reboot)
+}
+
+/// Arm a one-shot boot into any GRUB entry, snapshot or not.
+///
+/// The entry is resolved against `grub.cfg` *before* anything is written, because
+/// `grub-reboot` writes `next_entry` whether or not GRUB can resolve it and an
+/// unresolvable value silently boots entry 0 instead. That resolution is where the
+/// submenu refusal lives.
+fn cmd_boot_entry(paths: &Paths, entry: &str, dry_run: bool, reboot: bool) -> Result<i32> {
+    let text = std::fs::read_to_string(&paths.grub_cfg).with_context(|| {
+        format!(
+            "reading {} — resolving a GRUB entry needs the generated grub.cfg, \
+             and it is only readable by root",
+            paths.grub_cfg.display()
+        )
+    })?;
+    let entries = grub::parse_menu_entries(&text);
+    let entry = grub::resolve_boot_entry(&entries, entry)?;
+
+    let plan = write::plan_boot_entry(&entry);
+    arm_and_maybe_reboot(&plan, &entry, dry_run, reboot)
+}
+
+/// Write the arming, check it took, and reboot only if asked.
 ///
 /// **The reboot waits for the verification.** `grub-reboot` reports success whether
 /// or not GRUB will honour `next_entry`, so rebooting on the strength of an exit code
 /// boots whatever the default happened to be — silently, and by the time anyone
 /// notices the machine is already coming up wrong. Arming is checked the way `pin` is
 /// checked, and only then does the machine go down.
-fn cmd_boot(paths: &Paths, id: &str, dry_run: bool, reboot: bool) -> Result<i32> {
-    let state = write::State::read(paths)?;
-    let plan = write::plan_boot(&state, id)?;
+fn arm_and_maybe_reboot(
+    plan: &write::Plan,
+    armed: &str,
+    dry_run: bool,
+    reboot: bool,
+) -> Result<i32> {
     if !dry_run {
         require_root()?;
     }
-    write::apply(&plan, dry_run)?;
+    write::apply(plan, dry_run)?;
 
     if dry_run {
         if reboot {
@@ -1157,10 +1208,10 @@ fn cmd_boot(paths: &Paths, id: &str, dry_run: bool, reboot: bool) -> Result<i32>
         return Ok(0);
     }
 
-    write::verify_boot(id)?;
-    println!("\nArmed: {id} boots next, once. After that the pinned default returns.");
+    write::verify_boot(armed)?;
+    println!("\nArmed: {armed} boots next, once. After that the pinned default returns.");
     if !reboot {
-        println!("Reboot when you are ready — `snaptune boot {id} --reboot` does both.");
+        println!("Reboot when you are ready — adding --reboot does both.");
         return Ok(0);
     }
 
@@ -2658,6 +2709,39 @@ mod tests {
         );
     }
 
+    /// A snapshot id and a GRUB entry are different things, and `boot` takes one or
+    /// the other — never neither, and never both.
+    #[test]
+    fn boot_takes_a_snapshot_id_or_a_grub_entry_but_not_both() {
+        let cmd = Cli::try_parse_from(["snaptune", "boot", "--entry", "cachyos"]).expect("parse");
+        match cmd.cmd {
+            Cmd::Boot { id, entry, .. } => {
+                assert!(id.is_none(), "an entry is not a snapshot id");
+                assert_eq!(entry.as_deref(), Some("cachyos"));
+            }
+            other => panic!("expected boot, got {other:?}"),
+        }
+
+        // A nested entry is named by its path, so the value may contain `>` and
+        // spaces — it must survive as one argument.
+        let path = "Advanced options>CachyOS Linux, with Linux linux-cachyos-lts";
+        let cmd = Cli::try_parse_from(["snaptune", "boot", "--entry", path]).expect("parse");
+        match cmd.cmd {
+            Cmd::Boot { entry, .. } => assert_eq!(entry.as_deref(), Some(path)),
+            other => panic!("expected boot, got {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["snaptune", "boot"]).is_err(),
+            "with neither, boot has nothing to do — and must not guess entry 0"
+        );
+        assert!(
+            Cli::try_parse_from(["snaptune", "boot", "snap-aaaaaaaa", "--entry", "cachyos"])
+                .is_err(),
+            "both at once is ambiguous about what to arm"
+        );
+    }
+
     /// Arming and rebooting are separate, because arming is useful on its own: the
     /// one-shot stays armed until the machine actually goes down.
     #[test]
@@ -2666,10 +2750,12 @@ mod tests {
         match cmd.cmd {
             Cmd::Boot {
                 id,
+                entry,
                 dry_run,
                 reboot,
             } => {
-                assert_eq!(id, "snap-aaaaaaaa");
+                assert_eq!(id.as_deref(), Some("snap-aaaaaaaa"));
+                assert!(entry.is_none(), "a snapshot id is not a GRUB entry");
                 assert!(
                     !dry_run,
                     "arming is the point; it is not a dry run by default"

@@ -419,6 +419,27 @@ pub fn plan_boot(state: &State, id: &str) -> Result<Plan> {
     })
 }
 
+/// Arm a one-shot boot into any GRUB entry.
+///
+/// Unlike [`plan_boot`] there is no snapshot to look up: the point is to boot
+/// something that is *not* one — the distro's own kernel, an LTS kernel, a rescue
+/// entry. The check that matters happens before this, in
+/// [`crate::grub::resolve_boot_entry`]: an entry GRUB cannot resolve boots entry 0
+/// instead, and a silent wrong boot is worse than not arming at all.
+///
+/// One-shot for the same reason as [`plan_boot`]: `next_entry` is consumed and
+/// cleared by the bootloader, so an entry that will not come up falls back to the
+/// saved default by itself.
+pub fn plan_boot_entry(entry: &str) -> Plan {
+    Plan {
+        summary: format!("boot GRUB entry '{entry}' on the next boot only, then reboot now"),
+        actions: vec![Action::Run {
+            argv: vec!["grub-reboot".to_string(), entry.to_string()],
+            what: format!("arm a one-shot boot into '{entry}' (the boot after falls back)"),
+        }],
+    }
+}
+
 /// Take a snapshot off the list and off the menu. Reversible: `unhide` rebuilds.
 pub fn plan_hide(paths: &Paths, state: &State, id: &str) -> Result<Plan> {
     let Some(snapshot) = state.find(id) else {

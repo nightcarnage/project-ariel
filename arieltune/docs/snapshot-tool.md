@@ -239,6 +239,7 @@ porting before that step is safe.
 | `rebuild <id>` | rebuild that snapshot's module as a **new** snapshot | same | yes |
 | `register --module … --initramfs … --vmlinuz …` | register artefacts you built yourself (`import`) | store + `/boot` + `40_custom` | yes |
 | `boot <id>` | arm a one-shot boot; `--reboot` also restarts | grubenv | yes |
+| `boot --entry <grub-id>` | the same, into *any* GRUB entry — the distro's kernel, LTS, rescue | grubenv | yes |
 | `pin <id>` / `unpin` | the permanent GRUB default | grubenv | yes |
 | `hide <id>` / `unhide <id>` | off/on the list and the menu; files kept | manifest rename | yes |
 | `prune <id>` (`delete`, `rm`) | delete files, directory and entry | everything | yes |
@@ -358,6 +359,27 @@ mean the loaded module is some other build:
 
 `boot` is one-shot (`grub-reboot` sets `next_entry`), so a snapshot that does not
 come up reverts on the following boot with no intervention.
+
+`boot --entry` does the same for an entry that is not a snapshot — the distro's own
+kernel, an LTS kernel, a rescue entry:
+
+```bash
+sudo snaptune boot --entry 'CachyOS Linux, with Linux linux-cachyos-lts'
+```
+
+It takes the `--id` or the exact title. The entry is looked up in `grub.cfg`
+**before** anything is written, because `grub-reboot` writes `next_entry` whether or
+not GRUB can resolve what it was handed — and an unresolvable value does not fail,
+it boots **entry 0** instead, silently, taking the place of a correctly-saved
+default. That is not hypothetical: arming a bare nested id on blade 115 booted
+"CachyOS Linux".
+
+A nested entry must therefore be named by its full `Parent>Child` path, which is what
+GRUB's `get_entry_number()` needs. Its bare `--id` — a real id, present in the file —
+is exactly the value that boots entry 0, so it is refused with the path to use
+instead. `grub-list` marks the nested ones and prints those paths. An ambiguous name
+is refused rather than guessed: a title that appears in two submenus would otherwise
+arm whichever comes first in the file.
 
 ### 5.6 Triage: `doctor`, then `verify`
 
@@ -488,18 +510,13 @@ discovers it by trying:
 
 | shell verb | what it did | covered by |
 |---|---|---|
-| `boot --entry <grub-id>` | one-shot boot into *any* GRUB entry, including the distro's | `boot` takes a snapshot id only |
 | `preserve [label]` | copy the current initramfs aside as a rescue image | **nothing**, deliberately (§6.3) |
 | `test-result <id> --boot-test ...` | record boot/GPU/rocminfo/dmesg results in the manifest | **nothing** |
 | `extract-modules <id>` | pull the modules out of a snapshot's initramfs | the `image` module reads members; no verb exposes it |
 | `grub-flatten` | switch GRUB to a flat menu layout | **nothing** |
 
-`boot --entry` is the one with a workflow behind it: it is how the distro's own
-kernel gets tested through the same one-shot mechanism that reverts by itself. Its
-refusal is worth keeping — an entry inside a submenu cannot be armed by its bare id,
-because GRUB would silently boot entry 0 instead.
-
-`register` (§5.9) and `validate` (§5.5) were on this list and are not any more.
+Three shell verbs were on this list and are not any more: `register` (§5.9),
+`validate` (§5.5) and `boot --entry` (§5.5).
 
 None of this is a defect in what is here — it is what is left.
 
