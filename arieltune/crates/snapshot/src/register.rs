@@ -34,6 +34,16 @@ use crate::grub;
 use crate::store::Paths;
 use crate::write::{Action, Plan};
 
+/// `snapshot.status: "dev"` — an iteration of the dev loop, still being tried.
+pub const STATUS_DEV: &str = "dev";
+/// `snapshot.status: "active"` — a snapshot in its own right.
+pub const STATUS_ACTIVE: &str = "active";
+/// `snapshot.status: "golden"` — the store's baseline.
+///
+/// Also what makes the plan write the store's marker, so the star in `list` and the
+/// status in the manifest cannot disagree about which snapshot is the baseline.
+pub const STATUS_GOLDEN: &str = "golden";
+
 /// Everything registration needs to know.
 ///
 /// A struct rather than eight positional arguments: most of the fields are paths,
@@ -447,6 +457,18 @@ pub fn plan(paths: &Paths, req: &Request, timestamp: &str, existing_custom: &str
             what: "the kernel command line".to_string(),
         },
     ];
+
+    // A snapshot whose manifest calls itself the baseline must be the one the
+    // store's marker names, or the star in `list` and the status in the manifest
+    // disagree about which snapshot is golden. Recorded here rather than by the
+    // caller, so it is a property of registering rather than a step to remember.
+    if req.status == STATUS_GOLDEN {
+        actions.push(Action::Write {
+            path: req.store_root.join(crate::store::GOLDEN_MARKER),
+            contents: format!("{}\n", req.id),
+            what: "record this snapshot as the store's golden baseline".to_string(),
+        });
+    }
 
     // The menu entry comes from the manifest we just wrote, through the same
     // builder the other verbs use, so a dev snapshot's entry cannot drift from a
@@ -906,6 +928,90 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// Planning a registration that can actually run, in a fixture directory.
+    fn plannable(tag: &str) -> (std::path::PathBuf, Request) {
+        let dir = std::env::temp_dir().join(format!("snapreg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (store, boot, work) = (dir.join("store"), dir.join("boot"), dir.join("work"));
+        for d in [&store, &boot, &work] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut req = request();
+        req.store_root = store;
+        req.boot = boot;
+        req.module = work.join("module.ko.zst");
+        req.initramfs = work.join("dev.img");
+        req.vmlinuz_source = work.join("vmlinuz");
+        for p in [&req.module, &req.initramfs, &req.vmlinuz_source] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        (dir, req)
+    }
+
+    fn writes_marker(plan: &Plan, marker: &str) -> bool {
+        plan.actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::Write { path, .. }
+                    if path.file_name().and_then(|n| n.to_str()) == Some(marker)
+            )
+        })
+    }
+
+    /// A snapshot whose manifest calls itself the baseline must be the one the
+    /// store's marker names. Otherwise the star in `list` and the status in the
+    /// manifest disagree about which snapshot is golden, and nothing says which is
+    /// right.
+    #[test]
+    fn a_golden_snapshot_records_the_store_marker_and_an_active_one_does_not() {
+        let (dir, mut req) = plannable("golden");
+        let paths = Paths::under(&dir);
+
+        req.status = STATUS_ACTIVE.to_string();
+        let ordinary = plan(&paths, &req, "2026-10-09T00:00:00Z", "").unwrap();
+        assert!(
+            !writes_marker(&ordinary, crate::store::GOLDEN_MARKER),
+            "an ordinary snapshot is not the store's baseline"
+        );
+
+        req.status = STATUS_GOLDEN.to_string();
+        let golden = plan(&paths, &req, "2026-10-09T00:00:00Z", "").unwrap();
+        assert!(
+            writes_marker(&golden, crate::store::GOLDEN_MARKER),
+            "status golden must claim the marker: {:?}",
+            golden.describe()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The marker holds the id as text and ends in a newline, because that is what
+    /// `Store::golden_id` reads back and what the shell tool writes.
+    #[test]
+    fn the_golden_marker_holds_the_id() {
+        let (dir, mut req) = plannable("golden-content");
+        req.status = STATUS_GOLDEN.to_string();
+        let golden = plan(&Paths::under(&dir), &req, "2026-10-09T00:00:00Z", "").unwrap();
+
+        let contents: Vec<&String> = golden
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Write { path, contents, .. }
+                    if path.file_name().and_then(|n| n.to_str())
+                        == Some(crate::store::GOLDEN_MARKER) =>
+                {
+                    Some(contents)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(contents.len(), 1, "exactly one marker write");
+        assert_eq!(*contents[0], format!("{}\n", req.id));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A missing artefact is caught while planning, not after the image has been

@@ -29,6 +29,12 @@ use crate::manifest::Manifest;
 /// The id prefix every snapshot carries.
 pub const ID_PREFIX: &str = "snap-";
 
+/// The file, directly under the store root, holding the golden snapshot's id as
+/// text. `list` marks it with a star and the manifest calls the same snapshot
+/// `status: golden` — which is why the writer records both, so they cannot
+/// disagree about which snapshot is the baseline.
+pub const GOLDEN_MARKER: &str = ".golden-snapshot";
+
 /// Where the shell tool keeps its manifests.
 pub const DEFAULT_ROOT: &str = "/var/lib/kernel-snapshots";
 /// Boot artefacts live beside the distro's own kernels.
@@ -303,7 +309,7 @@ impl Store {
 
     /// The golden snapshot's id, if the marker is present.
     pub fn golden_id(&self) -> Option<String> {
-        let text = std::fs::read_to_string(self.paths.root.join(".golden-snapshot")).ok()?;
+        let text = std::fs::read_to_string(self.paths.root.join(GOLDEN_MARKER)).ok()?;
         let id = text.trim();
         (!id.is_empty()).then(|| id.to_string())
     }

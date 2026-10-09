@@ -40,18 +40,21 @@ use crate::write;
     long_about = "Snapshot store: list, inspect, and manage the GRUB menu entries of\n\
         kernel snapshots created by the bc-250-snapshotter.\n\
         \n\
-        Reads are safe anywhere. The writers -- pin, unpin, hide, unhide, golden,\n\
-        boot, prune, and `dev --register` -- change the boot configuration\n\
-        (/etc/grub.d, grubenv, and /boot for a registration) and so need root, and\n\
-        each takes --dry-run to print exactly what it would do first. `prune` deletes\n\
-        and cannot be undone; `boot` is one-shot and reverts on its own.\n\
+        Reads are safe anywhere. The writers -- create, rebuild, dev, register,\n\
+        pin, unpin, hide, unhide, golden, boot and prune -- change the store,\n\
+        /boot or the boot configuration (/etc/grub.d, grubenv) and so need root,\n\
+        and each takes --dry-run to print exactly what it would do first. `prune`\n\
+        deletes and cannot be undone; `boot` is one-shot and reverts on its own.\n\
         \n\
-        The verb layout follows the other modules: flat, one word each, a report verb\n\
-        for reading and a flag for anything that writes (`dev` previews unless --run,\n\
-        as `apu build` and `mem set` do).\n\
+        Two things the writers deliberately do not do, both of which the shell\n\
+        tool did: none of them installs a module into the live kernel tree, runs\n\
+        `mkinitcpio`, or sets the GRUB default. A snapshot is derived by replacing\n\
+        one member of a copy of an existing image, and promoting it is a separate,\n\
+        deliberate step (`boot` to try it once, `pin` to keep it).\n\
         \n\
-        NOT IMPLEMENTED YET: create, rebuild. Those still belong to the\n\
-        shell tool, which remains authoritative."
+        The verb layout follows the other modules: flat, one word each, a report\n\
+        verb for reading and a flag for anything that writes (`dev` previews unless\n\
+        --run, as `apu build` and `mem set` do)."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -282,6 +285,55 @@ pub enum Cmd {
         dry_run: bool,
     },
 
+    /// Build a module and make it a bootable snapshot.
+    ///
+    /// Two ways to get the module. With `--tree` it is built from that source tree,
+    /// which is the strongest provenance. Without one, the module the kernel package
+    /// installed is adopted as it stands — the running, already-patched module, which
+    /// is all a blade provisioned from prebuilt packages has.
+    ///
+    /// **What this deliberately does not do.** The shell tool's `create` installs the
+    /// new module into the live tree, runs `depmod`, generates the snapshot's
+    /// initramfs with `mkinitcpio`, then restores the known-good module and rebuilds
+    /// *every* image on the machine with `mkinitcpio -P`. If it fails in between, the
+    /// running system is left holding a module that has never booted. This derives
+    /// the snapshot by replacing one member of a copy of an existing image and
+    /// checking the result against the build, so the live module tree and the live
+    /// initramfs are never touched and the machine's own boot never depends on an
+    /// untested build.
+    ///
+    /// The difference worth knowing: the snapshot's initramfs is the base image's
+    /// member set plus this module, not a fresh one generated from
+    /// `/etc/mkinitcpio.conf`. If that file has gained a hook or a module since the
+    /// base image was built, the snapshot will not carry it. `--from` chooses the
+    /// base image; the default is the running kernel's own.
+    ///
+    /// Never sets the GRUB default: an untested snapshot must not become the
+    /// permanent entry. `snaptune boot <id>` tests it once and reverts by itself;
+    /// `snaptune pin <id>` makes it the default once it has earned it.
+    Create {
+        /// What this snapshot is, e.g. "golden-base: patches 1-3 (40 CU unlock)".
+        description: String,
+        /// Kernel source tree to build the module in, or set SNAPSHOT_TREE. Without
+        /// it, the installed module is adopted as it stands.
+        #[arg(long, value_name = "DIR", env = "SNAPSHOT_TREE")]
+        tree: Option<PathBuf>,
+        /// Adopt this already-compressed module instead of building one or taking
+        /// the installed one.
+        #[arg(long, value_name = "MODULE", conflicts_with = "tree")]
+        module: Option<PathBuf>,
+        /// Image to derive from. Default: the running kernel's own initramfs.
+        #[arg(long, value_name = "IMAGE")]
+        from: Option<PathBuf>,
+        /// Kernel release to build and record for. Default: this machine's running
+        /// kernel.
+        #[arg(long = "for", value_name = "RELEASE")]
+        for_release: Option<String>,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
@@ -462,6 +514,22 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             &id,
             tree.as_deref(),
             description.as_deref(),
+            dry_run,
+        ),
+        Cmd::Create {
+            description,
+            tree,
+            module,
+            from,
+            for_release,
+            dry_run,
+        } => cmd_create(
+            &store,
+            &description,
+            tree.as_deref(),
+            module.as_deref(),
+            from.as_deref(),
+            for_release.as_deref(),
             dry_run,
         ),
     }
@@ -1222,7 +1290,9 @@ fn cmd_rebuild(
     let plan = dev::plan(dev::inspect_tree(&tree_path)?, Some(release.clone()));
 
     println!("rebuild plan — {id} (kernel {release})");
-    println!("  tree        {}", plan.tree.path.display());
+    // The tree, release and revision come from `describe()` below; what only this
+    // verb knows is which image the rebuild derives from, so that is what the
+    // header says rather than repeating them.
     println!("  derives from {}", parent_image.display());
     for line in plan.describe() {
         println!("{line}");
@@ -1340,6 +1410,203 @@ fn cmd_rebuild(
     println!("{id} was not modified; its module and image are as they were.");
     println!("`snaptune boot {new_id}` tests it once. `snaptune verify {new_id}` checks it.");
     Ok(0)
+}
+
+/// Build a module and make it a bootable snapshot.
+///
+/// The shape is `dev --run --register` with a different module source and a
+/// different default parent: where the dev loop always derives from a snapshot or an
+/// image you name, this derives from the running kernel's own initramfs and can take
+/// the module straight off the installed system.
+fn cmd_create(
+    store: &Store,
+    description: &str,
+    tree: Option<&Path>,
+    module: Option<&Path>,
+    from: Option<&Path>,
+    for_release: Option<&str>,
+    dry_run: bool,
+) -> Result<i32> {
+    // An explicit `--for` wins; otherwise this machine's kernel, which is the right
+    // answer exactly when you are standing on the machine you are snapshotting —
+    // and the wrong one when you are not, which is why it is overridable and why the
+    // tree's own release is checked against it below.
+    let release = match for_release {
+        Some(release) => release.to_string(),
+        None => dev::running_release().context(
+            "cannot tell which kernel to snapshot: `uname -r` did not answer.\n\
+             Pass --for <release> to name it.",
+        )?,
+    };
+
+    // The image the snapshot derives from. The running kernel's own initramfs is
+    // what currently boots, so replacing one member of it is the smallest honest
+    // step from "what is running" to "what this snapshot is".
+    let base = match from {
+        Some(image) => image.to_path_buf(),
+        None => dev::distro_initramfs(&store.paths.boot, &release).with_context(|| {
+            format!(
+                "no initramfs for {release} under {}.\n\
+                 Pass --from <image> to choose the image the snapshot derives from.",
+                store.paths.boot.display()
+            )
+        })?,
+    };
+    if !base.is_file() {
+        anyhow::bail!("the image to derive from is not there: {}", base.display());
+    }
+
+    // Where the module comes from, decided before anything is printed so the plan
+    // can say which of the three it is.
+    let source = match (tree, module) {
+        (Some(path), _) => ModuleSource::Tree(dev::plan(
+            dev::inspect_tree(path)?,
+            // The release it must match is the one being recorded, not this
+            // machine's: `--for` can point at another kernel deliberately.
+            Some(release.clone()),
+        )),
+        (None, Some(path)) => ModuleSource::Adopted(path.to_path_buf()),
+        (None, None) => {
+            let installed = dev::installed_module(&release).with_context(|| {
+                format!(
+                    "no source tree given and no module installed for {release}.\n\
+                     Pass --tree <dir> to build one, or --module <file> to supply one."
+                )
+            })?;
+            ModuleSource::Adopted(installed)
+        }
+    };
+
+    println!("create plan — {description}");
+    println!("  release     {release}");
+    println!("  derives     {}", base.display());
+    match &source {
+        ModuleSource::Tree(_) => println!("  module      built from the tree below"),
+        ModuleSource::Adopted(path) => {
+            println!("  module      {} (adopted byte-for-byte)", path.display());
+        }
+    }
+    if let ModuleSource::Tree(plan) = &source {
+        for line in plan.describe() {
+            println!("{line}");
+        }
+        if !plan.can_build() {
+            println!("\nNothing was built and nothing was written.");
+            return Ok(2);
+        }
+    }
+
+    if dry_run {
+        println!("\n--dry-run: nothing was built and nothing was written.");
+        return Ok(0);
+    }
+
+    let work = std::env::temp_dir().join(format!("snapcreate-{}", std::process::id()));
+    let (prepared, built_tree, rebuilt_modules) = match &source {
+        ModuleSource::Tree(plan) => {
+            // Root is needed for the store and /boot writes, but the build must not
+            // be root's or `make` leaves root-owned objects in the developer's tree.
+            let runner = match dev::build_as(&plan.tree.path) {
+                Some((uid, gid)) => {
+                    std::fs::create_dir_all(&work)
+                        .with_context(|| format!("creating scratch space {}", work.display()))?;
+                    dev::hand_over(&work, uid, gid)?;
+                    write::System::as_user(uid, gid)
+                }
+                None => write::System::default(),
+            };
+            let prepared = dev::build(&plan.tree, &runner, &work)?;
+            (prepared, Some(&plan.tree), plan.modules.clone())
+        }
+        ModuleSource::Adopted(path) => (
+            dev::adopt_module(path, &write::System::default(), &work)?,
+            None,
+            Vec::new(),
+        ),
+    };
+    println!(
+        "module      {} ({} bytes compressed)",
+        prepared.md5,
+        prepared.bytes.len()
+    );
+
+    let dest = work.join("created.img");
+    let (member, _derived) = dev::assemble(&base, &prepared, &dest, &work)?;
+    // The independent oracle, not our own arithmetic: this is the check that
+    // separates "the image carries the module we asked for" from "the image looks
+    // plausible".
+    let got = image::verify_member(&dest, &member).with_context(|| {
+        format!(
+            "verifying {member} in the image derived from {}",
+            base.display()
+        )
+    })?;
+    if got != prepared.bytes {
+        anyhow::bail!(
+            "the derived image does not carry the module we prepared \
+             ({} bytes in the image, {} bytes prepared) — refusing to register it",
+            got.len(),
+            prepared.bytes.len()
+        );
+    }
+    println!("replaced    {member}");
+    println!("wrote       {}", dest.display());
+
+    // The shell marks the first snapshot a store ever holds as its baseline. A store
+    // with no marker is one whose baseline is undecided, and `list` shows the column.
+    let golden = store.golden_id().is_none();
+    let status = if golden {
+        register::STATUS_GOLDEN
+    } else {
+        register::STATUS_ACTIVE
+    };
+    if golden {
+        println!("golden      this is the first snapshot in the store, so it becomes the baseline");
+    }
+
+    let targets = DevTargets {
+        run: true,
+        // No `--parent`: the lineage of a created snapshot is the image it was
+        // derived from, which `register_build` reads off that image's name.
+        parent: None,
+        from: Some(base.clone()),
+        for_release: Some(release.clone()),
+        out: None,
+        register: true,
+        dry_run: false,
+    };
+
+    let id = register_build(
+        store,
+        description,
+        &prepared,
+        &dest,
+        &base,
+        Some(&release),
+        &targets,
+        &Provenance {
+            kind: manifest::KIND_CREATED,
+            status,
+            tree: built_tree,
+            rebuilt_modules: &rebuilt_modules,
+        },
+    )?;
+
+    println!();
+    println!("Created: {id}");
+    println!("This is NOT the GRUB default.");
+    println!("  `snaptune boot {id}`   tests it once, reverting by itself");
+    println!("  `snaptune verify {id}` checks it against what is on disk");
+    println!("  `snaptune pin {id}`    makes it the permanent default");
+    Ok(0)
+}
+
+/// Where a created snapshot's module came from.
+enum ModuleSource {
+    /// Built from a source tree, with the plan that says what it will build.
+    Tree(dev::DevPlan),
+    /// Taken as it stands: the installed module, or one named with `--module`.
+    Adopted(PathBuf),
 }
 
 /// One field that differs between two snapshots.
@@ -2159,5 +2426,174 @@ mod tests {
             }
             other => panic!("expected rebuild, got {other:?}"),
         }
+    }
+
+    // ---- create ----------------------------------------------------------
+
+    /// `--module` and `--tree` are two answers to one question, and silently
+    /// preferring one would build a module the caller did not ask for.
+    #[test]
+    fn create_refuses_both_a_tree_and_an_explicit_module() {
+        assert!(
+            Cli::try_parse_from([
+                "snaptune",
+                "create",
+                "desc",
+                "--tree",
+                "/tree",
+                "--module",
+                "/m.ko.zst"
+            ])
+            .is_err(),
+            "--tree with --module must be refused, not resolved by precedence"
+        );
+    }
+
+    #[test]
+    fn create_parses_a_description_and_its_sources() {
+        let cmd = Cli::try_parse_from([
+            "snaptune",
+            "create",
+            "golden-base: patches 1-3",
+            "--from",
+            "/boot/initramfs-x.img",
+            "--for",
+            "7.2.9-1-cachyos-bore",
+            "--dry-run",
+        ])
+        .expect("parse");
+        match cmd.cmd {
+            Cmd::Create {
+                description,
+                tree,
+                module,
+                from,
+                for_release,
+                dry_run,
+            } => {
+                assert_eq!(description, "golden-base: patches 1-3");
+                assert_eq!(tree, None);
+                assert_eq!(module, None);
+                assert_eq!(from, Some(PathBuf::from("/boot/initramfs-x.img")));
+                assert_eq!(for_release.as_deref(), Some("7.2.9-1-cachyos-bore"));
+                assert!(dry_run);
+            }
+            other => panic!("expected create, got {other:?}"),
+        }
+    }
+
+    /// A store whose baseline is already decided must not have it reassigned by the
+    /// next snapshot created, which is what `create` keys its `status` off.
+    #[test]
+    fn create_only_claims_golden_when_the_store_has_no_baseline() {
+        let dir = std::env::temp_dir().join(format!("snapcli-gold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Store::new(Paths::under(&dir));
+        assert!(
+            store.golden_id().is_none(),
+            "an empty store has no baseline"
+        );
+
+        std::fs::write(dir.join(crate::store::GOLDEN_MARKER), "snap-aaaaaaaa\n").unwrap();
+        assert_eq!(store.golden_id().as_deref(), Some("snap-aaaaaaaa"));
+        assert!(
+            !store.golden_id().unwrap().is_empty(),
+            "a marker that reads back empty would silently re-claim golden"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An image that is not there is refused before anything is built, and the
+    /// refusal names the file it wanted.
+    #[test]
+    fn create_refuses_a_base_image_that_is_not_there() {
+        let dir = std::env::temp_dir().join(format!("snapcli-nobase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(Paths::under(&dir));
+
+        let missing = dir.join("initramfs-nope.img");
+        let err = cmd_create(
+            &store,
+            "desc",
+            None,
+            Some(&dir.join("module.ko.zst")),
+            Some(&missing),
+            Some("7.2.9-1-cachyos-bore"),
+            false,
+        )
+        .unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("not there"), "{text}");
+        assert!(text.contains("initramfs-nope.img"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no tree and no installed module for the release there is nothing to
+    /// snapshot, and the error has to name both ways out.
+    #[test]
+    fn create_refuses_when_there_is_no_module_to_take() {
+        let dir = std::env::temp_dir().join(format!("snapcli-nomod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("initramfs-x.img");
+        std::fs::write(&base, b"image").unwrap();
+        let store = Store::new(Paths::under(&dir));
+
+        // A release that certainly has no modules installed.
+        let err = cmd_create(
+            &store,
+            "desc",
+            None,
+            None,
+            Some(&base),
+            Some("9.9.9-no-such-kernel"),
+            false,
+        )
+        .unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("no module installed"), "{text}");
+        assert!(text.contains("--tree"), "{text}");
+        assert!(text.contains("--module"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `create` writes into the store and `/boot`, so a dry run has to be able to
+    /// show the plan without any of that. The tree here cannot build, which makes
+    /// this the refusal path — and a refusal must not write either.
+    #[test]
+    fn create_dry_run_writes_nothing_into_the_store() {
+        let dir = std::env::temp_dir().join(format!("snapcli-dry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("store")).unwrap();
+        let store = Store::new(Paths::under(dir.join("store")));
+
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join(".config"), b"CONFIG_X=y\n").unwrap();
+
+        let rc = cmd_create(
+            &store,
+            "desc",
+            Some(&tree),
+            None,
+            Some(&dir.join("whatever.img")),
+            Some("7.2.9-1-cachyos-bore"),
+            true,
+        );
+
+        assert!(
+            matches!(rc, Err(_) | Ok(2)),
+            "an unbuildable tree is a refusal: {rc:?}"
+        );
+        let entries = std::fs::read_dir(dir.join("store")).unwrap().count();
+        assert_eq!(entries, 0, "nothing may be written into the store");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -401,6 +401,54 @@ pub fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+/// The kernel package's own name for a release, from
+/// `/usr/lib/modules/<release>/pkgbase`.
+///
+/// The files in `/boot` are named after the *package* (`linux-cachyos-bore`), not
+/// after the release (`7.2.9-1-cachyos-bore`), and `pkgbase` is where the package
+/// records which it is. Guessing the name is how a snapshot ends up paired with
+/// another kernel's initramfs.
+pub fn pkgbase(release: &str) -> Option<String> {
+    let text =
+        std::fs::read_to_string(Path::new(MODULES_ROOT).join(release).join("pkgbase")).ok()?;
+    let name = text.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The names an initramfs for `release` goes by, most specific first.
+///
+/// Pure, and separate from the lookup, because "which file is this kernel's
+/// initramfs" is worth testing on a machine that has no kernels at all.
+fn initramfs_candidates(release: &str, pkgbase: Option<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(pkg) = pkgbase {
+        names.push(format!("initramfs-{pkg}.img"));
+    }
+    // A host that names the file after the release rather than the package. These
+    // blades do not, but the shell tool accepted it and there is no reason to be
+    // narrower than the thing being replaced.
+    names.push(format!("initramfs-{release}.img"));
+    names.push("initramfs-linux-cachyos.img".to_string());
+    names
+}
+
+/// The initramfs the running system boots from, for `release`.
+///
+/// This is what `create` derives a snapshot from by default: the image that
+/// currently boots, with the module replaced. `None` rather than a guess when
+/// nothing matches — a snapshot derived from the *wrong* kernel's image boots a
+/// kernel its modules do not match.
+pub fn distro_initramfs(boot: &Path, release: &str) -> Option<PathBuf> {
+    let pkg = pkgbase(release);
+    for name in initramfs_candidates(release, pkg.as_deref()) {
+        let path = boot.join(&name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Where the kernel package installs its modules.
 const MODULES_ROOT: &str = "/usr/lib/modules";
 
@@ -778,6 +826,51 @@ mod tests {
             dirty: Vec::new(),
             versioned: false,
         }
+    }
+
+    /// `/boot` is named after the package, not the release, and the candidates are
+    /// ordered most specific first so a host with both does not pick the wrong one.
+    #[test]
+    fn the_initramfs_candidates_prefer_the_package_name() {
+        let with_pkg = initramfs_candidates("7.2.9-1-cachyos-bore", Some("linux-cachyos-bore"));
+        assert_eq!(with_pkg[0], "initramfs-linux-cachyos-bore.img");
+        assert_eq!(
+            with_pkg[1], "initramfs-7.2.9-1-cachyos-bore.img",
+            "the release-named file is still tried, just after the package's"
+        );
+        assert_eq!(with_pkg.last().unwrap(), "initramfs-linux-cachyos.img");
+
+        // No `pkgbase`: no package name to try, and the rest still apply.
+        let without = initramfs_candidates("7.2.9-1-cachyos-bore", None);
+        assert_eq!(without[0], "initramfs-7.2.9-1-cachyos-bore.img");
+        assert!(!without.iter().any(|n| n.contains("bore-bore")));
+    }
+
+    /// The lookup returns the first candidate that is actually there, and `None`
+    /// rather than a path to nothing when none is.
+    #[test]
+    fn the_distro_initramfs_is_the_first_candidate_that_exists() {
+        let dir = std::env::temp_dir().join(format!("snapdev-initrd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(distro_initramfs(&dir, "7.2.9-nope"), None);
+
+        // The generic fallback alone.
+        std::fs::write(dir.join("initramfs-linux-cachyos.img"), b"image").unwrap();
+        assert_eq!(
+            distro_initramfs(&dir, "7.2.9-nope"),
+            Some(dir.join("initramfs-linux-cachyos.img"))
+        );
+
+        // Adding a release-named one wins over the generic fallback.
+        std::fs::write(dir.join("initramfs-7.2.9-nope.img"), b"image").unwrap();
+        assert_eq!(
+            distro_initramfs(&dir, "7.2.9-nope"),
+            Some(dir.join("initramfs-7.2.9-nope.img"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The installed module is found by extension, not by name: the day the series
