@@ -22,6 +22,7 @@
 pub mod cli;
 pub mod cpio;
 pub mod dev;
+pub mod doctor;
 pub mod grub;
 pub mod id;
 pub mod image;

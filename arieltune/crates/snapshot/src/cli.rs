@@ -21,6 +21,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::dev;
+use crate::doctor;
 use crate::grub;
 use crate::id;
 use crate::image;
@@ -46,7 +47,7 @@ use crate::write;
         for reading and a flag for anything that writes (`dev` previews unless --run,\n\
         as `apu build` and `mem set` do).\n\
         \n\
-        NOT IMPLEMENTED YET: create, rebuild, verify, doctor. Those still belong to the\n\
+        NOT IMPLEMENTED YET: create, rebuild, verify. Those still belong to the\n\
         shell tool, which remains authoritative."
 )]
 pub struct Cli {
@@ -202,6 +203,26 @@ pub enum Cmd {
         /// the arming happens, and the machine reboots when you say so.
         #[arg(long)]
         reboot: bool,
+    },
+
+    /// Preflight the store: is this box's boot configuration coherent? Read-only.
+    ///
+    /// Checks the ways a store actually goes wrong rather than restating `list`: an
+    /// entry whose files were deleted (GRUB keeps the row and cannot boot it), a
+    /// snapshot with no entry, a `/boot` kernel nothing claims, an unparseable
+    /// manifest, and whether `GRUB_DEFAULT` is `saved` — because if it is not, `pin`
+    /// writes grubenv and silently does nothing, while the one-shot `boot` still
+    /// works. Names the offenders rather than only counting them.
+    ///
+    /// `--verify` turns the report into a gate: a non-zero exit when anything is
+    /// broken, so post-reboot scripts can ask.
+    Doctor {
+        /// One JSON object on stdout and nothing else, for callers that parse it.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when anything is broken, rather than only printing it.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
@@ -372,6 +393,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             dry_run,
             reboot,
         } => cmd_boot(&store.paths, &id, dry_run, reboot),
+        Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
     }
 }
 
@@ -861,6 +883,63 @@ fn cmd_boot(paths: &Paths, id: &str, dry_run: bool, reboot: bool) -> Result<i32>
     // would suggest the one-shot did not take when it did.
     let _ = std::process::Command::new("reboot").status();
     Ok(0)
+}
+
+/// Preflight the store. Read-only, and safe anywhere — it is the one verb here that
+/// is useful precisely when something is already wrong.
+fn cmd_doctor(paths: &Paths, json: bool, verify: bool) -> Result<i32> {
+    let report = doctor::examine(paths);
+
+    if json {
+        // One object on stdout, nothing else, so callers parse it cleanly — the same
+        // contract `apu doctor --json` keeps.
+        let findings: Vec<serde_json::Value> = report
+            .findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "check": f.key,
+                    "severity": f.severity.label(),
+                    "detail": f.detail,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "store": paths.root,
+                "worst": report.worst().label(),
+                "findings": findings,
+            }))?
+        );
+        return Ok(exit_for(&report, verify));
+    }
+
+    println!("snaptune doctor");
+    for line in report.lines() {
+        println!("{line}");
+    }
+
+    let failures = report.failures();
+    if failures.is_empty() {
+        println!("\n  -> nothing broken. `snaptune list` for the snapshots themselves.");
+    } else {
+        println!(
+            "\n  -> {} thing(s) broken. `snaptune show <id>` for one snapshot in \
+             detail; `prune` removes one properly.",
+            failures.len()
+        );
+    }
+    Ok(exit_for(&report, verify))
+}
+
+/// The exit code, which is what makes `--verify` a gate.
+fn exit_for(report: &doctor::Report, verify: bool) -> i32 {
+    if verify && report.worst() == doctor::Severity::Fail {
+        2
+    } else {
+        0
+    }
 }
 
 /// One field that differs between two snapshots.
