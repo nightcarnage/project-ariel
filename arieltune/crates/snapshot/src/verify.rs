@@ -142,7 +142,7 @@ pub fn one(paths: &Paths, snapshot: &Snapshot) -> Report {
     }
 
     // --- the menu entry ----------------------------------------------------
-    report_entry(&mut report, paths, sid, &get);
+    report_entry(&mut report, paths, sid, snapshot.hidden, &get);
 
     // --- the id, re-derived ------------------------------------------------
     //
@@ -200,6 +200,7 @@ fn report_entry(
     report: &mut Report,
     paths: &Paths,
     sid: &str,
+    hidden: bool,
     get: &impl Fn(&str) -> Option<String>,
 ) {
     let text = match std::fs::read_to_string(&paths.grub_custom) {
@@ -218,11 +219,24 @@ fn report_entry(
     };
     let entries = grub::parse_custom(&text);
     let Some(entry) = entries.iter().find(|e| e.id == sid) else {
-        report.note(
-            "entry",
-            Severity::Fail,
-            "no entry in 40_custom — GRUB cannot reach this snapshot".to_string(),
-        );
+        if hidden {
+            // Not a fault, and saying so would be the same false alarm `doctor`
+            // already had to be cured of: a hidden snapshot is off the menu *by
+            // design*, so GRUB is offering nothing and nothing is broken.
+            report.note(
+                "entry",
+                Severity::Warn,
+                "hidden, so it has no entry by design — nothing is offered; `unhide` \
+                 would give it one"
+                    .to_string(),
+            );
+        } else {
+            report.note(
+                "entry",
+                Severity::Fail,
+                "no entry in 40_custom — GRUB cannot reach this snapshot".to_string(),
+            );
+        }
         return;
     };
 
@@ -317,15 +331,24 @@ fn report_identity(
 }
 
 /// Verify every snapshot in the store, worst first.
+///
+/// Hidden ones are included: being off the menu says nothing about whether the
+/// files behind it are still there, and a snapshot someone put aside deliberately
+/// is exactly the kind of thing whose rot goes unnoticed. What must not happen is
+/// reporting its missing entry as a fault, so `one` is told it is hidden.
 pub fn all(paths: &Paths) -> Vec<(String, Report)> {
     let store = Store::new(paths.clone());
     let Ok(snapshots) = store.discover() else {
         return Vec::new();
     };
-    snapshots
+    let mut out: Vec<(String, Report)> = snapshots
         .iter()
         .map(|s| (s.id.clone(), one(paths, s)))
-        .collect()
+        .collect();
+    // Worst first, then by id: a reader meets the broken ones before the healthy
+    // ones, and two runs that found the same things still print the same order.
+    out.sort_by(|a, b| b.1.worst().cmp(&a.1.worst()).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 #[cfg(test)]
@@ -335,7 +358,11 @@ mod tests {
     use crate::{register, write};
 
     fn fixture(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snap-verify-{tag}-{}", std::process::id()));
+        // The *root* is deliberately not named `snap-*`: the snapshots live inside
+        // it, and `discover` looks for `snap-*` entries under the root it is given.
+        // Named `snap-…`, a leftover fixture is listed as a snapshot by anyone who
+        // points `--root` at `/tmp`.
+        let dir = std::env::temp_dir().join(format!("snaptune-fx-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("boot")).unwrap();
         std::fs::create_dir_all(dir.join("etc/grub.d")).unwrap();
@@ -588,7 +615,7 @@ mod tests {
     #[test]
     fn a_second_root_is_checked_against_its_own_files() {
         let (paths, snapshot) = good("elsewhere");
-        let mirror = paths.root.join("../snap-verify-mirror");
+        let mirror = paths.root.join("../snaptune-fx-mirror");
         let _ = std::fs::remove_dir_all(&mirror);
         copy_tree(&paths.root, &mirror);
 
@@ -697,5 +724,32 @@ mod tests {
         assert_eq!(key(&report, "identity").severity, Severity::Ok);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hidden snapshot has no menu entry on purpose. Reporting that as a fault
+    /// would be the same false alarm `doctor` had: it is the *deliberate* absence,
+    /// and the files behind it are what is worth checking.
+    #[test]
+    fn a_hidden_snapshot_without_an_entry_warns_rather_than_fails() {
+        let (paths, snapshot) = good("hidden");
+        let dir = paths.root.join(&snapshot.id);
+        std::fs::rename(dir.join("manifest.yaml"), dir.join("manifest.yaml.hidden")).unwrap();
+        // Hiding takes the entry off the menu, which is the whole point of it.
+        std::fs::write(&paths.grub_custom, "# nothing here\n").unwrap();
+
+        let store = Store::new(paths.clone());
+        let snapshot = store
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == snapshot.id)
+            .expect("the hidden snapshot");
+        assert!(snapshot.hidden, "the fixture should read as hidden");
+
+        let report = one(&paths, &snapshot);
+        let entry = key(&report, "entry");
+        assert_eq!(entry.severity, Severity::Warn, "{:?}", report.lines());
+        assert!(entry.detail.contains("hidden"), "{entry:?}");
+        assert!(report.failures().is_empty(), "{:?}", report.lines());
     }
 }
