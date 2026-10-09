@@ -364,6 +364,122 @@ pub fn module_fact(field: &str, ko: &Path) -> Option<String> {
 ///
 /// The rule, split out so it is testable without a filesystem: only root needs to
 /// step aside, and only for a tree that somebody else owns.
+/// The marker prefix the BC-250 patch series puts in its code.
+///
+/// `validate` exists to answer "are my patches intact?", and this string is the
+/// evidence: the series writes `BC-250` comments next to every change, so the
+/// marker count in the sources and the marker strings in the built module are the
+/// only available proof that the patches are in the code being checked.
+pub const MARKER: &str = "BC-250";
+
+/// The longer prefix the series uses for the detail line it leaves behind.
+const MARKER_DETAIL: &str = "BC-250:";
+
+/// Runs of printable text in a byte blob, four characters or longer.
+///
+/// The equivalent of `strings`, in-process: the alternative is shelling out to a
+/// tool that may not be installed, and reading a 54 MiB module through a pipe to
+/// answer one question.
+pub fn printable_strings(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut run: Vec<u8> = Vec::new();
+    for &byte in data {
+        if (0x20..0x7f).contains(&byte) {
+            run.push(byte);
+        } else {
+            if run.len() >= 4 {
+                out.push(String::from_utf8_lossy(&run).into_owned());
+            }
+            run.clear();
+        }
+    }
+    if run.len() >= 4 {
+        out.push(String::from_utf8_lossy(&run).into_owned());
+    }
+    out
+}
+
+/// The printable strings in a blob that contain `needle`.
+///
+/// Pure, so the marker logic is tested on bytes rather than on a blade.
+pub fn marker_strings(data: &[u8], needle: &str) -> Vec<String> {
+    printable_strings(data)
+        .into_iter()
+        .filter(|s| s.contains(needle))
+        .collect()
+}
+
+/// The marker strings in a compressed module.
+pub fn module_markers(module: &Path, runner: &dyn Runner, work: &Path) -> Result<Vec<String>> {
+    std::fs::create_dir_all(work)
+        .with_context(|| format!("creating scratch space {}", work.display()))?;
+    let dest = work.join("markers.ko");
+    runner.run(&[
+        "zstd".to_string(),
+        "-d".to_string(),
+        "-f".to_string(),
+        module.display().to_string(),
+        "-o".to_string(),
+        dest.display().to_string(),
+    ])?;
+    let bytes = std::fs::read(&dest).with_context(|| format!("reading {}", dest.display()))?;
+    Ok(marker_strings(&bytes, MARKER))
+}
+
+/// Marker lines in a tree's module sources, and how many there are.
+///
+/// `None` when there is no module directory to read — which is **not** the same
+/// answer as zero, and the shell tool conflates them: with no source tree it prints
+/// "No BC-250 markers in source", which reads as "this module is unpatched" when it
+/// means "there was nothing to look in". On a blade provisioned from packages there
+/// usually is no tree, so that is the common case rather than an edge one.
+pub fn source_markers(tree: &Path) -> Option<(usize, Vec<String>)> {
+    let dir = tree.join(DEFAULT_MODULE_DIR);
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut count = 0usize;
+    let mut detail = Vec::new();
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("c") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines() {
+            if line.contains(MARKER) {
+                count += 1;
+            }
+            if line.contains(MARKER_DETAIL) {
+                detail.push(line.trim().to_string());
+            }
+        }
+    }
+    Some((count, detail))
+}
+
+/// Whether `amdgpu` is loaded, and the `srcversion` the kernel holds for it.
+///
+/// The comparison this exists for: the srcversion in a module file against the one
+/// the running kernel reports. If they differ, the module in the file is not the
+/// module that is loaded — which is the single most useful thing `validate` can
+/// say, and the shell tool prints both numbers without comparing them.
+pub fn live_module() -> (bool, Option<String>) {
+    live_module_under(Path::new("/sys/module/amdgpu"))
+}
+
+fn live_module_under(dir: &Path) -> (bool, Option<String>) {
+    if !dir.is_dir() {
+        return (false, None);
+    }
+    let version = std::fs::read_to_string(dir.join("srcversion"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    (true, version)
+}
+
 pub fn needs_privilege_drop(euid: u32, owner: u32) -> bool {
     euid == 0 && owner != 0
 }
@@ -919,6 +1035,91 @@ mod tests {
             Some(dir.join("initramfs-7.2.9-nope.img"))
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `strings`, in-process, on bytes a test controls.
+    #[test]
+    fn printable_runs_are_found_and_short_ones_are_dropped() {
+        let mut data = Vec::new();
+        // Non-printable bytes, not `\x7fELF`: E, L and F are themselves printable
+        // and would join the following run.
+        data.extend_from_slice(&[0x7f, 0x00, 0x01, 0x02]);
+        data.extend_from_slice(b"BC-250: gfxoff fix applied");
+        data.extend_from_slice(&[0x00, 0x01]);
+        data.extend_from_slice(b"abc"); // too short to be a string
+        data.push(0xff);
+
+        let found = printable_strings(&data);
+        assert_eq!(found, vec!["BC-250: gfxoff fix applied".to_string()]);
+    }
+
+    /// The marker filter is what `validate` counts, so it is tested on bytes rather
+    /// than only through a blade.
+    #[test]
+    fn marker_strings_pick_out_only_the_marked_ones() {
+        let mut data = Vec::new();
+        for s in [
+            "amdgpu: unrelated driver chatter",
+            "BC-250: navi12 sdma firmware",
+            "another plain string",
+            "prefix BC-250 suffix",
+        ] {
+            data.extend_from_slice(s.as_bytes());
+            data.push(0x00);
+        }
+
+        let found = marker_strings(&data, MARKER);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|s| s.contains("BC-250")));
+    }
+
+    /// No tree is `None`, not zero: "nothing to look in" and "no markers found" are
+    /// different answers, and printing the second for the first is how a vanilla
+    /// module gets read as an unpatched one.
+    #[test]
+    fn a_missing_module_directory_reports_not_counted_rather_than_zero() {
+        let dir = std::env::temp_dir().join(format!("snapdev-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            source_markers(&dir),
+            None,
+            "no module dir means not counted"
+        );
+
+        let module_dir = dir.join(DEFAULT_MODULE_DIR);
+        std::fs::create_dir_all(&module_dir).unwrap();
+        std::fs::write(
+            module_dir.join("gmc_v10_0.c"),
+            "/* BC-250: unlock all 40 CU */\nint x;\n/* BC-250 */\n",
+        )
+        .unwrap();
+        std::fs::write(module_dir.join("Makefile"), "BC-250\n").unwrap();
+
+        let (count, detail) = source_markers(&dir).expect("now there is something to count");
+        assert_eq!(count, 2, "two matching lines in the .c file");
+        assert_eq!(detail.len(), 1, "only the `BC-250:` line is detail");
+        assert!(detail[0].contains("unlock all 40 CU"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The comparison `validate` exists for: a loaded module whose srcversion the
+    /// kernel reports, and one that is not loaded at all.
+    #[test]
+    fn the_live_module_reports_its_srcversion_only_when_loaded() {
+        let dir = std::env::temp_dir().join(format!("snapdev-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(live_module_under(&dir.join("not-there")), (false, None));
+
+        std::fs::write(dir.join("srcversion"), "11F98DC7EE7590D51AA9C9C\n").unwrap();
+        assert_eq!(
+            live_module_under(&dir),
+            (true, Some("11F98DC7EE7590D51AA9C9C".to_string()))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

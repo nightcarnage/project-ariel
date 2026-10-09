@@ -285,6 +285,39 @@ pub enum Cmd {
         dry_run: bool,
     },
 
+    /// Check a module: are the patches in it, and is it the one that is running?
+    ///
+    /// Answers the question `verify` does not — `verify` checks a *snapshot's*
+    /// claims, this checks a *module file*. It counts the `BC-250` markers the patch
+    /// series leaves in the sources and finds the marker strings in the built
+    /// module, reports the size, `srcversion` and `vermagic`, and compares the
+    /// module's `srcversion` against the one the running kernel reports for the
+    /// loaded `amdgpu`.
+    ///
+    /// **That comparison is the point.** The shell tool printed both numbers and left
+    /// the reader to compare them; if they differ, the module in the file is not the
+    /// module that is loaded, which is the most useful single fact this can report
+    /// and the easiest to miss.
+    ///
+    /// Reports rather than gates: it exits 0 whatever it finds, as the shell tool
+    /// does, because the fleet scripts call it for information. `doctor --verify` and
+    /// `verify` are the verbs that gate.
+    #[command(alias = "markers", alias = "check-module")]
+    Validate {
+        /// Module to check, e.g. amdgpu.ko.zst. Default: the one installed for the
+        /// running kernel.
+        module: Option<PathBuf>,
+        /// Kernel source tree to count source markers in. Without it the source half
+        /// is reported as *not counted*, not as zero — there usually is no tree on a
+        /// blade, and "nothing to look in" is not "nothing found".
+        #[arg(long, value_name = "DIR", env = "SNAPSHOT_TREE")]
+        tree: Option<PathBuf>,
+        /// Kernel release whose installed module to default to. Default: this
+        /// machine's running kernel.
+        #[arg(long = "for", value_name = "RELEASE")]
+        for_release: Option<String>,
+    },
+
     /// Register a module and an initramfs you built yourself, as a new snapshot.
     ///
     /// The path for artefacts built somewhere else — build once, register
@@ -563,6 +596,16 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             tree.as_deref(),
             description.as_deref(),
             dry_run,
+            json,
+        ),
+        Cmd::Validate {
+            module,
+            tree,
+            for_release,
+        } => cmd_validate(
+            module.as_deref(),
+            tree.as_deref(),
+            for_release.as_deref(),
             json,
         ),
         Cmd::Register {
@@ -1569,6 +1612,180 @@ fn label_from_vmlinuz(path: &Path) -> Option<String> {
     };
     let bare_hash = after_hash.len() == 8 && after_hash.chars().all(|c| c.is_ascii_hexdigit());
     (!after_hash.is_empty() && !bare_hash).then(|| after_hash.to_string())
+}
+
+/// What comparing a module file against the loaded module can say.
+#[derive(Debug, PartialEq, Eq)]
+enum LiveVerdict {
+    /// Loaded, and the `srcversion`s agree: the running module is this file.
+    Same,
+    /// Loaded, but the `srcversion`s differ: the running module is some other build.
+    Different,
+    /// Nothing is loaded, so there is nothing to compare against.
+    NotLoaded,
+    /// Loaded, but one side records no `srcversion`.
+    NotComparable,
+}
+
+/// The comparison the shell printed two numbers for and left to the reader.
+///
+/// `None` on either `srcversion` is not a mismatch — it is an absence of evidence,
+/// and saying "different" would be a lie in the one direction that matters (it
+/// would tell someone their good module was the wrong one).
+fn live_verdict(loaded: bool, srcversion: Option<&str>, live: Option<&str>) -> LiveVerdict {
+    match (loaded, srcversion, live) {
+        (false, _, _) => LiveVerdict::NotLoaded,
+        (true, Some(theirs), Some(live)) if theirs == live => LiveVerdict::Same,
+        (true, Some(_), Some(_)) => LiveVerdict::Different,
+        (true, _, _) => LiveVerdict::NotComparable,
+    }
+}
+
+/// Check a module file: markers, metadata, and whether it is the one that is loaded.
+fn cmd_validate(
+    module: Option<&Path>,
+    tree: Option<&Path>,
+    for_release: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    let module = match module {
+        Some(path) => {
+            if !path.is_file() {
+                anyhow::bail!("no module to check at {}", path.display());
+            }
+            path.to_path_buf()
+        }
+        None => {
+            let release = match for_release {
+                Some(release) => release.to_string(),
+                None => dev::running_release().context(
+                    "cannot tell which kernel's module to check: `uname -r` did not \
+                     answer.\nPass a module path, or --for <release>.",
+                )?,
+            };
+            dev::installed_module(&release).with_context(|| {
+                format!(
+                    "no module is installed for {release}.\n\
+                     Pass a module path, or --tree <dir> to check a tree's build."
+                )
+            })?
+        }
+    };
+
+    let work = std::env::temp_dir().join(format!("snapvalidate-{}", std::process::id()));
+    let binary_markers = dev::module_markers(&module, &write::System::default(), &work)?;
+
+    // Three different answers, and the shell reports two of them as the same thing.
+    let source = match tree {
+        None => Err("no --tree given, so the sources were not looked in".to_string()),
+        Some(tree) => match dev::source_markers(tree) {
+            Some(found) => Ok(found),
+            None => Err(format!(
+                "{} is not in {}",
+                dev::DEFAULT_MODULE_DIR,
+                tree.display()
+            )),
+        },
+    };
+
+    let size = std::fs::metadata(&module)
+        .with_context(|| format!("stat {}", module.display()))?
+        .len();
+    let srcversion = dev::module_fact("srcversion", &module);
+    let vermagic = dev::module_fact("vermagic", &module);
+    let (loaded, live_srcversion) = dev::live_module();
+
+    let verdict = live_verdict(loaded, srcversion.as_deref(), live_srcversion.as_deref());
+
+    if json {
+        let (count, lines, not_counted) = match &source {
+            Ok((count, lines)) => (Some(*count), lines.clone(), serde_json::Value::Null),
+            Err(why) => (None, Vec::new(), serde_json::json!(why)),
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "module": module,
+                "size_bytes": size,
+                "srcversion": srcversion,
+                "vermagic": vermagic,
+                "binary_markers": binary_markers,
+                "source_markers": count,
+                "source_marker_lines": lines,
+                "source_not_counted": not_counted,
+                "live_loaded": loaded,
+                "live_srcversion": live_srcversion,
+                "matches_live": match verdict {
+                    LiveVerdict::Same => Some(true),
+                    LiveVerdict::Different => Some(false),
+                    _ => None,
+                },
+            }))?
+        );
+        return Ok(0);
+    }
+
+    println!("snaptune validate");
+    println!("  module       {}", module.display());
+    println!("  size         {size} bytes, compressed");
+    println!(
+        "  srcversion   {}",
+        srcversion.as_deref().unwrap_or("(none recorded)")
+    );
+    println!(
+        "  vermagic     {}",
+        vermagic.as_deref().unwrap_or("(none recorded)")
+    );
+    println!();
+
+    println!("  markers      binary {}", binary_markers.len());
+    for line in binary_markers.iter().take(6) {
+        println!("                 {line}");
+    }
+    if binary_markers.len() > 6 {
+        println!("                 ... and {} more", binary_markers.len() - 6);
+    }
+    match &source {
+        Ok((count, lines)) => {
+            println!("               source {count} line(s)");
+            for line in lines.iter().take(6) {
+                println!("                 {line}");
+            }
+        }
+        Err(why) => println!("               source not counted: {why}"),
+    }
+    println!();
+
+    match (loaded, live_srcversion.as_deref()) {
+        (true, Some(live)) => println!("  live         amdgpu is loaded, srcversion {live}"),
+        (true, None) => println!("  live         amdgpu is loaded, but reports no srcversion"),
+        (false, _) => println!("  live         amdgpu is not loaded"),
+    }
+
+    // Said plainly, because a module file that is not the loaded one looks exactly
+    // like one that is, and that is the failure worth catching.
+    match verdict {
+        LiveVerdict::Same => println!("  verdict      the loaded module is this file"),
+        LiveVerdict::Different => println!(
+            "  verdict      MISMATCH — the loaded module is NOT this file\n\
+             \x20              loaded {}\n\
+             \x20              this   {}",
+            live_srcversion.as_deref().unwrap_or("?"),
+            srcversion.as_deref().unwrap_or("?")
+        ),
+        LiveVerdict::NotLoaded => println!(
+            "  verdict      cannot be checked against the running kernel: amdgpu is not loaded"
+        ),
+        LiveVerdict::NotComparable => println!(
+            "  verdict      cannot be checked: {} has no srcversion to compare",
+            if srcversion.is_none() {
+                "this module"
+            } else {
+                "the loaded module"
+            }
+        ),
+    }
+    Ok(0)
 }
 
 /// Register artefacts built elsewhere as a new snapshot.
@@ -3042,5 +3259,98 @@ mod tests {
         ])
         .expect("the shell's `import` alias must parse");
         assert!(matches!(cmd.cmd, Cmd::Register { .. }));
+    }
+
+    #[test]
+    fn validate_takes_a_module_a_tree_and_a_release() {
+        let cmd = Cli::try_parse_from([
+            "snaptune",
+            "validate",
+            "/m/amdgpu.ko.zst",
+            "--tree",
+            "/src/linux",
+            "--for",
+            "7.2.9-1-cachyos-bore",
+        ])
+        .expect("validate must parse");
+        match cmd.cmd {
+            Cmd::Validate {
+                module,
+                tree,
+                for_release,
+            } => {
+                assert_eq!(module.as_deref(), Some(Path::new("/m/amdgpu.ko.zst")));
+                assert_eq!(tree.as_deref(), Some(Path::new("/src/linux")));
+                assert_eq!(for_release.as_deref(), Some("7.2.9-1-cachyos-bore"));
+            }
+            other => panic!("expected validate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_needs_nothing_but_itself() {
+        // Everything is optional because the useful default is "the module that is
+        // installed for the kernel I am running", which needs no arguments.
+        let cmd = Cli::try_parse_from(["snaptune", "validate"]).expect("validate must parse");
+        match cmd.cmd {
+            Cmd::Validate {
+                module,
+                tree,
+                for_release,
+            } => {
+                assert!(module.is_none() && tree.is_none() && for_release.is_none());
+            }
+            other => panic!("expected validate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_shell_s_names_for_validate_still_work() {
+        for name in ["markers", "check-module"] {
+            let cmd =
+                Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                matches!(cmd.cmd, Cmd::Validate { .. }),
+                "{name} must mean validate"
+            );
+        }
+    }
+
+    #[test]
+    fn the_verdict_calls_out_a_module_that_is_not_the_loaded_one() {
+        let ours = "11F98DC7EE7590D51AA9C9C";
+        let other = "B073B0B14D2B2A2BCD3F67A";
+
+        assert_eq!(
+            live_verdict(true, Some(ours), Some(ours)),
+            LiveVerdict::Same
+        );
+        // This is the whole point of the check: two numbers that differ mean the
+        // file is not what is running, and nothing else in the tool says so.
+        assert_eq!(
+            live_verdict(true, Some(other), Some(ours)),
+            LiveVerdict::Different
+        );
+        assert_eq!(
+            live_verdict(false, Some(ours), None),
+            LiveVerdict::NotLoaded
+        );
+    }
+
+    #[test]
+    fn a_missing_srcversion_is_not_reported_as_a_mismatch() {
+        // Absence of evidence must not be reported as evidence: telling someone
+        // their good module is the wrong one is the worse of the two mistakes.
+        assert_eq!(
+            live_verdict(true, Some("11F98DC7EE7590D51AA9C9C"), None),
+            LiveVerdict::NotComparable
+        );
+        assert_eq!(
+            live_verdict(true, None, Some("11F98DC7EE7590D51AA9C9C")),
+            LiveVerdict::NotComparable
+        );
+        assert_eq!(live_verdict(true, None, None), LiveVerdict::NotComparable);
+        // Not loaded wins over a missing srcversion: there is nothing to compare to.
+        assert_eq!(live_verdict(false, None, None), LiveVerdict::NotLoaded);
     }
 }
