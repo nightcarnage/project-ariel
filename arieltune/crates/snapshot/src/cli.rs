@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use crate::dev;
 use crate::grub;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
@@ -116,7 +117,26 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-
+    /// Plan a dev snapshot: rebuild only the modules the tree has actually
+    /// changed, into a snapshot of its own. Read-only so far.
+    ///
+    /// The dev loop does not need a kernel build, only the amdgpu module relinked
+    /// (`make M=... modules`, seconds). The build set comes from `git status`, not
+    /// from the patches' `touches` field, because the question is what the tree
+    /// differs in right now — after hand-edits, half-reverted hunks, or a file the
+    /// patch author never listed.
+    ///
+    /// This verb currently REPORTS the plan and writes nothing: the build and the
+    /// snapshot assembly land next. It refuses rather than pretending when the
+    /// tree builds a different kernel from the one running, or when every change
+    /// is outside drivers/ and a module rebuild would capture none of it.
+    Dev {
+        /// Description of this iteration, e.g. "patch 25 variant".
+        description: String,
+        /// Kernel source tree (or set SNAPSHOT_TREE).
+        #[arg(long, value_name = "DIR", env = "SNAPSHOT_TREE")]
+        tree: Option<PathBuf>,
+    },
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
         /// Snapshot id, e.g. snap-0848359a.
@@ -229,6 +249,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
         Cmd::GrubList => cmd_grub_list(&store, json),
         Cmd::Diff { a, b } => cmd_diff(&store, &a, &b, json),
         Cmd::Golden { id, dry_run } => cmd_golden(&store.paths, id.as_deref(), dry_run, json),
+        Cmd::Dev { description, tree } => cmd_dev(&description, tree.as_deref(), json),
         Cmd::Pin { id, dry_run } => cmd_pin(&store.paths, &id, dry_run),
         Cmd::Unpin { dry_run } => cmd_unpin(&store.paths, dry_run),
         Cmd::Hide { id, dry_run } => cmd_hide(&store.paths, &id, dry_run),
@@ -341,6 +362,48 @@ fn cmd_golden(paths: &Paths, id: Option<&str>, dry_run: bool, json: bool) -> Res
         println!("This replaces whatever was golden before, which is now removable.");
     }
     Ok(0)
+}
+
+fn cmd_dev(description: &str, tree: Option<&std::path::Path>, json: bool) -> Result<i32> {
+    let Some(path) = tree else {
+        anyhow::bail!(
+            "no source tree given.\n\
+             Pass --tree <dir> or set SNAPSHOT_TREE. This is the tree you are\n\
+             editing, not the snapshot store."
+        );
+    };
+
+    let plan = dev::plan(dev::inspect_tree(path)?, dev::running_release());
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "description": description,
+                "tree": plan.tree.path,
+                "release": plan.tree.release,
+                "running": plan.running,
+                "revision": plan.tree.revision,
+                "changed": plan.tree.dirty,
+                "modules": plan.modules,
+                "elsewhere": plan.elsewhere,
+                "blockers": plan.blockers,
+                "buildable": plan.can_build(),
+            }))?
+        );
+    } else {
+        println!("dev plan — {description}");
+        println!();
+        for line in plan.describe() {
+            println!("{line}");
+        }
+        println!();
+        println!("Nothing was built and nothing was written.");
+    }
+
+    // Non-zero when the tree cannot produce a module, so an agent can gate on the
+    // exit code instead of parsing prose — the `doctor --verify` convention.
+    Ok(if plan.can_build() { 0 } else { 2 })
 }
 
 /// One field that differs between two snapshots.
