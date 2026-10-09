@@ -295,6 +295,34 @@ pub fn assemble(
     Ok((member, derived))
 }
 
+/// The kernel release a module inside an image is built for.
+///
+/// Taken from the member path rather than from the machine you happen to be
+/// standing at:
+///
+/// ```text
+///   usr/lib/modules/7.2.9-1-cachyos-bore/kernel/drivers/.../amdgpu.ko.zst
+///                    ^^^^^^^^^^^^^^^^^^^^
+/// ```
+///
+/// This matters more than it looks. The vermagic gate exists so a module the
+/// target kernel would refuse never gets built into an image — but "the target" is
+/// whatever boots *that image*, and that is frequently not the machine running the
+/// command. Building for a blade from a workstation is the normal case, and
+/// comparing there against the workstation's own kernel refuses work that is
+/// perfectly correct.
+///
+/// Pure, so it is tested rather than trusted.
+pub fn kver_from_member(member: &str) -> Option<String> {
+    let mut parts = member.split('/');
+    // `usr/lib/modules/<kver>/...`
+    if parts.next()? != "usr" || parts.next()? != "lib" || parts.next()? != "modules" {
+        return None;
+    }
+    let kver = parts.next()?;
+    (!kver.is_empty()).then(|| kver.to_string())
+}
+
 /// What a dev snapshot from this tree would involve.
 #[derive(Debug, Clone)]
 pub struct DevPlan {
@@ -684,7 +712,7 @@ mod tests {
     /// Newest rather than first: an incremental build leaves older objects behind,
     /// and picking one of those would quietly snapshot the previous iteration.
     #[test]
-    fn the_newest_module_wins_over_an_older_one() {
+    fn the_module_wins_over_an_older_one() {
         let root = tree_dir("build-newest");
         let dir = root.join("drivers/gpu/drm/amd/amdgpu");
         std::fs::write(dir.join("stale.ko"), vec![0u8; 16]).unwrap();
@@ -695,5 +723,45 @@ mod tests {
         assert_eq!(found.file_name().unwrap(), "fresh.ko");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- which kernel the build is for -------------------------------------
+
+    #[test]
+    fn the_kver_is_read_out_of_the_member_path() {
+        assert_eq!(
+            kver_from_member(
+                "usr/lib/modules/7.2.9-1-cachyos-bore/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst"
+            ),
+            Some("7.2.9-1-cachyos-bore".to_string())
+        );
+        // Anything that is not a module path must say so rather than guess.
+        assert_eq!(kver_from_member("boot/vmlinuz"), None);
+        assert_eq!(kver_from_member("usr/lib/modules/"), None);
+        assert_eq!(kver_from_member(""), None);
+    }
+
+    /// The gate has to compare against the kernel the *image* is for. Otherwise
+    /// building for a blade from a workstation is refused for being correct.
+    #[test]
+    fn building_for_another_kernel_is_not_a_refusal() {
+        // Tree is 7.2.9-bore, this machine runs 7.2.9-cachyos: a mismatch locally...
+        let local = plan(
+            tree(&["drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c"]),
+            Some("7.2.9-1-cachyos".to_string()),
+        );
+        assert!(
+            !local.can_build(),
+            "against the local kernel it should warn"
+        );
+
+        // ...but asked about the kernel the target boots, the same tree is exactly
+        // right and must not be refused. (The fixture tree builds
+        // 7.0.9-1-cachyos-bore, which is why that is the release that clears it.)
+        let targeted = plan(
+            tree(&["drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c"]),
+            Some("7.0.9-1-cachyos-bore".to_string()),
+        );
+        assert!(targeted.can_build(), "{:?}", targeted.blockers);
     }
 }

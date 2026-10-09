@@ -10,7 +10,7 @@
 //! `--json` is new, and is the reason agents can stop scraping the text table.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -148,6 +148,10 @@ pub enum Cmd {
         /// Derive from this image directly, instead of a snapshot's.
         #[arg(long, value_name = "IMAGE", conflicts_with = "parent")]
         from: Option<PathBuf>,
+        /// Kernel release the module is being built for. Default: read from the
+        /// parent image, else this machine's running kernel.
+        #[arg(long = "for", value_name = "RELEASE")]
+        for_release: Option<String>,
         /// Where to write the derived image. Default: scratch space, reported so
         /// the result can be inspected.
         #[arg(long, value_name = "IMAGE")]
@@ -271,6 +275,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             run,
             parent,
             from,
+            for_release,
             out,
         } => cmd_dev(
             &store,
@@ -280,6 +285,7 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
                 run,
                 parent,
                 from,
+                for_release,
                 out,
             },
             json,
@@ -407,7 +413,28 @@ struct DevTargets {
     run: bool,
     parent: Option<String>,
     from: Option<PathBuf>,
+    for_release: Option<String>,
     out: Option<PathBuf>,
+}
+
+/// Which kernel release a dev build is for.
+///
+/// The order matters. An explicit `--for` wins; otherwise the parent image is
+/// asked, because the image knows the kernel it boots and that is authoritative;
+/// only then does it fall back to this machine, which is the wrong answer whenever
+/// you are building for a blade from a workstation.
+fn dev_target_release(targets: &DevTargets, parent_image: Option<&Path>) -> Option<String> {
+    if let Some(release) = &targets.for_release {
+        return Some(release.clone());
+    }
+    if let Some(image) = parent_image {
+        if let Ok(member) = image::find_member(image, "amdgpu.ko.zst") {
+            if let Some(kver) = dev::kver_from_member(&member) {
+                return Some(kver);
+            }
+        }
+    }
+    dev::running_release()
 }
 
 fn cmd_dev(
@@ -425,7 +452,21 @@ fn cmd_dev(
         );
     };
 
-    let plan = dev::plan(dev::inspect_tree(path)?, dev::running_release());
+    // Resolve where the image comes from first, so the tree can be judged against
+    // the kernel that image boots rather than against this machine.
+    let parent_image = match targets.from.clone() {
+        Some(image) => Some(image),
+        None => match (&targets.parent, store.booted_id()) {
+            (Some(id), _) => Some(store.paths.boot.join(format!("initramfs-{id}.img"))),
+            (None, Some(id)) => Some(store.paths.boot.join(format!("initramfs-{id}.img"))),
+            (None, None) => None,
+        },
+    };
+
+    let plan = dev::plan(
+        dev::inspect_tree(path)?,
+        dev_target_release(&targets, parent_image.as_deref()),
+    );
 
     if !json {
         println!("dev plan — {description}");
@@ -472,25 +513,10 @@ fn cmd_dev(
     // The image this derives from. Everything the dev image is not explicitly told
     // to replace comes from here, so getting it wrong means shipping the parent's
     // contents under a new name.
-    let parent_image = match targets.from.as_deref() {
-        Some(image) => image.to_path_buf(),
-        None => {
-            let id = match targets.parent.as_deref() {
-                Some(id) => id.to_string(),
-                None => store
-                    .booted_id()
-                    .context("not booted from a snapshot; pass --parent <id> or --from <image>")?,
-            };
-            store.paths.boot.join(format!("initramfs-{id}.img"))
-        }
-    };
-    if !parent_image.is_file() {
-        anyhow::bail!(
-            "no parent image at {} — it is root-readable only, or the snapshot has \
-             no image. Pass --from <image> to name one.",
-            parent_image.display()
-        );
-    }
+    let parent_image = parent_image.filter(|image| image.is_file()).context(
+        "no parent image: not booted from a snapshot, and none was named.\n\
+             Pass --from <image> or --parent <id>.",
+    )?;
 
     let work = std::env::temp_dir().join(format!("snapdev-{}", std::process::id()));
     let prepared = dev::build(&plan.tree, &write::System, &work)?;
