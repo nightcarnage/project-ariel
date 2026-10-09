@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! BC-250 kernel snapshot manager, ported from `bc-250-snapshotter/snapshot`.
 //!
-//! This crate is deliberately **read-only in its first version**. It exists to
-//! answer "what snapshots are on this blade, and which one did I boot?" without
-//! mutating anything, so it can be compared against the shell tool it replaces
-//! before it is trusted with writes.
+//! This crate **started read-only** — it existed to answer "what snapshots are on
+//! this blade, and which one did I boot?" so it could be compared against the shell
+//! tool it replaces before it was trusted with writes. It now owns writes too:
+//! `prune`, `pin`, `hide`, `boot` and `dev --run --register` all change the store,
+//! `/boot` or the boot configuration. The read-only verbs are `list`, `show`,
+//! `current`, `lineage`, `grub-list`, `diff`, `doctor` and `verify`; every writing
+//! verb is listed in `docs/snapshot-tool.md` with what it touches.
 //!
 //! Design and invariants: `docs/snapshot-tool.md` in this repository. The short
 //! version of the rule that matters: the on-disk ids, manifest field names and
@@ -15,9 +18,14 @@
 //! |---|---|
 //! | [`id`] | the three content-addressed id formulas, with the shell's exact traps |
 //! | [`manifest`] | `manifest.yaml`, parsed leniently because the writer's types vary |
-//! | [`store`] | read-only discovery over the snapshot root |
+//! | [`store`] | discovery over the snapshot root |
 //! | [`grub`] | `40_custom` blocks and `grub.cfg` menu entries |
-//! | [`cli`] | the read-only command surface |
+//! | [`register`] | turning a verified image into a bootable snapshot |
+//! | [`write`] | the action plan every writing verb is built from |
+//! | [`doctor`] | whether a *store* is coherent |
+//! | [`verify`] | whether one *snapshot* is what its manifest claims |
+//! | [`report`] | the findings vocabulary those two share |
+//! | [`cli`] | the command surface |
 
 pub mod cli;
 pub mod cpio;
