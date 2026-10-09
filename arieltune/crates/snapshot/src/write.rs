@@ -647,13 +647,29 @@ pub fn apply(plan: &Plan, dry_run: bool) -> Result<()> {
 }
 
 /// Execute a plan, sending its commands to `runner`.
+///
+/// `quiet` suppresses the plan, and exists for one case: a verb that emits JSON on
+/// stdout. The plan is narration about what is being done, and prose interleaved
+/// with a JSON object makes the object unparseable — `snaptune --json create … | jq`
+/// would fail on the summary line. It is a parameter rather than a move to stderr
+/// because for `--dry-run` the plan *is* the result: redirecting it away from stdout
+/// would break `snaptune prune <id> --dry-run > plan.txt`.
 pub fn apply_with(plan: &Plan, dry_run: bool, runner: &dyn Runner) -> Result<()> {
-    println!("{}", plan.summary);
-    for line in plan.describe() {
-        println!("  {line}");
+    apply_with_mode(plan, dry_run, runner, false)
+}
+
+/// [`apply_with`], with the plan's printing under the caller's control.
+pub fn apply_with_mode(plan: &Plan, dry_run: bool, runner: &dyn Runner, quiet: bool) -> Result<()> {
+    if !quiet {
+        println!("{}", plan.summary);
+        for line in plan.describe() {
+            println!("  {line}");
+        }
     }
     if dry_run {
-        println!("\n--dry-run: nothing was changed.");
+        if !quiet {
+            println!("\n--dry-run: nothing was changed.");
+        }
         return Ok(());
     }
 

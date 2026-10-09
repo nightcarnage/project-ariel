@@ -877,6 +877,7 @@ fn cmd_dev(
                 tree: Some(&plan.tree),
                 rebuilt_modules: &plan.modules,
             },
+            json,
         )?)
     } else {
         None
@@ -936,6 +937,7 @@ fn register_build(
     target_release: Option<&str>,
     targets: &DevTargets,
     provenance: &Provenance<'_>,
+    quiet: bool,
 ) -> Result<String> {
     let kernel_version = target_release
         .context(
@@ -1012,7 +1014,9 @@ fn register_build(
     if !targets.dry_run {
         require_root()?;
     }
-    write::apply(&plan, targets.dry_run)?;
+    // `quiet` is the caller's `--json`: the registration plan is narration, and the
+    // caller is about to print one object on stdout and nothing else.
+    write::apply_with_mode(&plan, targets.dry_run, &write::System::default(), quiet)?;
     Ok(id)
 }
 
@@ -1453,6 +1457,7 @@ fn cmd_rebuild(
             tree: Some(&plan.tree),
             rebuilt_modules: &plan.modules,
         },
+        json,
     )?;
 
     out["registered"] = serde_json::json!(new_id);
@@ -1682,6 +1687,7 @@ fn cmd_create(
             tree: built_tree,
             rebuilt_modules: &rebuilt_modules,
         },
+        json,
     )?;
 
     out["golden"] = serde_json::json!(golden);
