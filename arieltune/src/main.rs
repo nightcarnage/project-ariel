@@ -90,9 +90,11 @@ enum Top {
     /// SNAP tab: the kernel snapshot store and its GRUB entries. Bare `snap` opens the tab.
     ///
     /// `arieltune snap <subcommand>` runs the CLI. Reads are safe anywhere; the writers change the
-    /// boot configuration (/etc/grub.d, grubenv) and need root, and each takes --dry-run to print the
-    /// plan first. The guards refuse to hide the booted, golden, or pinned snapshot, because removing
-    /// that menu entry makes GRUB fall back to entry 0 and boot a different kernel.
+    /// boot configuration (/etc/grub.d, grubenv, and /boot for `dev --register`) and need root, and
+    /// each takes --dry-run to print the plan first. `dev --register` runs the *build* as the source
+    /// tree's owner even under sudo, so a root build cannot leave root-owned objects in the tree.
+    /// The guards refuse to hide the booted, golden, or pinned snapshot, because removing that menu
+    /// entry makes GRUB fall back to entry 0 and boot a different kernel.
     ///
     /// The module behind this namespace is snaptune (also a standalone binary of that name). The
     /// verb surface is being brought up to the bc-250-snapshotter shell tool's, which it replaces.
