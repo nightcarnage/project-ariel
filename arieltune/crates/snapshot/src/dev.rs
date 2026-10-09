@@ -224,8 +224,12 @@ pub struct Prepared {
     pub bytes: Vec<u8>,
     /// The uncompressed `.ko` the build produced.
     pub source: PathBuf,
-    /// Size of the uncompressed module, for reporting.
+    /// The uncompressed module, for reporting.
     pub raw_bytes: u64,
+    /// The compressed module on disk — the same bytes as [`Prepared::bytes`], but
+    /// as a file, so registration can copy it into the snapshot store without the
+    /// caller having to write it out again.
+    pub compressed: PathBuf,
 }
 
 /// Build the module directories the tree has changed, and compress the result.
@@ -300,6 +304,7 @@ pub fn build(tree: &Tree, runner: &dyn Runner, work: &Path) -> Result<Prepared> 
             .with_context(|| format!("reading {}", compressed.display()))?,
         source: ko,
         raw_bytes,
+        compressed,
     })
 }
 

@@ -46,6 +46,19 @@ pub enum Action {
         to: PathBuf,
         what: String,
     },
+    /// Create a directory, including any missing parents.
+    Mkdir { path: PathBuf, what: String },
+    /// Copy a file.
+    ///
+    /// Separate from [`Action::Write`] because the artefacts a snapshot owns —
+    /// the compressed module, the initramfs, the kernel — are tens of megabytes
+    /// each, and holding them as `contents` would mean a plan carried an entire
+    /// snapshot in memory just to describe it.
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        what: String,
+    },
     /// Run a program. `argv[0]` is the program.
     Run { argv: Vec<String>, what: String },
 }
@@ -68,6 +81,10 @@ impl Plan {
                 }
                 Action::Rename { from, to, what } => {
                     format!("rename {} -> {} ({})", from.display(), to.display(), what)
+                }
+                Action::Mkdir { path, .. } => format!("mkdir  {}", path.display()),
+                Action::Copy { from, to, .. } => {
+                    format!("copy   {} -> {}", from.display(), to.display())
                 }
                 Action::Run { argv, what } => format!("run    {} ({})", argv.join(" "), what),
             })
@@ -470,6 +487,14 @@ pub fn apply_with(plan: &Plan, dry_run: bool, runner: &dyn Runner) -> Result<()>
             Action::Rename { from, to, .. } => {
                 std::fs::rename(from, to)
                     .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+            }
+            Action::Mkdir { path, .. } => {
+                std::fs::create_dir_all(path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+            }
+            Action::Copy { from, to, .. } => {
+                std::fs::copy(from, to)
+                    .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
             }
             Action::Run { argv, .. } => runner.run(argv)?,
         }

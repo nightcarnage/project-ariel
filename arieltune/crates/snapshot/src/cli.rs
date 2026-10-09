@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! The command surface. Every verb here is **read-only**.
+//! The command surface.
 //!
 //! `list`/`show`/`current`/`lineage`/`grub-list` mirror the shell tool's verbs of
 //! the same name, and `list --ids` is kept byte-compatible because
 //! `apu::initramfs` parses it (`snapshot list --ids`) to answer "is this
 //! snapshot one of ours?". Until that call site is replaced, that output is a
 //! contract.
+//!
+//! Reading is always safe. The verbs that write — pin, unpin, hide, unhide,
+//! golden, and `dev --register` — say so in their help, check for root, and take
+//! `--dry-run` to print the plan first.
 //!
 //! `--json` is new, and is the reason agents can stop scraping the text table.
 
@@ -18,7 +22,9 @@ use serde::Serialize;
 
 use crate::dev;
 use crate::grub;
+use crate::id;
 use crate::image;
+use crate::register;
 use crate::store::{human_bytes, Paths, Snapshot, Store};
 use crate::write;
 
@@ -119,7 +125,7 @@ pub enum Cmd {
         dry_run: bool,
     },
     /// Plan a dev snapshot: rebuild only the modules the tree has actually
-    /// changed, into a snapshot of its own. Read-only so far.
+    /// changed, into a snapshot of its own.
     ///
     /// The dev loop does not need a kernel build, only the amdgpu module relinked
     /// (`make M=... modules`, seconds). The build set comes from `git status`, not
@@ -127,10 +133,16 @@ pub enum Cmd {
     /// differs in right now — after hand-edits, half-reverted hunks, or a file the
     /// patch author never listed.
     ///
-    /// This verb currently REPORTS the plan and writes nothing: the build and the
-    /// snapshot assembly land next. It refuses rather than pretending when the
-    /// tree builds a different kernel from the one running, or when every change
-    /// is outside drivers/ and a module rebuild would capture none of it.
+    /// Without `--run` this only reports the plan. With `--run` it builds the
+    /// module and derives an image from the parent's, verifying the result against
+    /// an independent cpio oracle. With `--register` as well it then becomes a
+    /// real snapshot: an id, a manifest, boot artefacts under `/boot`, and a GRUB
+    /// entry — so the iteration shows up in the SNAP tab and boots through the
+    /// normal flow.
+    ///
+    /// It refuses rather than pretending when the tree builds a different kernel
+    /// from the one the parent image boots, or when every change is outside
+    /// drivers/ and a module rebuild would capture none of it.
     Dev {
         /// Description of this iteration, e.g. "patch 25 variant".
         description: String,
@@ -156,6 +168,14 @@ pub enum Cmd {
         /// the result can be inspected.
         #[arg(long, value_name = "IMAGE")]
         out: Option<PathBuf>,
+        /// Register the result as a snapshot: give it an id, a manifest, boot
+        /// artefacts and a GRUB entry. Implies --run. Needs root, and takes
+        /// --dry-run to print the plan first.
+        #[arg(long, requires = "run")]
+        register: bool,
+        /// With --register, print the registration plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Pin a snapshot as the permanent GRUB default. Writes grubenv; needs root.
     Pin {
@@ -277,6 +297,8 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             from,
             for_release,
             out,
+            register,
+            dry_run,
         } => cmd_dev(
             &store,
             &description,
@@ -287,6 +309,8 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
                 from,
                 for_release,
                 out,
+                register,
+                dry_run,
             },
             json,
         ),
@@ -415,6 +439,8 @@ struct DevTargets {
     from: Option<PathBuf>,
     for_release: Option<String>,
     out: Option<PathBuf>,
+    register: bool,
+    dry_run: bool,
 }
 
 /// Which kernel release a dev build is for.
@@ -463,10 +489,11 @@ fn cmd_dev(
         },
     };
 
-    let plan = dev::plan(
-        dev::inspect_tree(path)?,
-        dev_target_release(&targets, parent_image.as_deref()),
-    );
+    // Resolved once and reused: the plan is judged against it, and if the build
+    // is registered, the manifest records the same release. Two resolutions could
+    // disagree.
+    let target_release = dev_target_release(&targets, parent_image.as_deref());
+    let plan = dev::plan(dev::inspect_tree(path)?, target_release.clone());
 
     if !json {
         println!("dev plan — {description}");
@@ -546,6 +573,24 @@ fn cmd_dev(
         );
     }
 
+    // Registration happens after verification, never before: promoting an image
+    // that failed the oracle check into a boot menu entry is exactly the silent
+    // wrong-image boot the whole check exists to prevent.
+    let registered_id = if targets.register {
+        Some(register_dev(
+            store,
+            description,
+            &prepared,
+            &dest,
+            &parent_image,
+            target_release.as_deref(),
+            &targets,
+            plan.tree.path.as_path(),
+        )?)
+    } else {
+        None
+    };
+
     if json {
         println!(
             "{}",
@@ -561,6 +606,7 @@ fn cmd_dev(
                 "image_bytes": derived.image_bytes,
                 "delta": derived.delta(),
                 "verified": true,
+                "registered": registered_id,
             }))?
         );
     } else {
@@ -576,7 +622,83 @@ fn cmd_dev(
         println!("Verified: that member in the new image is byte-identical to the module built.");
         println!("The live module tree was not written and the base kernel is untouched.");
     }
+
+    if let Some(id) = &registered_id {
+        if !json {
+            println!();
+            println!("Registered: {id}");
+            println!("The SNAP tab lists it, and it is on the GRUB menu.");
+        }
+    }
     Ok(0)
+}
+
+/// Turn a verified dev image into a real snapshot.
+///
+/// The id is computed the same way the shell tool's `register` computes it, over
+/// the module, the image and the kernel — so the id *is* the claim that this
+/// module is in this image, and registering the same build twice is refused
+/// rather than overwriting.
+///
+/// The kernel is resolved from the parent image's name rather than from the
+/// running machine: on a workstation the running kernel is the wrong one, and
+/// pairing a snapshot with a kernel it was not built for is a mistake that only
+/// shows up as a hang at boot.
+#[allow(clippy::too_many_arguments)]
+fn register_dev(
+    store: &Store,
+    description: &str,
+    prepared: &dev::Prepared,
+    image: &Path,
+    parent_image: &Path,
+    target_release: Option<&str>,
+    targets: &DevTargets,
+    tree: &Path,
+) -> Result<String> {
+    let kernel_version = target_release
+        .context(
+            "cannot tell which kernel release to record in the manifest.\n\
+             Pass --for <release>, or point --from at a snapshot's own image.",
+        )?
+        .to_string();
+
+    let vmlinuz = register::vmlinuz_for(parent_image)?;
+    if !vmlinuz.is_file() {
+        anyhow::bail!(
+            "the parent image's kernel is not where its name says: {}\n\
+             Registration copies the kernel, so it has to be there. Pass --from \
+             with the image's real path under /boot, or --parent <snap-id>.",
+            vmlinuz.display()
+        );
+    }
+
+    let id = id::register_id(&prepared.compressed, image, &vmlinuz, None);
+    let timestamp = register::now_timestamp()?;
+    // Read from the live file, not from the plan: the entry is appended to it, and
+    // writing only the new entry would delete every other snapshot's menu entry.
+    let existing_custom = std::fs::read_to_string(&store.paths.grub_custom).unwrap_or_default();
+    let cmdline = register::cmdline_for(&vmlinuz)?;
+
+    let req = register::Request {
+        id: id.clone(),
+        description: description.to_string(),
+        module: prepared.compressed.clone(),
+        initramfs: image.to_path_buf(),
+        vmlinuz,
+        kernel_version,
+        cmdline,
+        root_uuid: register::root_uuid()?,
+        parent: targets.parent.clone().or_else(|| store.booted_id()),
+        tree: Some(tree.to_path_buf()),
+        acpi_override: store.paths.boot.join("acpi_override.cpio").is_file(),
+    };
+
+    let plan = register::plan(&store.paths, &req, &timestamp, &existing_custom)?;
+    if !targets.dry_run {
+        require_root()?;
+    }
+    write::apply(&plan, targets.dry_run)?;
+    Ok(id)
 }
 
 /// One field that differs between two snapshots.
@@ -1028,6 +1150,41 @@ fn cmd_grub_list(store: &Store, json: bool) -> Result<i32> {
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+
+    fn parse_dev(args: &[&str]) -> Result<Cmd, clap::Error> {
+        let mut argv = vec!["snaptune", "dev", "an iteration"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).map(|cli| cli.cmd)
+    }
+
+    /// Registering is only meaningful for a build that actually ran: promoting an
+    /// image that was never built would register the parent under a new name.
+    #[test]
+    fn register_requires_run() {
+        assert!(
+            parse_dev(&["--register"]).is_err(),
+            "--register without --run must be refused, not silently ignored"
+        );
+        assert!(
+            parse_dev(&["--run", "--register"]).is_ok(),
+            "--run --register is the shape that works"
+        );
+    }
+
+    /// A dry run has to be expressible without also building, so the plan can be
+    /// reviewed before anything takes ten minutes.
+    #[test]
+    fn a_dev_dry_run_parses() {
+        let cmd = parse_dev(&["--run", "--register", "--dry-run"]).expect("parse");
+        match cmd {
+            Cmd::Dev {
+                register, dry_run, ..
+            } => {
+                assert!(register && dry_run);
+            }
+            other => panic!("expected dev, got {other:?}"),
+        }
+    }
 
     fn snap(id: &str, manifest: &str) -> Snapshot {
         Snapshot {

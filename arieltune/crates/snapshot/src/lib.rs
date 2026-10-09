@@ -26,6 +26,7 @@ pub mod grub;
 pub mod id;
 pub mod image;
 pub mod manifest;
+pub mod register;
 pub mod screen;
 pub mod store;
 pub mod write;
