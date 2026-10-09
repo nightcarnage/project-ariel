@@ -247,6 +247,13 @@ pub fn build(tree: &Tree, runner: &dyn Runner, work: &Path) -> Result<Prepared> 
         .with_context(|| format!("creating scratch space {}", work.display()))?;
 
     for dir in &modules {
+        // `-j` matters more than it looks: without it this is a single-threaded
+        // compile of a large driver on a machine with eight cores, which turns a
+        // seconds-long relink into minutes. The shell tool used `-j$(nproc)` and
+        // there was no reason to drop it.
+        let jobs = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
         // `-C` rather than a working directory, so the same argument vector works
         // through any Runner implementation.
         let argv: Vec<String> = vec![
@@ -254,6 +261,7 @@ pub fn build(tree: &Tree, runner: &dyn Runner, work: &Path) -> Result<Prepared> 
             "-C".to_string(),
             tree.path.display().to_string(),
             format!("M={dir}"),
+            format!("-j{jobs}"),
             "modules".to_string(),
         ];
         runner.run(&argv)?;
@@ -726,6 +734,13 @@ mod tests {
         assert!(
             makes[0].contains(&"modules".to_string()),
             "it must be a modules build, not a full build: {:?}",
+            makes[0]
+        );
+        // Single-threaded, this build is minutes instead of seconds on an 8-core
+        // box — the difference is one flag, so it is worth pinning.
+        assert!(
+            makes[0].iter().any(|a| a.starts_with("-j")),
+            "the build must be parallel: {:?}",
             makes[0]
         );
         assert!(
