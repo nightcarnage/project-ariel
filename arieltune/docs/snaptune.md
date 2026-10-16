@@ -1,11 +1,11 @@
 # Snaptune: Fail-Safe Kernel Snapshots and Module Management
 
 Snaptune takes the guesswork out of BC-250 kernel development by managing your
-snapshots, boot entries, and module verification in one place.
+snapshots and boot entries, and verifying your modules in one place.
 
-It manages the kernel snapshots of a BC-250 blade: what is on the disk, which one this
-boot came from, and the GRUB menu entries that boot them. It is the SNAP tab
-(`arieltune snap`), and it is also a standalone binary.
+It is the SNAP tab (`arieltune snap`), and it is also a standalone binary. It answers
+three questions: what is on the disk, which snapshot this boot came from, and which
+GRUB entry boots each one.
 
 ## Key Features
 
