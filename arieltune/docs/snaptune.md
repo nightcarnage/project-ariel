@@ -692,7 +692,9 @@ Two accessors deliberately behave differently from the rest:
   would answer with the module's own path, plausibly and wrongly.
 - `cmdline()` is **not safe to boot with**. It is the *live* cmdline at capture
   time, can name whichever kernel was booted then, and can contain `BOOT_IMAGE=`
-  twice (`snap-da794092` does). Regenerate it; do not reuse it.
+  twice — `snap-da794092` does, and so do 19 of the 28 snapshots in the archive
+  store, so this is the normal shape of the field rather than a quirk of one
+  manifest. Regenerate it; do not reuse it.
 
 ### 8.3 Path conventions
 
