@@ -44,11 +44,11 @@ use crate::write;
         and each takes --dry-run to print exactly what it would do first. `prune`\n\
         deletes and cannot be undone; `boot` is one-shot and reverts on its own.\n\
         \n\
-        Two things the writers deliberately do not do, both of which the shell\n\
-        tool did: none of them installs a module into the live kernel tree, runs\n\
-        `mkinitcpio`, or sets the GRUB default. A snapshot is derived by replacing\n\
-        one member of a copy of an existing image, and promoting it is a separate,\n\
-        deliberate step (`boot` to try it once, `pin` to keep it).\n\
+        Two things no writer does: none of them installs a module into the live\n\
+        kernel tree, runs `mkinitcpio`, or sets the GRUB default. A snapshot is\n\
+        derived by replacing one member of a copy of an existing image, and\n\
+        promoting it is a separate, deliberate step (`boot` to try it once, `pin`\n\
+        to keep it).\n\
         \n\
         The verb layout follows the other modules: flat, one word each, a report\n\
         verb for reading and a flag for anything that writes (`dev` previews unless\n\
@@ -62,7 +62,7 @@ pub struct Cli {
     pub cmd: Cmd,
 }
 
-/// Adopt the shell tool's `SOURCE_TREE` as `SNAPSHOT_TREE`, before parsing.
+/// Adopt `SOURCE_TREE` as `SNAPSHOT_TREE`, before parsing.
 ///
 /// The fleet's scripts and runbooks export `SOURCE_TREE`, and clap resolves `env` as it
 /// parses, accepting one variable per option. Left unread, `snaptune create` would not
@@ -102,8 +102,8 @@ pub struct Global {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// List snapshots, newest first. Hidden ones are excluded, as the shell tool
-    /// does; pass --all to include them.
+    /// List snapshots, newest first. Hidden ones are excluded; pass --all to
+    /// include them.
     #[command(alias = "ls")]
     List {
         /// Print ids only, one per line. Machine-readable; kept for compatibility.
@@ -128,12 +128,10 @@ pub enum Cmd {
     /// Follow `snapshot.parent`: the provenance of every snapshot, or of one.
     ///
     /// With no id it prints one line per snapshot — its whole chain, then its date and
-    /// description — which is what the shell tool's `lineage` shows. With an id it
-    /// prints that snapshot's line alone.
+    /// description. With an id it prints that snapshot's line alone.
     ///
-    /// The shell's shape is kept on purpose, because walking from the *booted* snapshot
-    /// printed nothing at all on a machine running the distro's kernel, which is most of
-    /// them. A lineage is a property of the store, not of what this box booted.
+    /// A lineage is a property of the store, not of what this box booted, so it works
+    /// whether the machine is running the distro's kernel or one of our snapshots.
     ///
     /// A chain is printed oldest-first, root at the left. A parent that is not itself a
     /// snapshot — the fleet's root at names like `base-7.2.9-1-cachyos-bore` — is kept
@@ -157,9 +155,8 @@ pub enum Cmd {
     /// artefacts differ. Read-only.
     ///
     /// The question this answers is "what changed between the snapshot I trust and
-    /// the one I am about to boot", which the shell tool's `diff` answered from the
-    /// source tree. Doing it from the manifests means it works on a blade with no
-    /// tree at all.
+    /// the one I am about to boot". It reads the manifests rather than the source
+    /// tree, so it works on a blade with no tree at all.
     Diff {
         /// Snapshot id, e.g. snap-0848359a.
         a: String,
@@ -251,7 +248,7 @@ pub enum Cmd {
         ///
         /// The entry is looked up in `grub.cfg` first and refused if it is not
         /// there, because `grub-reboot` writes `next_entry` either way: handed
-        /// something GRUB cannot resolve it boots **entry 0**, silently, in place
+        /// something GRUB cannot resolve it boots entry 0, silently, in place
         /// of a correctly-saved default.
         ///
         /// An entry inside a submenu must be named by its full `Parent>Child`
@@ -315,12 +312,9 @@ pub enum Cmd {
     /// Rebuild an existing snapshot's module from its source tree, as a NEW
     /// snapshot. Read the original's id as its promise: it is untouched.
     ///
-    /// The shell tool's `rebuild` writes the rebuilt module into the snapshot it
-    /// names and keeps the id — so the id stops describing the content, which is
-    /// exactly the mismatch `verify` reports. It then tells you to run `create`,
-    /// which makes a new id anyway, so the in-place write was only staging.
-    ///
-    /// This refuses to stage. It builds the module for that snapshot's kernel,
+    /// Nothing is written in place: the original keeps its id and its module, so an
+    /// id never stops describing the content it was computed from — the guarantee
+    /// `verify` checks. This builds the module for that snapshot's kernel,
     /// derives the image from that snapshot's own, and registers the result — so
     /// the original keeps meaning what its name says, and the rebuild is a
     /// first-class snapshot you can boot and verify.
@@ -352,14 +346,13 @@ pub enum Cmd {
     /// module's `srcversion` against the one the running kernel reports for the
     /// loaded `amdgpu`.
     ///
-    /// **That comparison is the point.** The shell tool printed both numbers and left
-    /// the reader to compare them; if they differ, the module in the file is not the
-    /// module that is loaded, which is the most useful single fact this can report
+    /// That comparison is the point. If the two differ, the module in the file is
+    /// not the module that is loaded — the most useful single fact this can report,
     /// and the easiest to miss.
     ///
-    /// Reports rather than gates: it exits 0 whatever it finds, as the shell tool
-    /// does, because the fleet scripts call it for information. `doctor --verify` and
-    /// `verify` are the verbs that gate.
+    /// Reports rather than gates: it exits 0 whatever it finds, because the fleet
+    /// scripts call it for information. `doctor --verify` and `verify` are the verbs
+    /// that gate.
     #[command(alias = "markers", alias = "check-module")]
     Validate {
         /// Module to check, e.g. amdgpu.ko.zst. Default: the one installed for the
@@ -382,11 +375,10 @@ pub enum Cmd {
     /// everywhere — and for an initramfs generated by hand, which `create` cannot
     /// take because it derives its own by replacing one member of a base image.
     ///
-    /// The id is content-addressed over the module, the image and the kernel, using
-    /// the same formula the shell tool's `register` uses, so a snapshot registered
-    /// here keeps the id the shell would have given it and `verify` can re-derive it.
+    /// The id is content-addressed over the module, the image and the kernel, so
+    /// `verify` can re-derive it from the artefacts alone.
     ///
-    /// **The kernel release is read from the image**, not from `uname -r`:
+    /// The kernel release is read from the image, not from `uname -r`:
     /// registering artefacts for a kernel you are not running is the normal case,
     /// and the running kernel is the wrong answer exactly then. Pass `--for` for an
     /// image whose member path does not name a release.
@@ -409,8 +401,8 @@ pub enum Cmd {
         vmlinuz: PathBuf,
         /// What this snapshot is, e.g. "27/27 applied, clang".
         ///
-        /// Spelled `--desc` because that is the shell tool's flag and the fleet
-        /// scripts pass it; `--description` is accepted as well.
+        /// `--desc` is the spelling the fleet scripts use; `--description` is
+        /// accepted as well.
         #[arg(long = "desc", alias = "description", value_name = "TEXT")]
         description: String,
         /// Recorded parent. Default: taken from the image's name.
@@ -431,14 +423,11 @@ pub enum Cmd {
     /// installed is adopted as it stands — the running, already-patched module, which
     /// is all a blade provisioned from prebuilt packages has.
     ///
-    /// **What this deliberately does not do.** The shell tool's `create` installs the
-    /// new module into the live tree, runs `depmod`, generates the snapshot's
-    /// initramfs with `mkinitcpio`, then restores the known-good module and rebuilds
-    /// *every* image on the machine with `mkinitcpio -P`. If it fails in between, the
-    /// running system is left holding a module that has never booted. This derives
-    /// the snapshot by replacing one member of a copy of an existing image and
-    /// checking the result against the build, so the live module tree and the live
-    /// initramfs are never touched and the machine's own boot never depends on an
+    /// The live system is never touched. `create` derives the snapshot by replacing
+    /// one member of a copy of an existing image and checking the result against the
+    /// build, rather than installing the new module into the live tree and regenerating
+    /// the machine's own initramfs. So there is no window in which the running system
+    /// holds a module that has never booted, and the machine's boot never depends on an
     /// untested build.
     ///
     /// The difference worth knowing: the snapshot's initramfs is the base image's
@@ -510,11 +499,10 @@ pub enum Cmd {
 
     /// Record a test result in a snapshot's manifest.
     ///
-    /// Replaces what `sed` does in the shell tool with something that cannot
-    /// half-work: the manifest is edited, then **parsed back**, and the edit is
-    /// refused if the YAML no longer parses or the value did not land. A manifest is
-    /// the record of what a snapshot is, and a `sed` that matches the wrong line, or
-    /// finds no anchor at all, writes nothing and says nothing.
+    /// The edit cannot half-work: the manifest is edited, then parsed back, and
+    /// the edit is refused if the YAML no longer parses or the value did not land. A
+    /// manifest is the record of what a snapshot is, and an edit that matches the
+    /// wrong line — or finds no anchor at all — writes nothing and says nothing.
     ///
     /// Only `PASS`, `FAIL` and `INCONCLUSIVE` are accepted, because those are the
     /// three the workflow has a meaning for. `create` writes `NOT TESTED` and
@@ -539,7 +527,7 @@ pub enum Cmd {
     /// makes it the right thing to compare against, to feed to `validate`, or to
     /// hand to `create --module` on another blade.
     ///
-    /// It comes out of the **early** archive, which is where mkinitcpio keeps the
+    /// It comes out of the early archive, which is where mkinitcpio keeps the
     /// modules on these blades: amdgpu loads from the initramfs for early KMS, so it
     /// is stored where it can be reached first.
     #[command(alias = "extract", alias = "extract-module")]
@@ -557,11 +545,10 @@ pub enum Cmd {
     /// Copy the current initramfs aside, as something to boot if the next change to
     /// it does not come up.
     ///
-    /// The shell tool does this internally before it overwrites a module, because it
-    /// mutates the live system in a window. This tool does not mutate, so there is
-    /// nothing to rescue on its behalf — but the copy is still the cheapest insurance
-    /// there is before a kernel package update or a hand-edited `mkinitcpio.conf`,
-    /// and this is the verb for taking it deliberately.
+    /// Nothing here mutates the live system, so this is never needed to undo a failed
+    /// change of our own — but the copy is still the cheapest insurance there is
+    /// before a kernel package update or a hand-edited `mkinitcpio.conf`, and this is
+    /// the verb for taking it deliberately.
     ///
     /// Nothing ever reads the copy automatically. It is named
     /// `initramfs-preserve-<label>-<timestamp>.img`, and how many are already there
@@ -586,25 +573,24 @@ pub enum Cmd {
     /// visible rows at 1280x720, which is not enough to see the entries you are
     /// choosing between. `SNAPSHOT_KEEP_THEME=1` keeps the theme.
     ///
-    /// **Flattening costs more than it looks.** `10_linux` enumerates every
+    /// Flattening costs more than it looks. `10_linux` enumerates every
     /// `/boot/vmlinuz-*` with no exclusion list, so it emits an entry for each
     /// `vmlinuz-snap-*` too — and those entries sit inside the distro's "Advanced
     /// options" submenu. Flattening promotes all of them to the top level: a store with
     /// 26 snapshots gains 26 rows, and the `10_linux` twin of each snapshot is the
-    /// *worse* of the pair, carrying no `--id` and no `BOOT_IMAGE=`. That is why the
-    /// shell tool made flattening opt-in and otherwise restored the submenus;
-    /// `--restore` is that direction. Nothing here changes the menu's shape on its own —
-    /// not `pin`, not `create`.
+    /// *worse* of the pair, carrying no `--id` and no `BOOT_IMAGE=`. Flattening is
+    /// therefore opt-in, and `--restore` is the way back. Nothing here changes the
+    /// menu's shape on its own — not `pin`, not `create`.
     ///
     /// What flattening buys is that `boot --entry` then takes a bare id for every entry.
     ///
-    /// **`--nest` is the layout to want, and the one the fleet runs.** It puts the
+    /// `--nest` is the layout to want, and the one the fleet runs. It puts the
     /// generated twins back inside the distro's submenu, leaving our own entries — the
     /// described ones — at the top level where they can be read and chosen. `doctor`
     /// reports when a box is flattened, since `--nest` is not applied on its own: no
     /// verb here rewrites the boot configuration as a side effect of something else.
     ///
-    /// Regenerates `grub.cfg` and then **reads it back** to report how many submenus are
+    /// Regenerates `grub.cfg` and then reads it back to report how many submenus are
     /// actually left, because writing the setting is not the menu changing.
     #[command(name = "grub-flatten", alias = "flatten")]
     GrubFlatten {
@@ -623,7 +609,7 @@ pub enum Cmd {
     },
 
     /// Delete a snapshot completely: its `/boot` artefacts, its directory and its
-    /// GRUB entry. **Irreversible.** Needs root.
+    /// GRUB entry. Irreversible. Needs root.
     ///
     /// Use this instead of deleting files by hand. The ordering matters and is not
     /// obvious: the distro's `10_linux` generates a menu entry for every
@@ -923,7 +909,7 @@ impl Row {
         }
     }
 
-    /// `▶` booted, `★` golden, `·` hidden — the shell tool's vocabulary.
+    /// `▶` booted, `★` golden, `·` hidden.
     fn markers(&self) -> String {
         let mut s = String::new();
         s.push(if self.booted { '▶' } else { ' ' });
@@ -1463,10 +1449,9 @@ fn cmd_dev(
 
 /// Turn a verified dev image into a real snapshot.
 ///
-/// The id is computed the same way the shell tool's `register` computes it, over
-/// the module, the image and the kernel — so the id *is* the claim that this
-/// module is in this image, and registering the same build twice is refused
-/// rather than overwriting.
+/// The id is computed over the module, the image and the kernel — so the id *is* the
+/// claim that this module is in this image, and registering the same build twice is
+/// refused rather than overwriting.
 ///
 /// The kernel is resolved from the parent image's name rather than from the
 /// running machine: on a workstation the running kernel is the wrong one, and
@@ -2060,9 +2045,9 @@ fn cmd_rebuild(
 /// `vmlinuz-snap-f6009c06`            → none, that is just the id
 /// `vmlinuz-linux-cachyos-bore`       → none, nothing was stripped
 ///
-/// The shell tool's comment says a bare hash yields no label, but its regex
+/// A bare hash should yield no label, but the regex that reads these names
 /// (`^snap-([a-f0-9]{8}-)?(.+)$`) captures the hash as the label and emits it. This
-/// follows the comment rather than the code: a description is display-only, so there
+/// follows the intent rather than the regex: a description is display-only, so there
 /// is no contract to break, and `[f6009c06]` says nothing a reader wants.
 fn label_from_vmlinuz(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
@@ -2102,7 +2087,7 @@ fn result_value(raw: &str) -> Result<String> {
 
 /// Record a test result in a snapshot's manifest — and prove it landed.
 ///
-/// The shell tool does this with
+/// A `grep`-then-`sed -i` does this with
 ///
 /// ```text
 /// grep -q "${test_name}:" "$manifest" && sed -i "s|.*${test_name}:.*|...|" \
@@ -2141,7 +2126,7 @@ fn cmd_test_result(store: &Store, id: &str, name: &str, value: &str, dry_run: bo
     let Some(edited) = manifest::set_section_value(&text, "test_results", name, &value) else {
         anyhow::bail!(
             "{} has no `test_results:` section, so there is nowhere to record {name}.\n\
-             Every manifest the shell tool writes has one; if this one genuinely does not, \
+             Every manifest written by this tool has one; if this one genuinely does not, \
              add the section by hand rather than having this guess where it goes.",
             path.display()
         );
@@ -2205,8 +2190,8 @@ fn cmd_grub_flatten(store: &Store, nest: bool, dry_run: bool, json: bool) -> Res
 
     let keep_theme = std::env::var("SNAPSHOT_KEEP_THEME").is_ok_and(|v| v == "1");
 
-    // `--nest` only un-flattens. The theme is left commented there too: the shell tool
-    // never restored it, and a themed menu is one you cannot read at 720p.
+    // `--nest` only un-flattens. The theme stays commented there too: a themed menu is
+    // one you cannot read at 720p.
     let (text, flatten_changed) = grub::set_grub_default(
         &before,
         "GRUB_DISABLE_SUBMENU",
@@ -2421,7 +2406,7 @@ fn preserve_name(label: &str, stamp: &str) -> String {
 ///
 /// `.` and `..` are therefore harmless here — they are embedded in
 /// `initramfs-preserve-<label>-<stamp>.img`, never a path component of their own — but
-/// whitespace and newlines are refused too, because the shell tool's runbooks name
+/// whitespace and newlines are refused too, because the fleet's runbooks name
 /// these files by hand.
 fn check_label(label: &str) -> Result<()> {
     if label.is_empty() {
@@ -2464,8 +2449,8 @@ fn preserved_count(boot: &Path) -> (usize, u64) {
         })
 }
 
-/// `YYYYmmdd-HHMMSS`, by way of `date`, so the name matches the copies the shell tool
-/// and the fleet's runbooks already leave behind.
+/// `YYYYmmdd-HHMMSS`, by way of `date`, so the name matches the copies the fleet's
+/// runbooks already leave behind.
 fn timestamp() -> Result<String> {
     let out = std::process::Command::new("date")
         .arg("+%Y%m%d-%H%M%S")
@@ -2559,7 +2544,7 @@ enum LiveVerdict {
     NotComparable,
 }
 
-/// The comparison the shell printed two numbers for and left to the reader.
+/// The comparison that matters when two `srcversion`s are on screen.
 ///
 /// `None` on either `srcversion` is not a mismatch — it is an absence of evidence,
 /// and saying "different" would be a lie in the one direction that matters (it
@@ -2607,7 +2592,7 @@ fn cmd_validate(
     let work = std::env::temp_dir().join(format!("snapvalidate-{}", std::process::id()));
     let binary_markers = dev::module_markers(&module, &write::System::default(), &work)?;
 
-    // Three different answers, and the shell reports two of them as the same thing.
+    // Three different answers; reporting two of them as one thing loses the reason.
     let source = match tree {
         None => Err("no --tree given, so the sources were not looked in".to_string()),
         Some(tree) => match dev::source_markers(tree) {
@@ -2776,8 +2761,8 @@ fn cmd_register(
         }
     };
 
-    // A label from the filename, when it carries one. Composed the way the shell
-    // tool composes it, because the description is what the GRUB menu shows.
+    // A label from the filename, when it carries one. Composed from the filename
+    // because the description is what the GRUB menu shows.
     let description = match label_from_vmlinuz(vmlinuz) {
         Some(label) => format!("[{label}] {description}"),
         None => description.to_string(),
@@ -3044,7 +3029,7 @@ fn cmd_create(
         println!("wrote       {}", dest.display());
     }
 
-    // The shell marks the first snapshot a store ever holds as its baseline. A store
+    // The first snapshot a store ever holds is its baseline. A store
     // with no marker is one whose baseline is undecided, and `list` shows the column.
     let golden = store.golden_id().is_none();
     let status = if golden {
@@ -3505,7 +3490,7 @@ fn cmd_lineage(store: &Store, id: Option<&str>, json: bool) -> Result<i32> {
             found
         }
         // Hidden snapshots are excluded, as `list` does: hiding is how a snapshot comes
-        // off the menu, and the shell's `lineage` globs `manifest.yaml`, which a hidden
+        // off the menu, and `lineage` globs `manifest.yaml`, which a hidden
         // one no longer has.
         None => snapshots.iter().filter(|s| !s.hidden).collect(),
     };
@@ -4026,7 +4011,7 @@ mod tests {
     }
 
     #[test]
-    fn grub_flatten_parses_and_takes_the_shell_s_aliases() {
+    fn grub_flatten_parses_and_takes_the_legacy_aliases() {
         let cmd = Cli::try_parse_from(["snaptune", "grub-flatten", "--dry-run"]).expect("parse");
         match cmd.cmd {
             Cmd::GrubFlatten { nest, dry_run } => {
@@ -4052,14 +4037,13 @@ mod tests {
         assert!(matches!(cmd.cmd, Cmd::GrubFlatten { .. }));
     }
 
-    /// The spelling the shell's users and the fleet's runbooks already type.
-    /// Every alias named in the shell tool's own usage text must resolve. The list is
-    /// taken from `snapshot --help` on the tool being replaced, not from memory — an
-    /// alias that is missing is a script that breaks on the day the shell is retired.
+    /// The spelling the fleet's runbooks already type. Every alias the `snapshot`
+    /// name has historically accepted must resolve. The list is derived from its usage
+    /// text rather than from memory: an alias that is missing is a script that breaks.
     ///
     /// One line each on purpose: the failing assert names the alias that broke.
     #[test]
-    fn every_alias_in_the_shell_s_usage_text_resolves() {
+    fn every_legacy_alias_in_the_usage_text_resolves() {
         assert!(matches!(parse(&["snaptune", "ls"]), Cmd::List { .. }), "ls");
         assert!(
             matches!(parse(&["snaptune", "info", "snap-a"]), Cmd::Show { .. }),
@@ -4110,22 +4094,22 @@ mod tests {
         );
     }
 
-    /// `reboot` is deliberately **not** aliased to `boot`: in the shell both arm and
-    /// restart, while here `boot` arms and `--reboot` restarts, so the name would
+    /// `reboot` is deliberately **not** aliased to `boot`: the older interface had
+    /// both arm and restart, while here `boot` arms and `--reboot` restarts, so the name would
     /// promise a restart that does not happen. This is a test so that adding it back
     /// is a decision rather than a tidy-up.
     #[test]
-    fn the_shell_s_reboot_is_not_a_silent_alias_for_arm_only_boot() {
+    fn reboot_is_not_a_silent_alias_for_arm_only_boot() {
         assert!(
             Cli::try_parse_from(["snaptune", "reboot", "snap-aaaaaaaa"]).is_err(),
             "`reboot` must not resolve to a verb that only arms"
         );
     }
 
-    /// The shell's `SOURCE_TREE` must still select a tree, because a tree that went
+    /// `SOURCE_TREE` must still select a tree, because a tree that went
     /// unread turns `create` from "build this tree" into "adopt the installed module".
     #[test]
-    fn the_shell_s_source_tree_variable_is_honoured_alongside_ours() {
+    fn source_tree_is_honoured_alongside_snapshot_tree() {
         // Not testable through the process environment (that is global state, and the
         // tests run in parallel), so this checks what `adopt_source_tree` guarantees:
         // clap itself reads SNAPSHOT_TREE, and that is the name it is given.
@@ -4146,7 +4130,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_s_names_for_current_and_lineage_still_work() {
+    fn the_legacy_names_for_current_and_lineage_still_work() {
         for name in ["current", "status", "which"] {
             let cmd =
                 Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -4187,7 +4171,7 @@ mod tests {
             other => panic!("expected test-result, got {other:?}"),
         }
 
-        // The shell's shorter spelling.
+        // The shorter spelling.
         let cmd = Cli::try_parse_from(["snaptune", "result", "snap-a", "x", "PASS"]).unwrap();
         assert!(matches!(cmd.cmd, Cmd::TestResult { .. }), "result");
 
@@ -4887,10 +4871,10 @@ mod tests {
         );
     }
 
-    /// The fleet scripts pass `--desc`, the shell's spelling. Both it and the long
-    /// form must work, and so must the `import` alias the shell advertised.
+    /// The fleet scripts pass `--desc`. Both it and the long form must work, and so
+    /// must the `import` alias.
     #[test]
-    fn register_accepts_the_shell_flag_spellings() {
+    fn register_accepts_the_legacy_flag_spellings() {
         for flag in ["--desc", "--description"] {
             let cmd = Cli::try_parse_from([
                 "snaptune",
@@ -4923,7 +4907,7 @@ mod tests {
             "--desc",
             "d",
         ])
-        .expect("the shell's `import` alias must parse");
+        .expect("the `import` alias must parse");
         assert!(matches!(cmd.cmd, Cmd::Register { .. }));
     }
 
@@ -4971,7 +4955,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_s_names_for_validate_still_work() {
+    fn the_legacy_names_for_validate_still_work() {
         for name in ["markers", "check-module"] {
             let cmd =
                 Cli::try_parse_from(["snaptune", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
