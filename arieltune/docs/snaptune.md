@@ -261,8 +261,8 @@ the verbs that fail a run.
 
 ### 5.1 The dev loop — iterate on a module without a kernel build
 
-The loop is seconds, not minutes, because `make M=... modules` relinks only what
-changed. Nothing here installs into the live module tree.
+The relink is seconds rather than tens of minutes, because `make M=... modules` rebuilds
+only what changed. Nothing here installs into the live module tree.
 
 ```bash
 # 1. What would this build? Nothing runs.
