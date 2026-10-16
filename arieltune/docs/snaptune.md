@@ -12,8 +12,11 @@ that together say which Liberation series this blade is running — and `arieltu
 patches` reads the same answer back off the running kernel.
 
 It is the SNAP tab (`arieltune snap` from a shell, `5` in the TUI), and it is also a
-standalone binary. It answers three questions: what is on the disk, which snapshot this
-boot came from — its provenance — and which GRUB entry boots each one.
+standalone binary — a CLI with the same flat verb layout as the other arieltune modules, so
+an agent or a script drives it the way it drives `apu`.
+
+It answers three questions: what is on the disk, which snapshot this boot came from — its
+provenance — and which GRUB entry boots each one.
 
 ## Key Features
 
@@ -38,9 +41,10 @@ visible symptom otherwise: a boot that succeeds and is not the snapshot you aske
 --from …` derives the target blade's own image with that one member replaced, so nothing
 of the source tree's state travels with it.
 
-**Scriptable.** Every report verb takes `--json`, and `verify` and `doctor --verify` exit
-2 when something is wrong, so a post-reboot script can gate on the result instead of
-parsing prose.
+**Scriptable.** Every report verb takes `--json`, every writing verb takes `--dry-run` and
+prints its plan before it touches anything, and `verify` and `doctor --verify` exit 2 when
+something is wrong — so a script or an agent can plan a change, apply it, and gate on the
+result without parsing prose.
 
 ## Safety Guarantees
 
@@ -644,7 +648,7 @@ expected answer, not a problem.
 The ids on disk, the manifest field names and the path conventions predate this tool,
 and they are contracts with snapshots that already exist on real blades. They cannot be
 changed without orphaning every one of them, so this section records them as they are
-and this tool reproduces them byte for byte rather than tidying them up - including the
+and this tool reproduces them byte for byte rather than tidying them up — including the
 forms it would not write today.
 
 This is why adding a snapshot kind, a manifest field or a boot path means reading here
