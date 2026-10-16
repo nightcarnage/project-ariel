@@ -1,9 +1,9 @@
 # Snaptune: Fail-Safe Kernel Snapshots and Module Management
 
 Snaptune takes the guesswork out of BC-250 kernel development. It builds your `amdgpu`
-module against the patch series — the same module `arieltune apu build` produces, without
-the kernel build — and keeps the snapshots, boot entries and evidence that prove the
-result on a blade.
+module against the liberation series — the same module `arieltune apu build` produces,
+without the kernel build — and keeps the snapshots, boot entries and evidence that prove
+the result on a blade.
 
 It is the SNAP tab (`arieltune snap`), and it is also a standalone binary. It answers
 three questions: what is on the disk, which snapshot this boot came from, and which
@@ -22,10 +22,11 @@ worst case for a bad snapshot is a power cycle, not a reflash.
 then derives a boot image from an existing one, so iterating on a driver patch does not
 cost a full kernel build per attempt.
 
-**Provenance stamped on the artefact.** A snapshot's id is a hash of its module, its
-initramfs and its kernel, so the name can be recomputed from the bytes and checked. The
-manifest records the build, the source tree and the liberation series the snapshot
-carries.
+**Liberation evidence.** A snapshot's id is a hash of its module, its initramfs and its
+kernel, so the name can be recomputed from the bytes and checked; its manifest records
+the build, the source tree and the liberation series it carries. That is what makes
+"which liberation is this blade running?" answerable from the artefacts rather than from
+memory.
 
 **Verified, not assumed.** `verify` re-derives each id from stored content; `validate`
 compares the stored module with the one the kernel actually loaded. The check that earns
