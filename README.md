@@ -16,9 +16,10 @@ console-class compute for the cost of e-waste. All open, all reproducible, all d
 ## Tools
 
 - **[arieltune](arieltune/)** - the unified BC-250 tuning suite. One tabbed TUI + CLI
-  (WIKI / BIOS / APU / MEM): browse the firmware surface, tune GDDR6 memory timings, unlock
-  and tune the APU (40-CU liberation, CPU/GPU/CU control), and read the hardware-verified
-  BC-250 manual. Built on reverse-engineered SMU mailboxes and a liberated amdgpu.
+  (WIKI / BIOS / APU / MEM / SNAP): browse the firmware surface, tune GDDR6 memory timings,
+  unlock and tune the APU (40-CU liberation, CPU/GPU/CU control), read the hardware-verified
+  BC-250 manual, and keep per-build kernel snapshots when you are iterating on the liberation
+  series itself. Built on reverse-engineered SMU mailboxes and a liberated amdgpu.
 - **[llmtune](https://github.com/cachenetics/llmtune)** - once the board is liberated, serves
   LLMs on it (llama.cpp orchestration, model hot-swap, OpenAI-compatible endpoint, fleet mode
   for a rack of BC-250s).

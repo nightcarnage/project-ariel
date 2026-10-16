@@ -1,11 +1,12 @@
 # arieltune
 
-The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four tools:
+The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over five tools:
 
 - **WIKI**: the BC-250 knowledge manual
 - **BIOS**: the AMD CBS + OEM Setup surface
 - **APU**: APU liberation plus CPU/GPU/CU tuner
 - **MEM**: GDDR6 memory-timing tuner
+- **SNAP**: kernel snapshots and the patch series (`snaptune`) - the dev path
 
 "Ariel" is AMD's codename for the BC-250's APU (Cyan Skillfish, gfx1013). The suite is named for the chip, not the board.
 
@@ -17,6 +18,9 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
   <tr>
     <td align="center"><b>APU</b><br><img src="docs/screenshots/apu.png" width="430" alt="APU tab screenshot"></td>
     <td align="center"><b>MEM</b><br><img src="docs/screenshots/mem.png" width="430" alt="MEM tab screenshot"></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>SNAP</b><br><img src="docs/screenshots/snap.png" width="880" alt="SNAP tab screenshot: the snapshot list above, provenance for the selected snapshot below"></td>
   </tr>
 </table>
 
@@ -113,7 +117,7 @@ arieltune apu          # jump straight to a tab (or: arieltune --tab mem)
 arieltune apu <cmd>    # per-app CLI
 ```
 
-TUI keys: `1`-`4` (or `F1`-`F4`) jump tabs, `Ctrl-Tab` cycles, `Ctrl-Q` quits.
+TUI keys: `1`-`5` (or `F1`-`F5`) jump tabs, `Ctrl-Tab` cycles, `Ctrl-Q` quits.
 
 ### Liberation quick start (patched kernel)
 
@@ -215,6 +219,119 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 
 The build installs the kernel, arms `/etc/modprobe.d/aputune-40cu.conf`, and
 regenerates the initramfs for you.
+
+## The dev path - snaptune (the SNAP tab)
+
+> **New to this board? Do the Liberation quick start above.** snaptune is not an install
+> path and not a second way in. It is what you reach for *after* a liberated board is
+> running, when the thing you want to change is the `amdgpu` module and a ~30 minute kernel
+> build per attempt is too slow to iterate with.
+
+The SNAP tab - `arieltune snap`, or the standalone `snaptune` - manages the blade's
+**kernel snapshots** and shows the liberation series each one carries. It is the port of
+the original `bc-250-snapshotter` shell tool, and it is now the authority for everything
+that tool used to do.
+
+![The SNAP tab: the snapshot list above, provenance for the selected snapshot below](docs/screenshots/snap.png)
+
+### Why snapshots, on this board
+
+The `amdgpu` module lives in the **early** cpio archive of the initramfs, because early KMS
+needs it before the real root is mounted. The running kernel therefore has no record of
+which module it loaded: *"which build is this boot running?"* cannot be answered from the
+live system at all, only from the artefacts on disk. That is what a snapshot is - one
+`amdgpu` module, one initramfs, one kernel, named by a hash of their content.
+
+And because the artefact is a copy, the safe edit is not "change the module and hope". You
+make a *different* artefact, name it, and boot it once.
+
+### The dev loop - a module build in about a minute
+
+`snap dev` rebuilds **only the module** (`make M=drivers/gpu/drm/amd/amdgpu modules` -
+timestamp-driven, so only what changed relinks) and derives a boot image from a parent
+snapshot. It never writes the live module tree, and the base kernel stays bootable.
+
+```sh
+# 1. What would this build? Nothing runs.
+snaptune dev "patch 25 variant" --tree ~/linux-cachyos/src/cachyos-7.2.9-2
+
+# 2. Build it, derive an image from the parent, verify the member bytes.
+snaptune dev "patch 25 variant" --tree ~/... --run
+
+# 3. Make it a real snapshot: id, manifest, /boot artefacts, GRUB entry.
+sudo snaptune dev "patch 25 variant" --tree ~/... --run --register
+
+# 4. Boot it once. It reverts by itself on the next boot.
+sudo snaptune boot snap-1a2b3c4d
+```
+
+Step 2 is the part that matters: the derived image is opened and the member is compared
+**byte for byte** with what the build produced. *"The image carries the module I built"* is
+a fact, not an inference. `dev` also refuses when the tree would build a *different* kernel
+from the one the parent boots, because that module would be refused at load.
+
+The whole cycle - edit, rebuild, register, boot, measure - is about two minutes, against
+~30 minutes for a full `aputune build`. That difference is the entire point: it makes
+driver-patch experiments cheap enough to actually run.
+
+### Provenance - what a snapshot records
+
+The lower pane is the manifest of whatever is selected above. `snap dev` records what the
+build actually did, not merely what it could not say:
+
+| field | what it tells you |
+|---|---|
+| `snapshot.id` | `snap-` + a hash of the module, initramfs, vmlinuz and symvers - **content-addressed**, so it cannot drift |
+| `snapshot.parent` | the snapshot this was derived from; `lineage` walks the whole chain |
+| `snapshot.registered`, `.status` | whether this is a real bootable entry or an unregistered artefact |
+| `kernel.version` | the release string the module will load under |
+| `kernel.vmlinuz_source` -> `.vmlinuz_snapshot` | where the boot image came from, and where it went |
+| `module.md5`, `.size`, `.bc250_markers` | the module's identity. `bc250_markers` counts the `BC-250` tells in the binary, so a snapshot that *claims* the series is patched can be checked against the bytes |
+| `initramfs.md5`, `.size` | the image, so the boot pair is verifiable |
+| `grub.entry_id` | the menu entry this snapshot owns |
+| `cmdline` | the cmdline **live at capture time** - recorded for the record, and explicitly *not* safe to boot with: it can name whichever kernel was booted then, and can carry `BOOT_IMAGE=` twice |
+
+The top of the pane is a boot check - `vmlinuz OK` / `initramfs OK` / `cmdline OK` /
+`GRUB entry OK`. `i` opens the liberation series that snapshot carries, with the local edit
+marked. `snap verify <id>` re-derives the id from the files; `snap doctor` asks whether the
+*store* is coherent. `snap validate <module>` answers the different question of whether a
+module is patched, and whether it is the one running.
+
+### Safety
+
+- **`boot` is one-shot.** It arms the *next* boot only, and the boot after it reverts. A bad
+  module cannot strand a blade.
+- **`pin` is separate and deliberate.** Nothing sets the GRUB default as a side effect of
+  anything else - `create` does not promote, and `boot` does not persist.
+- **No in-place rebuild.** `rebuild` produces a **new** snapshot; the one you are booted
+  from is never touched.
+- **`create` does not mutate the live system.** It builds or adopts a module and writes a
+  new snapshot beside the existing ones.
+- **Every writing verb takes `--dry-run`**, which prints the action plan and touches nothing.
+
+### Verbs
+
+Read-only, safe anywhere: `list` `show` `current` `lineage` `grub-list` `diff` `golden`
+`doctor` `verify` `validate` `extract-modules`.
+
+Need root: `dev --run --register` `create` `rebuild` `register` `test-result` `preserve`
+`boot` `pin` / `unpin` `hide` / `unhide` `grub-flatten` `prune`.
+
+`--json` is global and puts one JSON value on stdout and nothing else, for scripting.
+`verify` exits **2** when anything failed, `doctor --verify` likewise, and
+`create`/`rebuild`/`dev` return 2 when they refuse to build - a refusal always writes
+nothing. `list --all` includes hidden snapshots. Snapshot ids complete on `TAB`, and
+`snapshot` remains a compat symlink to the same namespace, so the retired shell tool's name
+still resolves.
+
+### Help and the full reference
+
+| | |
+|---|---|
+| [`docs/snapshot-tool.md`](docs/snapshot-tool.md) | the model, the on-disk contracts, every verb, and the workflows. **Read §3 before changing anything** - it is a contract with snapshots that already exist on real blades |
+| [`docs/snapshot-tool-spec.md`](docs/snapshot-tool-spec.md) | the port spec: why it was worth doing, the hard invariants, the reuse map |
+| `snaptune --help` | built-in help - `snaptune <verb> --help` for any verb above |
+| [`completions/snaptune.bash`](completions/snaptune.bash) | TAB completion for verbs, flags and snapshot ids |
 
 ## What gets unlocked
 
