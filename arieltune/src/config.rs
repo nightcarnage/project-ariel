@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// The four tabs, in fixed left-to-right order. This IS the tab order.
+/// The five tabs, in fixed left-to-right order. This IS the tab order.
 pub const TAB_ORDER: [&str; 5] = ["wiki", "bios", "apu", "mem", "snap"];
 
 /// Names a tab answers to besides its key in [`TAB_ORDER`].

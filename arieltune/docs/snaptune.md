@@ -3,27 +3,28 @@
 Snaptune takes the guesswork out of BC-250 kernel development by managing your
 snapshots, boot entries, and module verification in one place.
 
-It builds your `amdgpu` module against the Liberation series — the same module
-`arieltune apu build` produces, without the kernel build.
+It builds your modules against the Liberation series, or your own patches in the tree you
+point it at — the same modules `arieltune apu build` produces, without the full kernel
+build.
 
 What it leaves behind is **Liberation evidence**: the id, the manifest and the GRUB entry
 that together say which Liberation series this blade is running — and `arieltune apu
 patches` reads the same answer back off the running kernel.
 
-It is the SNAP tab (`arieltune snap`), and it is also a standalone binary. It answers
-three questions: what is on the disk, which snapshot this boot came from, and which
-GRUB entry boots each one.
+It is the SNAP tab (`arieltune snap` from a shell, `5` in the TUI), and it is also a
+standalone binary. It answers three questions: what is on the disk, which snapshot this
+boot came from — its provenance — and which GRUB entry boots each one.
 
 ## Key Features
 
-**Fail-safe deployments.** An untested module is never the entry the machine boots
-again. `boot` arms a single boot through `next_entry` — which the generated GRUB config
-consults whatever `GRUB_DEFAULT` is set to — and the armed value is read back out of
-grubenv before anything reboots. An entry GRUB cannot resolve is refused before it is
+**Fail-safe deployments.** Testing a new module costs a reboot, not a rescue. `boot` arms
+a single boot through `next_entry` — which the generated GRUB config consults whatever
+`GRUB_DEFAULT` is set to — and the armed value is read back out of grubenv before
+anything reboots. An entry GRUB cannot resolve is refused before it is
 written, because an unresolvable value does not fail: it boots entry 0, silently. The
 worst case for a bad snapshot is a power cycle, not a reflash.
 
-**A module in about a minute, not a kernel build.** `dev` relinks only what changed and
+**Rebuilds in about a minute, not a kernel build.** `dev` relinks only what changed and
 then derives a boot image from an existing one, so iterating on a driver patch does not
 cost a full kernel build per attempt.
 
