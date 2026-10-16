@@ -1,13 +1,12 @@
 # snaptune — the snapshot tool: model, contracts, and workflows
 
-`snaptune` (also reachable as `arieltune snapshot`) manages the kernel snapshots
-on a BC-250 blade: what is on the disk, which one this boot came from, and the
-GRUB menu entries that boot them. It is a port of `bc-250-snapshotter/snapshot`,
-and it is now the authority for everything the shell tool used to do.
+`snaptune` (also reachable as `arieltune snapshot`, or the SNAP tab) manages the
+kernel snapshots on a BC-250 blade: what is on the disk, which one this boot came
+from, and the GRUB menu entries that boot them.
 
 This document is the design and invariants reference. The module headers assume
 it; §3 in particular is the part that must not be "improved" while snapshots
-written by the shell tool still exist.
+written against these formats are still on disk.
 
 ---
 
@@ -62,7 +61,7 @@ Three locations, and every verb is about relating them.
 ```text
 /var/lib/kernel-snapshots/            the store
 ├── .golden-snapshot                  one id, as text — the baseline
-├── known-good-amdgpu.ko.zst          the shell tool's safety copy (not written here)
+├── known-good-amdgpu.ko.zst          a rescue copy, not written here
 ├── snap-<id>/
 │   ├── manifest.yaml                 the claim
 │   ├── manifest.yaml.hidden          `hide` renames it — that IS the hidden flag
@@ -77,7 +76,7 @@ Three locations, and every verb is about relating them.
 ├── snap-<id>.cmdline                 its own command line
 ├── vmlinuz-linux-cachyos-bore        the distro's kernel, untouched
 ├── initramfs-linux-cachyos-bore.img  the distro's initramfs, untouched
-└── initramfs-rescue-<kver>-<ts>.img  the shell tool's preserved copies
+└── initramfs-rescue-<kver>-<ts>.img  rescue copies, never automatic
 
 /etc/grub.d/40_custom                 one `menuentry` block per snapshot
 /boot/grub/grub.cfg                   generated; never edited by hand here
@@ -103,31 +102,31 @@ recorded in the manifest as `snapshot.kind`.
 
 | | made by | formula |
 |---|---|---|
-| **F1** | the shell's `create`, with a source tree | `md5("<hash of 4 .c files>-<symvers8>" + "\n")` |
-| **F2** | the shell's `create`, no source tree | `md5("<kver>-<module8>")` — **no** trailing newline |
+| **F1** | a `create` that had a source tree | `md5("<hash of 4 .c files>-<symvers8>" + "\n")` |
+| **F2** | a `create` with no source tree | `md5("<kver>-<module8>")` — **no** trailing newline |
 | **F3** | `register` / `import`, and this tool's `dev` / `create` / `rebuild` | `md5("<mod8>-<initrd8>-<vmlinuz8>-<symvers8>" + "\n")` |
 
 Three consequences worth stating plainly:
 
 1. **F1 and F2 hash inputs that are not the artefact.** F1 hashes *source files*,
    F2 hashes the *installed* module. Neither is reproducible once the tree or the
-   installed module changes. That is why the shell's own comment admits "a stale
-   source tree used to be able to recompute an OLD snapshot's id and clobber it",
-   and why this tool uses F3 everywhere.
+   installed module changes. That is why a stale source tree could previously
+   recompute an OLD snapshot's id and clobber it, and why this tool uses F3
+   everywhere.
 2. **The same content can carry two ids.** Blade 115's `snap-11e61755` (a `create`)
    and blade 104's `snap-0848359a` (a `register`) hold byte-identical content —
    module `ecdb619e`, initramfs `f21daf6a`, kernel `ddb9f7cc` — and differ only
    because the formulas differ. Neither is wrong and neither has drifted.
 3. **An id can only be re-derived for content-addressed kinds.** `verify` recomputes
    the id only when `kind` is one this tool writes (`dev-build`, `created`,
-   `rebuilt`); for a shell snapshot it says "not checked" and means it. Reporting
+   `rebuilt`); for any other kind it says "not checked" and means it. Reporting
    that as a mismatch would be a false alarm on a perfectly good snapshot.
 
 `manifest::id_is_content_addressed` is the single place that decides this.
 
 ### 3.2 Manifest field names
 
-`manifest.yaml` is emitted by the shell as a heredoc, so **field types vary**:
+`manifest.yaml` **field types vary**:
 `size: 5823372 bytes` is a string, `markers: 0` an integer, `files: []` a list,
 and `kernel.version` is sometimes the short `7.0.9` where the id was computed with
 `7.0.9-1-cachyos`. `Manifest` therefore parses into a `Value` tree and exposes
@@ -138,7 +137,7 @@ Two accessors deliberately behave differently from the rest:
 
 - `source_tree_path()` has **no line-scan fallback**. The fallback takes the first
   line *starting* with the key, and `module.path` is written before
-  `source_tree.path` in every manifest the shell produces — so a falling-back scan
+  `source_tree.path` in every manifest written this way — so a falling-back scan
   would answer with the module's own path, plausibly and wrongly.
 - `cmdline()` is **not safe to boot with**. It is the *live* cmdline at capture
   time, can name whichever kernel was booted then, and can contain `BOOT_IMAGE=`
@@ -187,53 +186,14 @@ only honoured when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. `boot` re
 the armed value back out of grubenv before it reports success, and will not reboot
 unless that check passed.
 
-### 3.5 The name: `snaptune`, `snapshot`, and the retired shell tool
+### 3.5 The names
 
-The binary is `snaptune` because the name `snapshot` is taken twice over: on a
-workstation by the GNOME screenshot tool (which answers `Unknown option --ids`), and
-on the blades by the bc-250-snapshotter shell tool this replaces.
+`snaptune`, `snapshot` and `at` are all the same program. `snapshot <verb>` is the
+spelling older scripts use, and it keeps working; every verb below is reachable
+under any of the three names.
 
-**That shell tool is retired (2026-10-09).** Both blades and the suite's installers
-now carry:
-
-```text
-/usr/local/bin/snapshot    -> arieltune    the retired tool's name, served by this namespace
-/usr/local/bin/snaptune    -> arieltune
-/usr/local/bin/at          -> arieltune
-```
-
-The cutover was two steps, and both are done: `arieltune` gained the `snapshot`
-namespace (so `arieltune snapshot <verb>` and the `snapshot` argv[0] work), and
-`/usr/local/bin/snapshot` became a compat symlink. What made it safe to check:
-
-- **The verbs were already ported.** §6.5 is the map from the shell's own
-  `snapshot --help` to the verb or flag that replaced each one — including the
-  aliases and the three environment variables. Four verbs are ported with a
-  deliberate difference, and all four are documented there rather than quietly
-  changed.
-- **Nothing automated called it.** No systemd unit, no timer, no crontab, and no
-  script on `PATH` invoked `snapshot` or `blade-snapshot` on either blade. The
-  remaining mentions in `/srv/data` are research scripts and notes, which keep
-  working: the name still resolves, to this tool.
-- **One program did.** `arieltune apu` asks `snapshot list --ids` which snapshot a
-  boot came from. That mode is kept machine-readable for exactly this reason, and
-  the two tools' id **sets** were compared before the swap — identical on both
-  blades. Their *order* differs (the shell's was glob order, this one is newest
-  first, like `list`); the consumer reads the whole list looking for one id, so the
-  order is not load-bearing, and §6.5 notes it for anything older that piped
-  `head -1`.
-- **The tool is not lost.** Its source is the `bc-250-snapshotter` repo (pushed to
-  gitea, cloned under `/srv/data/bc-250-snapshotter/` on 104), and installing the
-  suite copies any incumbent at that name to
-  `/var/tmp/snapshot-retired-<date>` before the symlink takes over.
-
-The shell tool's `/etc/bash_completion.d/snapshot` is gone; `completions/snaptune.bash`
-covers the name now, so `snapshot show snap-a<TAB>` completes ids the same way
-`snaptune` does (§5.12).
-
-The standalone `snaptune` binary is still built by this crate — the same code without
-the suite around it, for a box that wants only this namespace. On these blades the
-name is a symlink to `arieltune`, so the two entry points cannot drift apart.
+`snapshot list --ids` is machine-readable on purpose — `arieltune apu` reads it to
+learn which snapshot a boot came from — so its output shape is a contract too.
 
 ---
 
@@ -440,7 +400,7 @@ It is a rename of `manifest.yaml` to `manifest.yaml.hidden`, so it is also what
 
 ### 5.8 Moving a snapshot between blades
 
-There are two routes, and neither needs the shell tool.
+There are two routes.
 
 **Same tree, same config, only the module differs** — which is the rule the whole
 fast path rests on. Build the module once and give it to `create`:
@@ -474,11 +434,9 @@ sudo snaptune register \
     --desc "liberation-7.2.9: 26/26 applied, navi12 SDMA fw"
 ```
 
-The id is content-addressed over the module, the image and the kernel, using the
-formula the shell tool already used (§3.1), so a snapshot registered here carries
-the id the shell would have given it and `verify` can re-derive it. That was checked
-on blade 115: registering `snap-11e61755`'s artefacts reproduced the shell's
-`snap-0848359a` byte for byte.
+The id is content-addressed over the module, the image and the kernel (§3.1), so
+`verify` can re-derive it from the artefacts alone. That was checked on blade 115:
+registering `snap-11e61755`'s artefacts reproduced `snap-0848359a` byte for byte.
 
 The kernel release is read **out of the image**, not from `uname -r` — registering
 artefacts for a kernel you are not running is the normal case, and the running kernel
@@ -509,16 +467,15 @@ Two consequences worth knowing:
 
 - **Hidden snapshots complete too.** They have to: `unhide` and `prune` name one, and
   an id that cannot be typed is one that cannot be restored. (`list --ids` shows only
-  the visible ones, as the shell tool does.)
+  the visible ones.)
 - **A position that wants something else is not given ids.** `dev` and `create` take a
   `DESCRIPTION`, `validate` a `MODULE`, `preserve` a `LABEL` — offering ids there
   would be a wrong answer rather than a helpful one. A test derives the id-typed
   positions from each verb's own `--help` usage (`<ID>` / `[ID]`) and asserts the
   completion agrees with it.
 
-The script registers `snapshot` as well as `snaptune`: that name is the retired shell
-tool's, and it now resolves to this namespace, so its completion is this function's
-job (§3.5).
+The script registers `snapshot` as well as `snaptune`, because `snapshot` is another
+name for this binary, so its completion is this function's job (§3.5).
 
 ### 5.11 Rescue copies, test results, and getting the module back out
 
@@ -535,8 +492,7 @@ sudo snaptune preserve pre-7.3
 
 Nothing ever reads the copy automatically; it is insurance, and the verb reports how
 many are already in `/boot` because each is tens of megabytes and nothing prunes them.
-The shell tool took copies like this internally, before it overwrote a live module —
-this one never overwrites, so a copy is only ever made on purpose.
+Nothing is copied automatically — a copy is only ever made on purpose.
 
 ```bash
 sudo snaptune test-result snap-11e61755 rocminfo PASS
@@ -562,42 +518,31 @@ keeps the modules on these blades.
 
 ---
 
-## 6. What this deliberately does not do
+## 6. Rules, environment, and the menu layout
 
-Three of the shell tool's behaviours are **not** reproduced, on purpose (§6.1–6.3).
-The fourth item is not a difference — it is a property both tools share, written
-down because it is the one that matters most if you are about to trust a snapshot
-you have not booted (§6.4). §6.5 maps every verb the shell tool had onto its
-equivalent here — which is the thing to read before retiring it.
+§6.1–6.4 are rules: the things this deliberately does not do, stated because they are
+the ones that matter when you are about to trust a snapshot you have not booted. §6.5
+and §6.6 are the environment it reads and the menu shape to aim for.
 
 ### 6.1 No live-system mutation in `create`
 
-The shell's `create` installs the new module into `/usr/lib/modules/<kver>/`, runs
-`depmod`, generates the snapshot's initramfs with `mkinitcpio -g`, then restores the
-known-good module and rebuilds *every* image on the machine with `mkinitcpio -P`.
-Between the install and the restore, the running system's module tree holds a module
-that has never booted; if that command dies in the window, the machine is left that
-way. Here the module is put into a *copy* of an image and the result is verified
-against the build. The live module tree and the live initramfs are never written.
+`create` never writes the live module tree or the live initramfs. The module goes into
+a *copy* of an image, and the result is verified against the build. So there is no
+window in which the running system holds a module that has never booted, and no
+`depmod` plus `mkinitcpio -P` sweep over every image on the machine.
 
 ### 6.2 No in-place `rebuild`
 
-The shell writes the rebuilt module into the snapshot it names and keeps the id — so
-the id stops describing the content, which is exactly the mismatch `verify` reports.
-It then tells you to run `create`, which makes a new id anyway. This refuses to
-stage: the original is untouched and the rebuild is a new snapshot.
+`rebuild` never writes into the snapshot it names. The original is untouched and the
+rebuild is a **new** snapshot, so an id keeps describing the content it was computed
+from — which is the whole basis of `verify`.
 
-### 6.3 No `known-good-amdgpu.ko.zst` backup, and no automatic rescue copy
+### 6.3 No automatic rescue copy
 
-The shell keeps both because it mutates the live initramfs and the live module, so a
-failure part-way through leaves them wrong and needs a way back. This does not mutate
-either, so it has nothing to rescue on its own behalf, and it does not make copies
-nobody asked for.
-
-`preserve` (§5.11) is the deliberate version of the rescue copy: it exists, it is just
-never automatic. The `known-good-amdgpu.ko.zst` backup has no equivalent, because the
-module a snapshot was built from is already kept as that snapshot's own
-`modules/amdgpu.ko.zst`, and `extract-modules` will hand it back.
+Nothing is copied aside unless you ask. `preserve` (§5.11) is the deliberate version:
+it exists, it is just never automatic. There is no separate `known-good-amdgpu.ko.zst`
+backup to keep in sync either, because the module a snapshot was built from is already
+that snapshot's own `modules/amdgpu.ko.zst`, and `extract-modules` hands it back.
 
 ### 6.4 Nothing sets the GRUB default
 
@@ -605,123 +550,52 @@ module a snapshot was built from is already kept as that snapshot's own
 permanent default. An untested snapshot never becomes the entry the machine falls
 back to.
 
-### 6.5 Every shell verb, and where it went
+### 6.5 Environment
 
-Read from the shell tool's own `snapshot --help`, so this is its list and not a
-recollection of it. The retirement was worked from this table; it stays because it is
-the map of the old surface onto the new one, and because anything that still calls
-`snapshot <verb>` is calling this tool now.
-
-| shell | here | note |
-|---|---|---|
-| `list`, `ls` | same + `ls` | |
-| `current`, `status`, `which` | same, all three | |
-| `show`, `info` | same + `info` | |
-| `lineage`, `tree` | same + `tree`, and it answers on *any* box | the shell walks all snapshots, un-booted included; so does this now |
-| `diff` | same | reads the manifests, so it works with no source tree |
-| `boot`, `reboot <id>` | `boot <id> [--reboot]` | **differs**: see below |
-| `boot --entry <grub-id>` | same | nested entries by path, which the shell refused |
-| `grub-flatten` | same (+ `--nest`) | re-reads `grub.cfg` and counts what is left |
-| `grub-list`, `grublist`, `grub-entries`, `grub` | same, all four | |
-| `pin`, `default`, `set-default` | same, all three | |
-| `unpin` | same | |
-| `verify`, `check` | same + `check` | exits 2 on failure |
-| `validate`, `markers`, `check-module` | same, all three | plus the loaded-`srcversion` comparison |
-| `create <desc>` | same | **differs**: see below |
-| `register` | same (+ `import`) | same content-addressed id |
-| `rebuild <id>` | same | **differs**: see below |
-| `golden`, `gold` | same + `gold` | |
-| `preserve`, `save`, `backup [label]` | same, all three | |
-| `extract`, `extract-modules`, `extract-module <id> [dir]` | same, all three | |
-| `prune`, `delete`, `rm <id>` | same, all three | |
-| `hide` / `unhide` | same | |
-| `test-result`, `result <id> <t> <r>` | same + `result` | plus the read-back check |
-| `help`, `usage`, `--help`, `-h` | `--help`, `-h` | |
-
-`lineage` was a gap found by running both tools side by side rather than by reading
-either one's help: this one walked `snapshot.parent` from the **booted** snapshot, so on
-a blade running the distro's kernel it printed nothing at all, while the shell's printed
-every snapshot's chain regardless. A lineage is a property of the store, not of what this
-box happened to boot, so it now takes an optional id and defaults to the whole store —
-reading root-first, with a parent that is not itself a snapshot (the fleet's
-`base-7.2.9-1-cachyos-bore`) kept and marked, because that name is where the lineage
-starts.
-
-One difference that is not a verb: **`list --ids` prints newest-first here, and printed
-glob order (alphabetical by hash) in the shell.** The two lists held the same ids when
-they were compared on both blades before the swap — the order was never meaningful, and
-matching `list`'s own order is the more useful one — but a script that piped
-`snapshot list --ids | head -1` names a different snapshot than it used to. `arieltune
-apu` reads the whole list looking for one id, so it is unaffected.
-
-Environment, from the shell's own help and its `README.md`:
-
-| shell | here |
+| variable | effect |
 |---|---|
-| `SOURCE_TREE=<path>` | still honoured, and `SNAPSHOT_TREE` is the name to prefer. An empty value is ignored, because `bootstrap.sh` sets `SOURCE_TREE=""` before filling it in |
-| `SNAPSHOT_KEEP_THEME=1` | same |
-| `SNAPSHOT_KEEP_FLAT=1` | **no equivalent, and no need** — see below |
-| `PINNED_VMLINUZ=<path>` | **no equivalent, decided rather than missing** — see below |
+| `SNAPSHOT_TREE=<path>` | the source tree to build against — the name to prefer |
+| `SOURCE_TREE=<path>` | still honoured as an alias. An empty value is ignored, so a script that sets `SOURCE_TREE=""` before filling it in does not blank the setting |
+| `SNAPSHOT_KEEP_THEME=1` | `pin` leaves `GRUB_THEME` alone |
+| `SNAPSHOT_KEEP_FLAT=1` | accepted and meaningless — nothing here re-shapes the menu implicitly |
 
-Four verbs are ported but **deliberately not identical**, and none of the four is a
-gap:
+There is deliberately **no** variable naming the kernel image a snapshot boots. The
+kernel is read off the artefact: `register::vmlinuz_for` derives it from the base
+image's own name, and the image's member path states which release that image belongs
+to. An override could not be honoured safely — pairing an image with a kernel that is
+not its own is precisely the mismatch the rest of the tool refuses, since the module's
+`vermagic` would not match the kernel that loads it — and it could not be checked
+either, because a `vmlinuz` here carries no greppable `Linux version` banner. Use
+`--for <release>` and `--from <image>` instead: both are statements about the snapshot
+that `verify` can go back and check.
 
-- **`boot` does not reboot.** The shell's `boot` and `reboot` both arm *and* restart.
-  Here `boot <id>` arms only, and `--reboot` restarts — because arming is verified
-  against grubenv first, and a machine that goes down before that check is a machine
-  that boots whatever the default happened to be. `reboot` is therefore not offered as
-  an alias: the name would promise a restart the verb does not perform.
-- **`create` does not mutate the live system** (§6.1), so its initramfs is derived
-  rather than regenerated. Same tree, same toolchain, same config, one member changed.
-- **`rebuild` does not overwrite** (§6.2): it registers a new snapshot and leaves the
-  original alone, so the id keeps describing the content.
-- **Nothing here changes the menu's shape on its own.** The shell's `pin` also restores
-  the distro's GRUB submenus and comments out the theme, as a side effect of pinning.
-  Those are `grub-flatten` and `grub-flatten --nest` here, so a pin pins. That is also
-  why `SNAPSHOT_KEEP_FLAT=1` has no meaning: it exists to stop the shell's implicit
-  un-flattening, and there is no implicit un-flattening to stop. Where the shell *acted*,
-  this one **reports**: `doctor` names a flattened menu, counts the duplicates it
-  promoted, and says `grub-flatten --nest`.
+One ordering fact worth knowing: **`list --ids` prints newest-first.** The order is not
+meaningful, but a script that pipes it to `head -1` gets a different snapshot than glob
+order would give. `arieltune apu` reads the whole list looking for one id, so it is
+unaffected.
 
-  **The nested layout is the one to want**, and the one both blades now run:
+### 6.6 The menu layout: nested, not flat
 
-  ```text
-  CachyOS Linux                                   <- the distro's default kernel
-  [snap-11e61755] liberation-7.2.9: 26/26 …       <- ours, described, top level
-  [snap-f59f7152] rebuild of snap-11e61755: …     <- ours, described, top level
-  Advanced options for CachyOS Linux >
-      with Linux linux-cachyos-bore               <- 10_linux's twins, out of the way
-      with Linux snap-11e61755                    <- one per vmlinuz-snap-*, hidden
-  ```
+**The nested layout is the one to want**, and the one to run:
 
-  Flattening puts every `10_linux` twin at the top level instead, so each snapshot
-  appears **twice** and the twin is the worse of the pair — no usable `--id`, no
-  `BOOT_IMAGE=`, and nothing to tell you which is which. `10_linux` enumerates every
-  `/boot/vmlinuz-*` with no exclusion list, which is why there is a twin per snapshot at
-  all; on blade 104 with 26 snapshots a flattened menu would be 52 rows of snapshot
-  entries. `--nest` is the way back, and it is what fixed 115.
+```text
+CachyOS Linux                                   <- the distro's default kernel
+[snap-11e61755] liberation-7.2.9: 26/26 …       <- ours, described, top level
+[snap-f59f7152] rebuild of snap-11e61755: …     <- ours, described, top level
+Advanced options for CachyOS Linux >
+    with Linux linux-cachyos-bore               <- 10_linux's twins, out of the way
+    with Linux snap-11e61755                    <- one per vmlinuz-snap-*, hidden
+```
 
-`PINNED_VMLINUZ` is the one environment variable with no home here, and that is a
-decision rather than an omission.
+Flattening puts every `10_linux` twin at the top level instead, so each snapshot
+appears **twice** and the twin is the worse of the pair — no usable `--id`, no
+`BOOT_IMAGE=`, and nothing to tell you which is which. `10_linux` enumerates every
+`/boot/vmlinuz-*` with no exclusion list, which is why there is a twin per snapshot at
+all; with 26 snapshots, a flattened menu is 52 rows of snapshot entries.
 
-It names the kernel image a snapshot boots. Here the kernel is read off the artefact:
-`register::vmlinuz_for` derives it from the base image's own name, and the image's
-member path is what states which release that image belongs to
-(`usr/lib/modules/7.2.9-1-cachyos-bore/…/amdgpu.ko.zst`). That is a property of the
-thing being snapshotted, not a guess that needs an override.
-
-An override could not be honoured *safely*, which is what settles it. Pairing an image
-with a kernel that is not its own is precisely the mismatch the rest of the tool
-refuses — the module's `vermagic` would not match the kernel that loads it, so the
-snapshot would be unbootable at exactly the moment it was called on. And this tool
-cannot check the pairing: a `vmlinuz` here carries no greppable `Linux version`
-banner (checked on blade 115), so `--vmlinuz` would be a value taken on faith. The
-shell took it on faith; that is not a behaviour worth porting.
-
-If the kernel and the image do not correspond, the supported route is `--for
-<release>` to record which kernel this is for, and `--from <image>` to choose the base
-image — both of which are statements about the snapshot that `verify` can go back and
-check.
+Nothing re-shapes the menu on its own. `grub-flatten` is the explicit opt-in,
+`grub-flatten --nest` is the way back, and `doctor` will name a flattened menu, count
+the duplicates it promoted, and tell you which command to run.
 
 ---
 
@@ -740,8 +614,8 @@ Five checks, in the order they appear. An `ok` means the check ran and passed; a
 
 `identity` is the strongest and the only one that can notice a quiet module swap: it
 recomputes the id from the stored bytes. It runs only for kinds whose id *is* the
-content (§3.1) and says "not checked" otherwise — on most existing snapshots, which
-the shell wrote, that is the expected answer rather than a problem.
+content (§3.1) and says "not checked" otherwise — which on an older snapshot is the
+expected answer, not a problem.
 
 ---
 
@@ -754,8 +628,7 @@ cargo build -p snapshot --bin snaptune              # dev build
 cargo build -p snapshot --release --bin snaptune    # release
 ```
 
-Install on a blade — the name `snapshot` is the retired shell tool's and belongs to
-this namespace now (§3.5):
+Install on a blade. `snapshot` is another name for this binary (§3.5):
 
 ```bash
 scp target/debug/snaptune blade:/var/tmp/snaptune.new

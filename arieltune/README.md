@@ -228,9 +228,7 @@ regenerates the initramfs for you.
 > build per attempt is too slow to iterate with.
 
 The SNAP tab - `arieltune snap`, or the standalone `snaptune` - manages the blade's
-**kernel snapshots** and shows the liberation series each one carries. It is the port of
-the original `bc-250-snapshotter` shell tool, and it is now the authority for everything
-that tool used to do.
+**kernel snapshots** and shows the liberation series each one carries.
 
 ![The SNAP tab: the snapshot list above, provenance for the selected snapshot below](docs/screenshots/snap.png)
 
@@ -321,8 +319,7 @@ Need root: `dev --run --register` `create` `rebuild` `register` `test-result` `p
 `verify` exits **2** when anything failed, `doctor --verify` likewise, and
 `create`/`rebuild`/`dev` return 2 when they refuse to build - a refusal always writes
 nothing. `list --all` includes hidden snapshots. Snapshot ids complete on `TAB`, and
-`snapshot` remains a compat symlink to the same namespace, so the retired shell tool's name
-still resolves.
+`snapshot` is another name for the same binary, so `snapshot <verb>` works too.
 
 ### Help and the full reference
 
