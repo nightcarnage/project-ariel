@@ -1,9 +1,10 @@
 # Snaptune: Fail-Safe Kernel Snapshots and Module Management
 
-Snaptune takes the guesswork out of BC-250 kernel development. It builds your `amdgpu`
-module against the liberation series — the same module `arieltune apu build` produces,
-without the kernel build — and keeps the snapshots, boot entries and evidence that prove
-the result on a blade.
+Snaptune takes the guesswork out of BC-250 kernel development by managing your
+snapshots, boot entries, and module verification in one place.
+
+It builds your `amdgpu` module against the liberation series — the same module
+`arieltune apu build` produces, without the kernel build.
 
 It is the SNAP tab (`arieltune snap`), and it is also a standalone binary. It answers
 three questions: what is on the disk, which snapshot this boot came from, and which
