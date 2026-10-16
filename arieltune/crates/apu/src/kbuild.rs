@@ -11,7 +11,7 @@
 //!   5. install the package (locally or to a remote target), set the modprobe.d
 //!      40-CU drop-in, rebuild initramfs, reboot
 //!
-//! Heavy + irreversible-ish (a ~30 min kernel build, a reboot), so `aputune
+//! Heavy + irreversible-ish (a ~1 hour kernel build, a reboot), so `aputune
 //! build` PREVIEWS the plan by default; pass `--run` to execute.
 
 use std::fs;
@@ -465,7 +465,7 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
 ///
 /// `None` means "cannot tell" (no PKGBUILD yet, or the value is supplied some
 /// way this cannot see) and callers must keep requiring LLVM: guessing wrong
-/// wastes a ~30 minute build, so the safe default is to demand them.
+/// wastes a ~1 hour build, so the safe default is to demand them.
 fn pkgbuild_uses_llvm(opts: &BuildOpts) -> Option<bool> {
     let dir = opts.pkgbuild_dir.as_ref()?;
     let text = std::fs::read_to_string(dir.join("PKGBUILD")).ok()?;
@@ -529,7 +529,7 @@ fn pkgbuild_kernel_version(dir: &Path) -> Option<String> {
 /// Required (binary, package) pairs for a build on THIS host.
 ///
 /// Both makepkg steps run with --nodeps, so every makedepend must be checked
-/// here — a missing one otherwise only surfaces deep into the ~30 minute build.
+/// here — a missing one otherwise only surfaces deep into the ~1 hour build.
 /// `rust-src` is a directory component, not a binary; it is probed separately in
 /// `preflight_deps`.
 ///
@@ -736,7 +736,7 @@ fn bc250_uma_mb() -> Result<Option<u64>> {
 
 /// Gate the build on the BIOS UMA carve. A wrong carve is a build-host
 /// configuration problem that surfaces as driver init failures deep in
-/// validation (discovery/PSP), so catch it before the ~30 minute build.
+/// validation (discovery/PSP), so catch it before the ~1 hour build.
 fn preflight_uma(opts: &BuildOpts) -> Result<()> {
     match bc250_uma_mb() {
         Ok(None) => Ok(()),
@@ -1243,12 +1243,12 @@ pub fn build(opts: BuildOpts) -> Result<()> {
                  push this arieltune binary, `doctor --json`, assert new kernel + full series"
             );
         }
-        println!("\nbuild host needs: ~25 GB free, ~30 min (see preflight result above).");
+        println!("\nbuild host needs: ~25 GB free, ~1 hour (see preflight result above).");
         return Ok(());
     }
 
     // Pre-install kernel anchor for the post-reboot verification: remote via
-    // ssh (an unreachable target fails HERE, before the ~30 min build), local
+    // ssh (an unreachable target fails HERE, before the ~1 hour build), local
     // from procfs (for the Change-D style after-reboot instruction).
     let pre_kernel = match &opts.target {
         Some(tgt) => remote_uname(tgt)

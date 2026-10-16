@@ -24,9 +24,9 @@ anything reboots. An entry GRUB cannot resolve is refused before it is
 written, because an unresolvable value does not fail: it boots entry 0, silently. The
 worst case for a bad snapshot is a power cycle, not a reflash.
 
-**Rebuilds in about a minute, not a kernel build.** `dev` relinks only what changed and
-then derives a boot image from an existing one, so iterating on a driver patch does not
-cost a full kernel build per attempt.
+**Rebuilds in about a minute, not an hour of kernel build.** `dev` relinks only what
+changed and then derives a boot image from an existing one. A full kernel build takes
+about an hour.
 
 **Liberation evidence.** A snapshot's id is a hash of its module, its initramfs and its
 kernel, so the name can be recomputed from the bytes and checked, and its manifest
@@ -261,8 +261,8 @@ the verbs that fail a run.
 
 ### 5.1 The dev loop — iterate on a module without a kernel build
 
-The relink is seconds rather than tens of minutes, because `make M=... modules` rebuilds
-only what changed. Nothing here installs into the live module tree.
+The relink is seconds, not an hour, because `make M=... modules` rebuilds only what
+changed. Nothing here installs into the live module tree.
 
 ```bash
 # 1. What would this build? Nothing runs.

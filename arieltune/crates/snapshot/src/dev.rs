@@ -5,7 +5,7 @@
 //!
 //! Developing a patch against the series does not need a kernel build. It needs
 //! the amdgpu module relinked, which is a `make M=drivers/gpu/drm/amd/amdgpu
-//! modules` — incremental, seconds rather than tens of minutes.
+//! modules` — incremental, seconds rather than an hour.
 //!
 //! The shell tool already does that build inside `create`. What it cannot do is
 //! keep the result from landing on the running kernel: `mkinitcpio` reads the

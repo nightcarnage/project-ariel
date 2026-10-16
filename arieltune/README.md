@@ -26,7 +26,7 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over five 
 
 ## Why
 
-The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 30 minute build plus a reboot, always previewed first, and it only acts with `--run`.
+The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 1 hour build plus a reboot, always previewed first, and it only acts with `--run`.
 
 Build the series against `linux-cachyos-bore` 7.2.9-1 (the `linux-cachyos-bore/` PKGBUILD dir - the plain `linux-cachyos/` dir builds a kernel release string the prebuilt nct6687 fan-telemetry module's vermagic won't match; the prebuilt module must match whichever release you target). **7.2.9 is the default target; 7.0.9 is still supported.** Both series, both prebuilt nct6687 modules and both PKGBUILD pins ship inside the same binary, so pick the kernel you are validating with `aputune build --kernel 7.0.9` (or `APUTUNE_KERNEL=709`) - a snapshot can then drift between the two kernels without swapping tools, which is what makes an A/B run measure the kernel rather than the binary. 7.0.9 needs the rust target-ABI shim, which `aputune` injects automatically when it probes a rustc that rejects the pre-rename `x86-softfloat` spelling (1.99+); 7.2.9 already carries the renamed `softfloat` spec. The per-kernel series lives in `crates/apu/patches/bc250-cachyos-<version>/`; every diff and what it does is explained in that directory's `SERIES.md` (patches that are on disk but not applied are marked there).
 
@@ -55,7 +55,7 @@ stock build no longer stops on a "missing clang" it was never going to call.
 
 `arieltune apu build` pre-flight-checks the toolchain before touching anything and
 aborts in seconds with the exact missing packages instead of failing deep into the
-~30 minute build.
+~1 hour build.
 
 #### Kernel Rust on a newer rustc
 
@@ -176,7 +176,7 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    any existing flags instead of clobbering them, and drop `mitigations=off`
    unless this is a dedicated inference box.
 
-4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`).
+4. **Preview, then run the build** (~1 hour; nothing is touched without `--run`).
    `--kernel` selects the series, the embedded nct6687 module and the PKGBUILD pin.
    7.2.9 is the default, so the flag is only needed for 7.0.9:
 
@@ -224,7 +224,7 @@ regenerates the initramfs for you.
 
 > **New to this board? Do the Liberation quick start above.** snaptune is not an install
 > path and not a second way in. It is what you reach for *after* a liberated board is
-> running, when the thing you want to change is the `amdgpu` module and a ~30 minute kernel
+> running, when the thing you want to change is the `amdgpu` module and a ~1 hour kernel
 > build per attempt is too slow to iterate with.
 
 The SNAP tab - `arieltune snap`, or the standalone `snaptune` - manages the blade's
@@ -269,7 +269,7 @@ a fact, not an inference. `dev` also refuses when the tree would build a *differ
 from the one the parent boots, because that module would be refused at load.
 
 The whole cycle - edit, rebuild, register, boot, measure - is about two minutes, against
-~30 minutes for a full `aputune build`.
+~1 hour for a full `aputune build`.
 
 ### Provenance - what a snapshot records
 
