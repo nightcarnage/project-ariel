@@ -41,13 +41,13 @@ install_compat() {
   # $1 = target. Install binary + at + compat symlinks.
   #
   # `snaptune` is required for the snapshot namespace to be reachable by name: without
-  # the symlink the argv[0] dispatch never sees it. `snapshot` is the retired
-  # bc-250-snapshotter shell tool's name, now served by that namespace — the shell
-  # tool's own binary is backed up to /var/tmp first if one is still installed.
+  # the symlink the argv[0] dispatch never sees it. `snapshot` is installed for the
+  # same reason - scripts and runbooks spell it that way - and any binary already at
+  # that name is copied to /var/tmp first.
   #
   # The bash completion goes with the binary: it is what makes `snaptune show snap-a<TAB>`
-  # fill in an id, and it is inert if bash never sources it. The retired tool's
-  # completion file is removed: it completes by calling the tool it belongs to.
+  # fill in an id, and it is inert if bash never sources it. Any completion for the old
+  # name is removed, so nothing completes against a tool that is no longer there.
   ssh "$1" 'if [ -e /usr/local/bin/snapshot ] && [ ! -L /usr/local/bin/snapshot ]; then
       sudo cp -p /usr/local/bin/snapshot /var/tmp/snapshot-retired-$(date +%Y%m%d); fi \
     && sudo install -m755 /tmp/arieltune /usr/local/bin/arieltune \

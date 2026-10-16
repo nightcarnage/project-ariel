@@ -325,8 +325,7 @@ nothing. `list --all` includes hidden snapshots. Snapshot ids complete on `TAB`,
 
 | | |
 |---|---|
-| [`docs/snapshot-tool.md`](docs/snapshot-tool.md) | the model, the on-disk contracts, every verb, and the workflows. **Read §3 before changing anything** - it is a contract with snapshots that already exist on real blades |
-| [`docs/snapshot-tool-spec.md`](docs/snapshot-tool-spec.md) | the port spec: why it was worth doing, the hard invariants, the reuse map |
+| [`docs/snaptune.md`](docs/snaptune.md) | the model, every verb, the workflows, and the on-disk rules. **Read §8 before changing anything** - it is a contract with snapshots that already exist on real blades |
 | `snaptune --help` | built-in help - `snaptune <verb> --help` for any verb above |
 | [`completions/snaptune.bash`](completions/snaptune.bash) | TAB completion for verbs, flags and snapshot ids |
 

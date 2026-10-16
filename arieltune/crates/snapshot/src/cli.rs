@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! The command surface.
 //!
-//! `list`/`show`/`current`/`lineage`/`grub-list` mirror the shell tool's verbs of
-//! the same name, and `list --ids` is kept byte-compatible because
-//! `apu::initramfs` parses it (`snapshot list --ids`) to answer "is this
-//! snapshot one of ours?". Until that call site is replaced, that output is a
-//! contract.
+//! `list --ids` is kept byte-compatible because `apu::initramfs` parses it
+//! (`snapshot list --ids`) to answer "is this snapshot one of ours?". Until that
+//! call site is replaced, that output is a contract.
 //!
 //! Reading is always safe. The verbs that write — pin, unpin, hide, unhide,
 //! golden, and `dev --register` — say so in their help, check for root, and take
@@ -38,7 +36,7 @@ use crate::write;
     version,
     about = "BC-250 snapshots: what is on this blade, and which one did I boot?",
     long_about = "Snapshot store: list, inspect, and manage the GRUB menu entries of\n\
-        kernel snapshots created by the bc-250-snapshotter.\n\
+        kernel snapshots.\n\
         \n\
         Reads are safe anywhere. The writers -- create, rebuild, dev, register,\n\
         pin, unpin, hide, unhide, golden, boot and prune -- change the store,\n\

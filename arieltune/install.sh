@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Build and install arieltune -- the unified BC-250 tuning suite (WIKI|BIOS|APU|MEM).
+# Build and install arieltune -- the unified BC-250 tuning suite (WIKI|BIOS|APU|MEM|SNAP).
 #
 #   ./install.sh                 build (release) + install to /usr/local/bin
 #   ./install.sh --with-units    print how to lay + enable the APU GPU power unit
@@ -10,10 +10,10 @@
 #   * `at`        short alias  -> arieltune
 #   * `aputune` `memtune` `biostune` `wikitune` `snaptune`  compat symlinks -> arieltune
 #     (argv[0] dispatch keeps old commands + any systemd units that call them working)
-#   * `snapshot`  -> arieltune, the retired bc-250-snapshotter shell tool's name. The
-#     suite's `snapshot` namespace serves it, and `snapshot list --ids` stays
-#     machine-compatible because `arieltune apu` parses it. A shell tool found there is
-#     backed up to /var/tmp before the symlink replaces it.
+#   * `snapshot`  -> arieltune. Scripts and runbooks spell it this way, and
+#     `snapshot list --ids` stays machine-readable because `arieltune apu` parses it.
+#     Any binary already at this name is copied to /var/tmp before the symlink
+#     replaces it.
 #
 # Also installs bash completion for `snaptune` (ids + verbs), from
 # completions/snaptune.bash -> /etc/bash_completion.d/.
@@ -30,7 +30,7 @@ for a in "$@"; do
   case "$a" in
     --with-units)  WITH_UNITS=1 ;;
     --with-driver) WITH_DRIVER=1 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -47,12 +47,11 @@ echo ">> installing $BIN (sudo)..."
 sudo install -d "$PREFIX/bin"
 sudo install -m755 target/release/arieltune "$BIN"
 
-# The retired shell tool lives at this name; keep a copy of whatever is there before
-# the symlink takes the name over. Its repo keeps the source, but a box may never have
-# seen the repo.
+# Something else may already own this name. Keep a copy before the symlink takes it
+# over: on a box that has never seen a repo, whatever is there is the only copy.
 if [ -e "$PREFIX/bin/snapshot" ] && [ ! -L "$PREFIX/bin/snapshot" ]; then
   RETIRED="/var/tmp/snapshot-retired-$(date +%Y%m%d)"
-  echo ">> backing up the shell tool: $PREFIX/bin/snapshot -> $RETIRED"
+  echo ">> backing up the existing $PREFIX/bin/snapshot -> $RETIRED"
   sudo cp -p "$PREFIX/bin/snapshot" "$RETIRED"
 fi
 
@@ -64,8 +63,8 @@ done
 
 echo ">> bash completion (snaptune + snapshot): /etc/bash_completion.d/snaptune"
 sudo install -d /etc/bash_completion.d
-# The retired shell tool's completion completes by calling the tool it belongs to;
-# this file covers the name instead.
+# Drop any completion the old name shipped: this file covers both names, and a
+# leftover would complete against a tool that is no longer there.
 sudo rm -f /etc/bash_completion.d/snapshot
 sudo install -m644 completions/snaptune.bash /etc/bash_completion.d/snaptune
 

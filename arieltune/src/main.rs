@@ -96,8 +96,7 @@ enum Top {
     /// The guards refuse to hide the booted, golden, or pinned snapshot, because removing that menu
     /// entry makes GRUB fall back to entry 0 and boot a different kernel.
     ///
-    /// The module behind this namespace is snaptune (also a standalone binary of that name). The
-    /// verb surface is being brought up to the bc-250-snapshotter shell tool's, which it replaces.
+    /// The module behind this namespace is snaptune (also a standalone binary of that name).
     #[command(alias = "snapshot", alias = "snaptune")]
     Snap {
         #[command(flatten)]
@@ -136,10 +135,9 @@ enum Top {
 /// inject the matching subcommand namespace so old commands AND systemd units that
 /// call the old names keep working unchanged. `at` and `arieltune` pass through.
 ///
-/// `snapshot` is mapped for the same reason but is **not** installed as a symlink:
-/// that name belongs to the bc-250-snapshotter shell tool until it is retired, and
-/// shadowing it would silently replace the tool being replaced. The mapping is here
-/// so the cutover is a symlink and nothing else.
+/// `snapshot` maps here too, and `install.sh` does install it as a symlink, copying
+/// aside whatever binary already had the name. The mapping exists so that the whole
+/// cutover is a symlink and nothing else.
 ///
 /// Without the `snaptune` entry a `snaptune list` would reach clap as an unknown
 /// top-level argument, and bare `snaptune` would open the TUI — a whole-screen
@@ -270,8 +268,8 @@ mod tests {
             inject_compat_namespace(v(&["memtune"])),
             v(&["memtune", "mem"])
         );
-        // The snapshot namespace, by the name this suite installs and by the name the
-        // shell tool it replaces answers to.
+        // The snapshot namespace, by both names the suite installs: `snaptune` and
+        // the older `snapshot`.
         assert_eq!(
             inject_compat_namespace(v(&["/usr/local/bin/snaptune", "list", "--ids"])),
             v(&["/usr/local/bin/snaptune", "snap", "list", "--ids"])

@@ -3,7 +3,7 @@ name = "snapshot"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"
-description = "BC-250 kernel snapshot manager: content-addressed module/initramfs/vmlinuz snapshots, their GRUB entries, and the boot pin. Port of bc-250-snapshotter."
+description = "BC-250 kernel snapshot manager: content-addressed module/initramfs/vmlinuz snapshots, their GRUB entries, and the boot pin."
 
 [[bin]]
 name = "snaptune"

@@ -5,9 +5,9 @@
 //! `dev --run --register` all change the store, `/boot` or the boot configuration.
 //! The read-only verbs are `list`, `show`, `current`, `lineage`, `grub-list`,
 //! `diff`, `doctor` and `verify`; every writing verb is listed in
-//! `docs/snapshot-tool.md` with what it touches.
+//! `docs/snaptune.md` with what it touches.
 //!
-//! Design and invariants: `docs/snapshot-tool.md` in this repository. The short
+//! Design and invariants: `docs/snaptune.md` in this repository. The short
 //! version of the rule that matters: the on-disk ids, manifest field names and
 //! path conventions are a contract with existing snapshots, so this crate
 //! reproduces them rather than improving them.

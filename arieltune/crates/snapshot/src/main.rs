@@ -10,7 +10,7 @@
 //! `arieltune`, so the name reaches this namespace, and `snapshot list --ids` is kept
 //! machine-compatible because `arieltune apu` parses it. This standalone binary is the
 //! same code without the suite around it -- what a box that wants only this namespace
-//! installs. See `docs/snapshot-tool.md` §1.
+//! installs. See `docs/snaptune.md` §1.
 //!
 //! This build writes as well as reads: `prune`, `pin`, `hide`, `boot` and
 //! `dev --run --register` change the store, `/boot` or the boot configuration, and
