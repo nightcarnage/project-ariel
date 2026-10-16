@@ -1,12 +1,126 @@
-# snaptune — kernel snapshots and the GRUB boot menu
+# Snaptune: Bulletproof Snapshots and Module Management
 
-`snaptune` manages the kernel snapshots on a BC-250 blade: what is on the disk, which
-one this boot came from, and the GRUB menu entries that boot them. It is the SNAP tab
+Snaptune takes the guesswork out of BC-250 kernel development by managing your
+snapshots, boot entries, and module verification in one place.
+
+It manages the kernel snapshots of a BC-250 blade: what is on the disk, which one this
+boot came from, and the GRUB menu entries that boot them. It is the SNAP tab
 (`arieltune snap`), and it is also a standalone binary.
+
+## Key Features
+
+**Fail-safe deployments.** An untested module cannot brick a remote blade. `boot` arms a
+single boot attempt, and the machine falls back to the last known-good kernel by itself
+if the snapshot does not come up — no console access, no rescue media, no hands on the
+box.
+
+**The live system is never mutated.** `create` and `dev` build into a *copy* of an image
+and check the result against the build. Neither the running module tree nor the running
+initramfs is a destination for any verb, so a board under development stays bootable
+throughout.
+
+**Provenance stamped on the artefact.** A snapshot's id is a hash of its module, its
+initramfs and its kernel, so the name can be recomputed from the bytes and checked. The
+manifest records the build, the source tree and the liberation series the snapshot
+carries.
+
+**Verified, not assumed.** `verify` re-derives each id from stored content; `validate`
+compares the stored module with the one the kernel actually loaded. The check that earns
+its place is the one with no visible symptom otherwise: a boot that succeeds and is not
+the snapshot you asked for.
+
+**Nothing is promoted on your behalf.** No verb sets the permanent GRUB default
+implicitly. `boot` tests a single boot; `pin` makes it the default once it has earned it.
+
+## Safety Guarantees
+
+Three things no snaptune verb does, whatever it is passed:
+
+- **The live module tree is never mutated.** Nothing is installed into
+  `/usr/lib/modules/<kver>/`. A snapshot's module is stored in the snapshot, and reaches
+  a boot image only inside a copy of that image.
+- **The running initramfs is never touched.** No verb regenerates the machine's own
+  images, and no `mkinitcpio -P` sweep runs over them.
+- **The permanent GRUB default is never changed automatically.** Only `pin` sets it, and
+  it is a separate, deliberate command.
+
+The blast radius of a bad change is one reboot, bounded by a boot that reverts itself.
+Recovering a remote blade does not require physical access.
 
 ---
 
-## 1. The mental model
+## 1. Installing & Quick Start
+
+### 1.1 Build and install
+
+Build from the `arieltune` workspace:
+
+```bash
+cargo build -p snapshot --bin snaptune              # dev build
+cargo build -p snapshot --release --bin snaptune    # release
+```
+
+Install on a blade. `snapshot` is another name for this binary (§2):
+
+```bash
+scp target/debug/snaptune blade:/var/tmp/snaptune.new
+ssh blade 'sudo install -m755 -o root -g root /var/tmp/snaptune.new /usr/local/bin/snaptune \
+           && rm -f /var/tmp/snaptune.new && snaptune --version'
+```
+
+`./install.sh` in the workspace installs the suite; for the standalone binary the
+completion script goes alongside it (§5.10):
+
+```bash
+sudo install -d /etc/bash_completion.d
+sudo install -m 0644 completions/snaptune.bash /etc/bash_completion.d/snaptune
+```
+
+Note `cargo test` and `cargo clippy` do **not** refresh `target/debug/snaptune` — only a
+real `cargo build` does. Installing a binary that `cargo test` left behind silently ships
+the previous version's behaviour.
+
+Replace a binary that may be running by uploading to `<name>.new` and `mv -f`-ing it over
+the target; an in-place `scp` fails with "Text file busy".
+
+### 1.2 Quick start — the 3-step loop
+
+```bash
+# 1. Build the module and register it as a bootable snapshot.
+sudo snaptune dev "patch 25 variant" \
+    --tree ~/linux-cachyos/src/cachyos-7.2.9-2 --run --register
+
+# 2. Boot it once. If it does not come up, the machine reverts by itself.
+sudo snaptune boot snap-1a2b3c4d
+snaptune validate                 # is the module I am running the one I meant?
+
+# 3. Keep it, once it has earned it.
+sudo snaptune pin snap-1a2b3c4d
+```
+
+That is the whole shape of the tool: build, boot once, pin. Step 1 relinks only the
+module rather than rebuilding a kernel, which is what makes iterating on a driver patch
+practical. Nothing reaches the live system, and nothing becomes permanent until step 3.
+§5 walks each workflow in full.
+
+### 1.3 Which verbs need root
+
+Everything read-only works as an ordinary user, including `doctor` and `verify`
+(confirmed on 104 and 115). Only the writers need `sudo`: `create`, `rebuild`,
+`dev --register`, `register`, `boot`, `pin`, `unpin`, `hide`, `unhide`, `golden <id>`,
+`prune`.
+
+### 1.4 Pointing at a different store
+
+`--root <dir>` (or `SNAPSHOT_ROOT=`) reads a store from anywhere, with the boot, GRUB and
+cmdline paths taken from under it — so a fixture is readable end to end and a whole
+workflow can be exercised without touching the real one. That is how `create` and
+`rebuild` were validated: a fixture root under `/var/tmp`, which writes nothing outside
+it.
+
+---
+
+## 2. Architecture & Core Concepts
 
 **A snapshot is one `amdgpu` module, one initramfs and one kernel, kept as copies
 under a name derived from their content.**
@@ -50,7 +164,7 @@ object for the report verbs, an array for `list` and `lineage`.
 ### The names
 
 `snaptune`, `snapshot` and `at` are all the same program. `snapshot <verb>` is the
-spelling older scripts use, and it keeps working — every verb in §3 is reachable under
+spelling older scripts use, and it keeps working — every verb in §4 is reachable under
 any of the three names.
 
 `snapshot list --ids` is machine-readable on purpose: `arieltune apu` reads it to learn
@@ -58,7 +172,7 @@ which snapshot a boot came from, so its output shape is a contract.
 
 ---
 
-## 2. What is on disk
+## 3. File System Footprint & Artifacts
 
 Three locations, and every verb is about relating them.
 
@@ -92,7 +206,7 @@ copies. That is why `prune` can delete one without touching anything else, and w
 
 ---
 
-## 3. The verbs
+## 4. Command Reference
 
 | verb | what it does | writes | root |
 |---|---|---|---|
@@ -131,9 +245,9 @@ the verbs that fail a run.
 
 ---
 
-## 4. Workflows
+## 5. Operational Workflows
 
-### 4.1 The dev loop — iterate on a module without a kernel build
+### 5.1 The dev loop — iterate on a module without a kernel build
 
 The loop is seconds, not minutes, because `make M=... modules` relinks only what
 changed. Nothing here installs into the live module tree.
@@ -159,7 +273,7 @@ module I built" is a fact, not an inference.
 `dev` refuses when the tree builds a *different* kernel from the one the parent
 image boots, because that module would be refused at load.
 
-### 4.2 A from-source snapshot
+### 5.2 A from-source snapshot
 
 ```bash
 snaptune create "golden-base: patches 1-3" --tree ~/linux-cachyos/src/... --dry-run
@@ -171,7 +285,7 @@ replaced — not a fresh `mkinitcpio` run. If `/etc/mkinitcpio.conf` gained a ho
 since the base image was built, the snapshot will not carry it; choose the base
 with `--from` if that matters.
 
-### 4.3 Snapshot the running system, on a blade with no source tree
+### 5.3 Snapshot the running system, on a blade with no source tree
 
 The normal case for a blade provisioned from packages: the patched module is
 already installed and running.
@@ -190,7 +304,7 @@ one member.
 The first snapshot a store ever holds becomes its baseline (`status: golden`, and
 the store's marker names it).
 
-### 4.4 Rebuild a snapshot's module
+### 5.4 Rebuild a snapshot's module
 
 "I have `snap-11e61755`; my tree has moved on; give me that snapshot's module
 rebuilt."
@@ -210,7 +324,7 @@ distinguished the two cases cleanly — rebuilding `snap-f59f7152` reported "not
 to rebuild", while rebuilding `snap-11e61755` found real drift
 (`ecdb619e…` → `39a2eab4…`).
 
-### 4.5 Test, then promote
+### 5.5 Test, then promote
 
 Nothing here ever sets the GRUB default on your behalf, because an untested
 snapshot must not become the entry the machine falls back to.
@@ -224,7 +338,7 @@ sudo snaptune pin snap-1a2b3c4d      # now it is the permanent default
 `validate` earns its place *after* the boot, not before: it is the only check that
 compares the file with the running kernel, so it can tell you the boot did not
 actually take even when the GRUB entry says it did. Record what you saw with
-`test-result` and the snapshot carries its own test history (§4.11). Two
+`test-result` and the snapshot carries its own test history (§5.11). Two
 `srcversion`s that differ mean the loaded module is some other build:
 
 ```
@@ -258,7 +372,7 @@ instead. `grub-list` marks the nested ones and prints those paths. An ambiguous 
 is refused rather than guessed: a title that appears in two submenus would otherwise
 arm whichever comes first in the file.
 
-### 4.6 Triage: `doctor`, then `verify`
+### 5.6 Triage: `doctor`, then `verify`
 
 `doctor` asks whether the *store* is coherent. `verify` asks whether one
 *snapshot* is what its manifest claims. Run them in that order.
@@ -277,7 +391,7 @@ On the archive blade this reads as: 28 snapshots, `verify` exits 2, five of them
 fail `manifest` — and `doctor` names the same five. Two independently written
 checks agreeing is the point.
 
-### 4.7 Retire a snapshot
+### 5.7 Retire a snapshot
 
 ```bash
 snaptune show snap-1a2b3c4d          # confirm it is the one you mean
@@ -293,7 +407,7 @@ with `golden <other-id>`.
 It is a rename of `manifest.yaml` to `manifest.yaml.hidden`, so it is also what
 "hidden" means when reading a store.
 
-### 4.8 Moving a snapshot between blades
+### 5.8 Moving a snapshot between blades
 
 There are two routes.
 
@@ -312,9 +426,9 @@ the target blade's own initramfs plus one changed member — no rebuild of anyth
 else, and none of the source tree's state comes along.
 
 **The running module on a blade that has no tree** — `create` with no `--module`
-adopts what the kernel package installed (§4.3).
+adopts what the kernel package installed (§5.3).
 
-### 4.9 Handing over artefacts you built yourself
+### 5.9 Handing over artefacts you built yourself
 
 `create` always *derives* an image: it takes a base image and replaces one member.
 When the initramfs itself was generated by hand — which is what the fleet's
@@ -340,7 +454,7 @@ is also where the label comes from: `vmlinuz-snap-<id>-v3-ttm-fix` yields
 `[v3-ttm-fix] <desc>`, because that filename is the only place the variant is
 written down.
 
-### 4.10 Typing snapshot ids: TAB completion
+### 5.10 Typing snapshot ids: TAB completion
 
 Snapshot ids are `snap-` plus eight hex characters, which nobody wants to type when
 `snap-` plus three would do. `completions/snaptune.bash` completes them:
@@ -370,9 +484,9 @@ Two consequences worth knowing:
   completion agrees with it.
 
 The script registers `snapshot` as well as `snaptune`, because `snapshot` is another
-name for this binary, so its completion is this function's job (§1).
+name for this binary, so its completion is this function's job (§2).
 
-### 4.11 Rescue copies, test results, and getting the module back out
+### 5.11 Rescue copies, test results, and getting the module back out
 
 Three verbs that are useful around the edges of the loop.
 
@@ -413,39 +527,39 @@ keeps the modules on these blades.
 
 ---
 
-## 5. Rules, environment, and the menu layout
+## 6. Rules, Environment, and the Menu Layout
 
-§5.1–5.4 are rules: the things this deliberately does not do, stated because they are
-the ones that matter when you are about to trust a snapshot you have not booted. §5.5
-and §5.6 are the environment it reads and the menu shape to aim for.
+§6.1–6.4 are rules: the things this deliberately does not do, stated because they are
+the ones that matter when you are about to trust a snapshot you have not booted. §6.5
+and §6.6 are the environment it reads and the menu shape to aim for.
 
-### 5.1 No live-system mutation in `create`
+### 6.1 No live-system mutation in `create`
 
 `create` never writes the live module tree or the live initramfs. The module goes into
 a *copy* of an image, and the result is verified against the build. So there is no
 window in which the running system holds a module that has never booted, and no
 `depmod` plus `mkinitcpio -P` sweep over every image on the machine.
 
-### 5.2 No in-place `rebuild`
+### 6.2 No in-place `rebuild`
 
 `rebuild` never writes into the snapshot it names. The original is untouched and the
 rebuild is a **new** snapshot, so an id keeps describing the content it was computed
 from — which is the whole basis of `verify`.
 
-### 5.3 No automatic rescue copy
+### 6.3 No automatic rescue copy
 
-Nothing is copied aside unless you ask. `preserve` (§4.11) is the deliberate version:
+Nothing is copied aside unless you ask. `preserve` (§5.11) is the deliberate version:
 it exists, it is just never automatic. There is no separate `known-good-amdgpu.ko.zst`
 backup to keep in sync either, because the module a snapshot was built from is already
 that snapshot's own `modules/amdgpu.ko.zst`, and `extract-modules` hands it back.
 
-### 5.4 Nothing sets the GRUB default
+### 6.4 Nothing sets the GRUB default
 
 `boot` tries a snapshot exactly once and reverts by itself; `pin` makes it the
 permanent default. An untested snapshot never becomes the entry the machine falls
 back to.
 
-### 5.5 Environment
+### 6.5 Environment
 
 | variable | effect |
 |---|---|
@@ -469,7 +583,7 @@ meaningful, but a script that pipes it to `head -1` gets a different snapshot th
 order would give. `arieltune apu` reads the whole list looking for one id, so it is
 unaffected.
 
-### 5.6 The menu layout: nested, not flat
+### 6.6 The menu layout: nested, not flat
 
 **The nested layout is the one to want**, and the one to run:
 
@@ -494,7 +608,7 @@ the duplicates it promoted, and tell you which command to run.
 
 ---
 
-## 6. Reading a `verify` report
+## 7. Reading a `verify` Report
 
 Five checks, in the order they appear. An `ok` means the check ran and passed; a
 `warn` can also mean *it could not run*, and the detail says which.
@@ -514,61 +628,16 @@ expected answer, not a problem.
 
 ---
 
-## 7. Installing
+## 8. Backward Compatibility & Legacy Contracts
 
-Build from the `arieltune` workspace:
+The ids on disk, the manifest field names and the path conventions predate this tool,
+and they are contracts with snapshots that already exist on real blades. They cannot be
+changed without orphaning every one of them, so this section records them as they are
+and this tool reproduces them byte for byte rather than tidying them up - including the
+forms it would not write today.
 
-```bash
-cargo build -p snapshot --bin snaptune              # dev build
-cargo build -p snapshot --release --bin snaptune    # release
-```
-
-Install on a blade. `snapshot` is another name for this binary (§1):
-
-```bash
-scp target/debug/snaptune blade:/var/tmp/snaptune.new
-ssh blade 'sudo install -m755 -o root -g root /var/tmp/snaptune.new /usr/local/bin/snaptune \
-           && rm -f /var/tmp/snaptune.new && snaptune --version'
-```
-
-`./install.sh` in the workspace installs the suite; for the standalone binary the
-completion script goes alongside it (§4.10):
-
-```bash
-sudo install -d /etc/bash_completion.d
-sudo install -m 0644 completions/snaptune.bash /etc/bash_completion.d/snaptune
-```
-
-Note `cargo test` and `cargo clippy` do **not** refresh `target/debug/snaptune` —
-only a real `cargo build` does. Installing a binary that `cargo test` left behind
-silently ships the previous version's behaviour.
-
-Replace a binary that may be running by uploading to `<name>.new` and `mv -f`-ing it
-over the target; an in-place `scp` fails with "Text file busy".
-
-### Which verbs need root
-
-Everything read-only works as an ordinary user, including `doctor` and `verify`
-(confirmed on 104 and 115). Only the writers need `sudo`: `create`, `rebuild`,
-`dev --register`, `register`, `boot`, `pin`, `unpin`, `hide`, `unhide`,
-`golden <id>`, `prune`.
-
-### Pointing at a different store
-
-`--root <dir>` (or `SNAPSHOT_ROOT=`) reads a store from anywhere, with the boot,
-GRUB and cmdline paths taken from under it — so a fixture is readable end to end and
-a whole workflow can be exercised without touching the real one. That is how
-`create` and `rebuild` were validated: a fixture root under `/var/tmp`, which writes
-nothing outside it.
-
----
-
-## 8. Appendix — contracts with snapshots that already exist
-
-Everything here is a **contract with snapshots that already exist on the blades**. The
-ids on disk, the manifest field names and the path conventions cannot be changed
-without orphaning real snapshots, so this tool reproduces them byte for byte rather
-than tidying them up. Nothing in §1–§7 depends on reading it.
+This is why adding a snapshot kind, a manifest field or a boot path means reading here
+first. Nothing in §1–§7 depends on it.
 
 ### 8.1 The three id formulas
 

@@ -59,7 +59,7 @@ _snaptune_complete() {
 }
 
 # `snapshot` is registered as well as `snaptune`: they are the same binary, so one
-# completion function serves both names (docs/snaptune.md §1). Installing this
+# completion function serves both names (docs/snaptune.md §2). Installing this
 # file replaces any /etc/bash_completion.d/snapshot, which completed by calling
 # `snapshot list --ids` — the same machine-readable mode this function uses.
 complete -o default -F _snaptune_complete snaptune snapshot

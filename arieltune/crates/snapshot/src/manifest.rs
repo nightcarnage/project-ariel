@@ -54,7 +54,7 @@ pub const KIND_REBUILT: &str = "rebuilt";
 
 /// `snapshot.kind: "registered"` — artefacts built elsewhere were handed over.
 ///
-/// The id is still content-addressed (§3.1's F3), and the shell tool's `register`
+/// The id is still content-addressed (§8.1's F3), and the shell tool's `register`
 /// used the same formula — so a snapshot registered here gets the *same id* the
 /// shell would give it. That is the one kind where the two tools agree by
 /// construction rather than by coincidence, and it is why `verify` can re-derive
