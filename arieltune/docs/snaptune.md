@@ -4,23 +4,12 @@
 one this boot came from, and the GRUB menu entries that boot them. It is the SNAP tab
 (`arieltune snap`), and it is also a standalone binary.
 
-It exists for one loop: **build a module, boot it once, keep what worked.** A full
-kernel build is about 30 minutes; a module-only rebuild is about one. That difference
-is the whole reason this tool is here.
-
-**Reading order.** §1 is the model, §2 is what a snapshot physically is, §3 is every
-verb, and §4 walks the workflows. §5 covers behaviour, the environment and the menu
-shape, §6 is how to read a report, and §7 installs. §8 is the appendix — the id
-formulas, manifest fields and path conventions that keep existing snapshots valid. You
-only need §8 if you are changing the code.
-
 ---
 
 ## 1. The mental model
 
-**A snapshot is a promise that a named triple — one `amdgpu` module, one
-initramfs, one kernel — boots.** Everything else in this tool exists to keep that
-promise checkable.
+**A snapshot is one `amdgpu` module, one initramfs and one kernel, kept as copies
+under a name derived from their content.**
 
 Three separate things identify a snapshot, and it is worth keeping them apart:
 
@@ -30,8 +19,8 @@ Three separate things identify a snapshot, and it is worth keeping them apart:
 | **the manifest** | what the writer *claimed* at the moment it wrote | `/var/lib/kernel-snapshots/<id>/manifest.yaml` |
 | **the entry** | what GRUB will actually run | the block in `/etc/grub.d/40_custom` |
 
-The whole reason the id is content-addressed is that it is the only one of the
-three that cannot drift. A manifest is written once and never read back; a
+The id is the only one of the three that cannot drift, which is why it is
+content-addressed. A manifest is written once and never read back; a
 `40_custom` block is a file that can be edited. The id is a hash, so it can be
 recomputed — and `snaptune verify` does exactly that.
 

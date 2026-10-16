@@ -269,8 +269,7 @@ a fact, not an inference. `dev` also refuses when the tree would build a *differ
 from the one the parent boots, because that module would be refused at load.
 
 The whole cycle - edit, rebuild, register, boot, measure - is about two minutes, against
-~30 minutes for a full `aputune build`. That difference is the entire point: it makes
-driver-patch experiments cheap enough to actually run.
+~30 minutes for a full `aputune build`.
 
 ### Provenance - what a snapshot records
 
