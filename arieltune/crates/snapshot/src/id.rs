@@ -37,7 +37,7 @@
 //!    it is only reproducible while that module is unchanged.
 //!
 //! 5. **F1 records none of its inputs.** Once the tree is gone the id cannot be
-//!    re-derived or audited — see `docs/snapshot-tool.md` §3.1 for the three
+//!    re-derived or audited — see `docs/snapshot-tool.md` §8.1 for the three
 //!    snapshots on blade 104 where this is already true.
 //!
 //! The verified vectors in `tests` are real snapshots, not invented:

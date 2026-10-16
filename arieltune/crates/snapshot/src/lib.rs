@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! BC-250 kernel snapshot manager, ported from `bc-250-snapshotter/snapshot`.
+//! BC-250 kernel snapshot manager: the store, the manifests and the GRUB entries.
 //!
-//! This crate **started read-only** — it existed to answer "what snapshots are on
-//! this blade, and which one did I boot?" so it could be compared against the shell
-//! tool it replaces before it was trusted with writes. It now owns writes too:
-//! `prune`, `pin`, `hide`, `boot` and `dev --run --register` all change the store,
-//! `/boot` or the boot configuration. The read-only verbs are `list`, `show`,
-//! `current`, `lineage`, `grub-list`, `diff`, `doctor` and `verify`; every writing
-//! verb is listed in `docs/snapshot-tool.md` with what it touches.
+//! This crate owns writes as well as reads. `prune`, `pin`, `hide`, `boot` and
+//! `dev --run --register` all change the store, `/boot` or the boot configuration.
+//! The read-only verbs are `list`, `show`, `current`, `lineage`, `grub-list`,
+//! `diff`, `doctor` and `verify`; every writing verb is listed in
+//! `docs/snapshot-tool.md` with what it touches.
 //!
 //! Design and invariants: `docs/snapshot-tool.md` in this repository. The short
 //! version of the rule that matters: the on-disk ids, manifest field names and
@@ -16,7 +14,7 @@
 //!
 //! | module | what it owns |
 //! |---|---|
-//! | [`id`] | the three content-addressed id formulas, with the shell's exact traps |
+//! | [`id`] | the three content-addressed id formulas, and the trap each one carries |
 //! | [`manifest`] | `manifest.yaml`, parsed leniently because the writer's types vary |
 //! | [`store`] | discovery over the snapshot root |
 //! | [`grub`] | `40_custom` blocks and `grub.cfg` menu entries |

@@ -8,7 +8,7 @@
 //! reached from here.
 //!
 //! Path conventions are a contract with existing snapshots, so they are
-//! reproduced rather than improved (`docs/snapshot-tool.md` §3.3):
+//! reproduced rather than improved (`docs/snapshot-tool.md` §8.3):
 //!
 //! ```text
 //! /var/lib/kernel-snapshots/snap-<id>/manifest.yaml

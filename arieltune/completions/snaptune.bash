@@ -58,10 +58,10 @@ _snaptune_complete() {
     return 0
 }
 
-# `snapshot` is registered now that the bc-250-snapshotter shell tool is retired and
-# the name is a symlink to this binary (docs/snapshot-tool.md §3.5). Installing this
-# file replaces the shell tool's own /etc/bash_completion.d/snapshot, which completed
-# by calling `snapshot list --ids`.
+# `snapshot` is registered as well as `snaptune`: they are the same binary, so one
+# completion function serves both names (docs/snapshot-tool.md §1). Installing this
+# file replaces any /etc/bash_completion.d/snapshot, which completed by calling
+# `snapshot list --ids` — the same machine-readable mode this function uses.
 complete -o default -F _snaptune_complete snaptune snapshot
 # The suite's multi-call names: this file speaks for the snapshot namespace only.
 complete -o default -F _snaptune_complete arieltune at
