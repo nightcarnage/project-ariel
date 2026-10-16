@@ -3,8 +3,12 @@
 Snaptune takes the guesswork out of BC-250 kernel development by managing your
 snapshots, boot entries, and module verification in one place.
 
-It builds your `amdgpu` module against the liberation series — the same module
+It builds your `amdgpu` module against the Liberation series — the same module
 `arieltune apu build` produces, without the kernel build.
+
+What it leaves behind is **Liberation evidence**: the id, the manifest and the GRUB entry
+that together say which Liberation series this blade is running — and `arieltune apu
+patches` reads the same answer back off the running kernel.
 
 It is the SNAP tab (`arieltune snap`), and it is also a standalone binary. It answers
 three questions: what is on the disk, which snapshot this boot came from, and which
@@ -24,15 +28,11 @@ then derives a boot image from an existing one, so iterating on a driver patch d
 cost a full kernel build per attempt.
 
 **Liberation evidence.** A snapshot's id is a hash of its module, its initramfs and its
-kernel, so the name can be recomputed from the bytes and checked; its manifest records
-the build, the source tree and the liberation series it carries. That is what makes
-"which liberation is this blade running?" answerable from the artefacts rather than from
-memory.
-
-**Verified, not assumed.** `verify` re-derives each id from stored content; `validate`
-compares the stored module with the one the kernel actually loaded. The check that earns
-its place is the one with no visible symptom otherwise: a boot that succeeds and is not
-the snapshot you asked for.
+kernel, so the name can be recomputed from the bytes and checked, and its manifest
+records the build, the source tree and the Liberation series it carries. `verify`
+re-derives that id from stored content, and `validate` compares the stored module with
+the one the kernel actually loaded. The check that earns its place is the one with no
+visible symptom otherwise: a boot that succeeds and is not the snapshot you asked for.
 
 **Portable between blades.** A snapshot moves as a single module: `create --module …
 --from …` derives the target blade's own image with that one member replaced, so nothing
