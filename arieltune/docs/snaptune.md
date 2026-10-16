@@ -24,9 +24,8 @@ anything reboots. An entry GRUB cannot resolve is refused before it is
 written, because an unresolvable value does not fail: it boots entry 0, silently. The
 worst case for a bad snapshot is a power cycle, not a reflash.
 
-**Rebuilds in about a minute, not an hour of kernel build.** `dev` relinks only what
-changed and then derives a boot image from an existing one. A full kernel build takes
-about an hour.
+**Rebuilds in minutes, not an hour of kernel build.** `dev` relinks only what changed and
+then derives a boot image from an existing one. A full kernel build takes about an hour.
 
 **Liberation evidence.** A snapshot's id is a hash of its module, its initramfs and its
 kernel, so the name can be recomputed from the bytes and checked, and its manifest

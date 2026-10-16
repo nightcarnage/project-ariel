@@ -243,7 +243,7 @@ live system at all, only from the artefacts on disk. That is what a snapshot is 
 And because the artefact is a copy, the safe edit is not "change the module and hope". You
 make a *different* artefact, name it, and boot it once.
 
-### The dev loop - a module build in about a minute
+### The dev loop - a module build in minutes
 
 `snap dev` rebuilds **only the module** (`make M=drivers/gpu/drm/amd/amdgpu modules` -
 timestamp-driven, so only what changed relinks) and derives a boot image from a parent
@@ -268,8 +268,8 @@ Step 2 is the part that matters: the derived image is opened and the member is c
 a fact, not an inference. `dev` also refuses when the tree would build a *different* kernel
 from the one the parent boots, because that module would be refused at load.
 
-The whole cycle - edit, rebuild, register, boot, measure - is about two minutes, against
-~1 hour for a full `aputune build`.
+The whole cycle - edit, rebuild, register, boot, measure - takes minutes, against ~1 hour
+for a full `aputune build`.
 
 ### Provenance - what a snapshot records
 
