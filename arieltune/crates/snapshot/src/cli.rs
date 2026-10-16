@@ -235,9 +235,13 @@ pub enum Cmd {
     ///
     /// One-shot rather than changing `saved_entry`, so this cannot leave a blade
     /// stuck booting a kernel that will not come up — a snapshot that fails to boot
-    /// reverts by itself. The same check `pin` does applies here: the armed value is
-    /// read back from grubenv, because `grub-reboot` exits 0 even when `grub.cfg`
-    /// was generated without `GRUB_DEFAULT=saved` and would ignore it.
+    /// reverts by itself, to whatever `saved_entry` names. The armed value is read
+    /// back from grubenv, because `grub-reboot` exits 0 whether or not the write
+    /// landed, so the exit status says nothing.
+    ///
+    /// `GRUB_DEFAULT=saved` is not needed for this one: `00_header` emits the
+    /// `next_entry` block whatever it is set to. It is `pin` that needs it, and
+    /// `doctor` reports when it is missing.
     #[command(alias = "reboot-into")]
     Boot {
         /// Snapshot id, e.g. snap-0848359a.

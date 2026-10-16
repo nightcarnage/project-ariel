@@ -92,11 +92,11 @@ impl Pending {
 ///
 /// Split out because this rule is the whole safety property, and it is one the
 /// hardware cannot easily be asked about: **never reboot unless the one-shot
-/// actually armed.** `grub-reboot` exits 0 even when `grub.cfg` was generated
-/// without `GRUB_DEFAULT=saved` and will never consult `next_entry`. Rebooting on
-/// that boots the default instead of the snapshot that was chosen — silently, in the
-/// middle of a reboot, on a machine that may only be reachable over the network.
-/// Staying up with an error on screen is recoverable; that is not.
+/// actually armed.** `grub-reboot` exits 0 whether or not the write landed, so a
+/// reboot on an unarmed boot loads the default instead of the snapshot that was
+/// chosen — silently, in the middle of a reboot, on a machine that may only be
+/// reachable over the network. Staying up with an error on screen is recoverable;
+/// that is not.
 fn boot_outcome(id: &str, armed: bool) -> Option<String> {
     armed.then(|| {
         format!(

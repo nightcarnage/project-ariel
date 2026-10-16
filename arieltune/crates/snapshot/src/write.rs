@@ -166,18 +166,23 @@ fn grubenv_value(prefix: &str) -> Option<String> {
 
 /// Confirm GRUB will actually honour an armed one-shot boot.
 ///
-/// `grub-reboot` exits 0 and can still change nothing: `next_entry` is only
-/// consulted when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. Reading the
-/// value back is the only way to tell "armed" from "written to a file nothing
-/// reads" — and the difference is a reboot into a kernel nobody asked for, on a
-/// machine that may only be reachable over the network.
+/// `grub-reboot` exits 0 whether or not the write landed, so the exit status says
+/// nothing. Reading the value back is the only way to tell "armed" from "wrote to a
+/// grubenv nobody reads" — and the difference is a reboot into whatever the default
+/// happens to be, instead of the snapshot that was chosen, on a machine that may
+/// only be reachable over the network.
+///
+/// Not a `GRUB_DEFAULT` question: `/etc/grub.d/00_header` emits the `next_entry`
+/// block whatever `GRUB_DEFAULT` is set to, so a one-shot boot is honoured either
+/// way. `GRUB_DEFAULT=saved` is what `pin` needs — see `verify_pin`.
 pub fn verify_boot(id: &str) -> Result<()> {
     let now = next_entry();
     if now.as_deref() != Some(id) {
         bail!(
             "the one-shot boot did not take: grubenv has next_entry={}, expected {id}.\n\
-             GRUB only consults next_entry when GRUB_DEFAULT=saved. Check that in \
-             /etc/default/grub and that grub-mkconfig has run since.",
+             GRUB consults next_entry whatever GRUB_DEFAULT is set to, so the arming \
+             write did not land: check that grubenv is writable, and that GRUB loads \
+             the same one this reads.",
             now.as_deref().unwrap_or("<unset>")
         );
     }
