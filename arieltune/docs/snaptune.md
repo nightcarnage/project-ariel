@@ -1,4 +1,4 @@
-# Snaptune: Bulletproof Snapshots and Module Management
+# Snaptune: Fail-Safe Kernel Snapshots and Module Management
 
 Snaptune takes the guesswork out of BC-250 kernel development by managing your
 snapshots, boot entries, and module verification in one place.
@@ -9,15 +9,16 @@ boot came from, and the GRUB menu entries that boot them. It is the SNAP tab
 
 ## Key Features
 
-**Fail-safe deployments.** An untested module cannot brick a remote blade. `boot` arms a
-single boot attempt, and the machine falls back to the last known-good kernel by itself
-if the snapshot does not come up — no console access, no rescue media, no hands on the
-box.
+**Fail-safe deployments.** An untested module is never the entry the machine boots
+again. `boot` arms a single boot through `next_entry` — which the generated GRUB config
+consults whatever `GRUB_DEFAULT` is set to — and the armed value is read back out of
+grubenv before anything reboots. An entry GRUB cannot resolve is refused before it is
+written, because an unresolvable value does not fail: it boots entry 0, silently. The
+worst case for a bad snapshot is a power cycle, not a reflash.
 
-**The live system is never mutated.** `create` and `dev` build into a *copy* of an image
-and check the result against the build. Neither the running module tree nor the running
-initramfs is a destination for any verb, so a board under development stays bootable
-throughout.
+**A module in about a minute, not a kernel build.** `dev` relinks only what changed and
+then derives a boot image from an existing one, so iterating on a driver patch does not
+cost a full kernel build per attempt.
 
 **Provenance stamped on the artefact.** A snapshot's id is a hash of its module, its
 initramfs and its kernel, so the name can be recomputed from the bytes and checked. The
@@ -29,8 +30,13 @@ compares the stored module with the one the kernel actually loaded. The check th
 its place is the one with no visible symptom otherwise: a boot that succeeds and is not
 the snapshot you asked for.
 
-**Nothing is promoted on your behalf.** No verb sets the permanent GRUB default
-implicitly. `boot` tests a single boot; `pin` makes it the default once it has earned it.
+**Portable between blades.** A snapshot moves as a single module: `create --module …
+--from …` derives the target blade's own image with that one member replaced, so nothing
+of the source tree's state travels with it.
+
+**Scriptable.** Every report verb takes `--json`, and `verify` and `doctor --verify` exit
+2 when something is wrong, so a post-reboot script can gate on the result instead of
+parsing prose.
 
 ## Safety Guarantees
 
@@ -44,8 +50,9 @@ Three things no snaptune verb does, whatever it is passed:
 - **The permanent GRUB default is never changed automatically.** Only `pin` sets it, and
   it is a separate, deliberate command.
 
-The blast radius of a bad change is one reboot, bounded by a boot that reverts itself.
-Recovering a remote blade does not require physical access.
+Together these keep a change inside the snapshot: the running system is never the thing
+being modified, so a snapshot that turns out to be bad is discarded rather than
+repaired.
 
 ---
 
@@ -172,7 +179,7 @@ which snapshot a boot came from, so its output shape is a contract.
 
 ---
 
-## 3. File System Footprint & Artifacts
+## 3. Filesystem Layout & Artifacts
 
 Three locations, and every verb is about relating them.
 
@@ -725,7 +732,17 @@ Two rules:
   *before* the config is regenerated, or the menu keeps an entry pointing at a
   kernel that is gone. `prune` encodes that order and is tested on it.
 
-And one trap: **`grub-reboot` exits 0 while changing nothing.** `next_entry` is
-only honoured when `grub.cfg` was generated with `GRUB_DEFAULT=saved`. `boot` reads
-the armed value back out of grubenv before it reports success, and will not reboot
-unless that check passed.
+And two traps.
+
+**`grub-reboot` exits 0 while changing nothing GRUB will honour.** It writes
+`next_entry` whether or not the value resolves, and an unresolvable value does not
+fail: GRUB boots **entry 0** instead, silently, taking the place of a correctly-saved
+default. Confirmed on blade 115, where arming a bare nested id booted "CachyOS Linux".
+`boot` therefore resolves the entry against `grub.cfg` before writing anything, and
+reads the armed value back out of grubenv before it reports success.
+
+**`GRUB_DEFAULT=saved` is what `pin` needs, not what `boot` needs.** `/etc/grub.d/00_header`
+emits the `next_entry` block whatever `GRUB_DEFAULT` is set to, so a one-shot `boot` is
+honoured either way. `pin` writes `saved_entry`, and without `GRUB_DEFAULT=saved`
+grub.cfg ignores it: `pin` reports success and changes nothing. `doctor` checks for
+exactly this and names it.
