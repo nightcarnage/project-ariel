@@ -169,8 +169,8 @@ once.
 
 | | verbs |
 |---|---|
-| **read-only, safe anywhere** | `list` `show` `current` `lineage` `grub-list` `diff` `golden`(report) `doctor` `verify` |
-| **write** (need root) | `create` `rebuild` `dev --run --register` `register` `boot` `pin` `unpin` `hide` `unhide` `golden <id>` `prune` |
+| **read-only, safe anywhere** | `list` `show` `current` `lineage` `grub-list` `diff` `golden`(report) `doctor` (without `--fix`) `verify` |
+| **write** (need root) | `create` `rebuild` `dev --run --register` `register` `boot` `pin` `unpin` `hide` `unhide` `golden <id>` `prune` `doctor --fix` |
 
 Every writing verb takes `--dry-run`, which prints the action plan and touches
 nothing. `--json` is global and puts one JSON value on stdout and nothing else — an
@@ -232,7 +232,7 @@ copies. That is why `prune` can delete one without touching anything else, and w
 | `grub-list` | GRUB menu entries, marking the nested ones | — | no |
 | `diff <a> <b>` | manifest fields and boot artefacts that differ | — | no |
 | `golden [<id>]` | report the baseline, or mark one | marker | with id |
-| `doctor [--verify]` | is the *store* coherent? Reports a flattened menu, too | — | no |
+| `doctor [--verify] [--fix]` | is the *store* coherent? Reports a flattened menu, too. `--fix` rebuilds entries that no longer match their manifest | menu, with `--fix` | with `--fix` |
 | `verify [<id>]` | is one *snapshot* what its manifest claims? | — | no |
 | `validate [<module>]` | is this *module* patched, and is it the one running? | — | no |
 | `extract-modules <id> [dir]` (`extract`) | the amdgpu module out of a snapshot's image | `[dir]` | no |
@@ -396,6 +396,7 @@ arm whichever comes first in the file.
 snaptune doctor                      # the whole store's health
 snaptune doctor --verify; echo $?    # 2 if anything is broken — usable in a script
 snaptune doctor --json               # one object, for a caller
+snaptune doctor --fix --dry-run      # what would be rebuilt, changing nothing
 
 snaptune verify                      # every snapshot; lists only the unclean ones
 snaptune verify snap-0848359a        # all five checks for one

@@ -280,7 +280,7 @@ fn grub_defaults_for_pin(current: &str) -> Option<String> {
 }
 
 /// `grub-mkconfig -o <grub.cfg>`, the regeneration every menu change needs.
-fn regen_action(paths: &Paths) -> Action {
+pub(crate) fn regen_action(paths: &Paths) -> Action {
     Action::Run {
         argv: vec![
             "grub-mkconfig".to_string(),

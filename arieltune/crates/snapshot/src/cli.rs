@@ -269,7 +269,8 @@ pub enum Cmd {
         reboot: bool,
     },
 
-    /// Preflight the store: is this box's boot configuration coherent? Read-only.
+    /// Preflight the store: is this box's boot configuration coherent? Read-only,
+    /// unless `--fix` is asked for.
     ///
     /// Checks the ways a store actually goes wrong rather than restating `list`: an
     /// entry whose files were deleted (GRUB keeps the row and cannot boot it), a
@@ -287,13 +288,18 @@ pub enum Cmd {
         /// Exit non-zero when anything is broken, rather than only printing it.
         #[arg(long)]
         verify: bool,
+        /// Rebuild the menu entries that no longer match their manifest. Writes
+        /// /etc/grub.d/40_custom and regenerates grub.cfg; needs root.
+        ///
+        /// Scoped to the menu: it never deletes a snapshot, never changes the
+        /// default, and never touches an artefact. An entry it cannot rebuild
+        /// from a manifest is reported and left alone.
+        #[arg(long)]
+        fix: bool,
+        /// Print what `--fix` would do, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
-
-    /// Check a snapshot against what is actually on disk. Read-only.
-    ///
-    /// `doctor` asks whether the *store* is coherent; this asks whether one
-    /// *snapshot* is what its manifest claims — a different question, because a
-    /// manifest is written once and never checked again afterwards. It re-reads the
     /// files the manifest names, compares the module's digest against the recorded
     /// one, confirms the GRUB entry boots this snapshot's own kernel and image, and
     /// recomputes the id from the stored bytes.
@@ -993,7 +999,12 @@ pub fn run_with(global: Global, cmd: Cmd) -> Result<i32> {
             // clap requires one of them, so this is unreachable via the parser.
             (None, None) => anyhow::bail!("boot needs a snapshot id or --entry <grub-id>"),
         },
-        Cmd::Doctor { json, verify } => cmd_doctor(&store.paths, json, verify),
+        Cmd::Doctor {
+            json,
+            verify,
+            fix,
+            dry_run,
+        } => cmd_doctor(&store.paths, json, verify, fix, dry_run),
         Cmd::Verify { id, json } => cmd_verify(&store, id.as_deref(), json),
         Cmd::TestResult {
             id,
@@ -1626,9 +1637,39 @@ fn arm_and_maybe_reboot(
     Ok(0)
 }
 
-/// Preflight the store. Read-only, and safe anywhere — it is the one verb here that
-/// is useful precisely when something is already wrong.
-fn cmd_doctor(paths: &Paths, json: bool, verify: bool) -> Result<i32> {
+/// Preflight the store. Read-only unless `--fix`, and safe anywhere: it is the one
+/// verb here that is useful precisely when something is already wrong.
+fn cmd_doctor(paths: &Paths, json: bool, verify: bool, fix: bool, dry_run: bool) -> Result<i32> {
+    let mut repaired: Vec<String> = Vec::new();
+    let mut unfixable: Vec<String> = Vec::new();
+    if fix {
+        // Repair first, then report the store as it is afterwards: a `--fix` that
+        // printed the pre-repair findings would be describing a store that no
+        // longer exists.
+        let repair = doctor::plan_fix(paths)?;
+        if !json {
+            println!("snaptune doctor --fix");
+            if repair.repaired.is_empty() && repair.unfixable.is_empty() {
+                println!("  nothing to repair: the menu matches every manifest");
+            }
+            for line in &repair.repaired {
+                println!("  repair        {line}");
+            }
+            for line in &repair.unfixable {
+                println!("  cannot repair {line}");
+            }
+            if !repair.plan.actions.is_empty() {
+                for line in repair.plan.describe() {
+                    println!("  {line}");
+                }
+            }
+            println!();
+        }
+        write::apply(&repair.plan, dry_run)?;
+        repaired = repair.repaired;
+        unfixable = repair.unfixable;
+    }
+
     let report = doctor::examine(paths);
 
     if json {
@@ -1645,14 +1686,19 @@ fn cmd_doctor(paths: &Paths, json: bool, verify: bool) -> Result<i32> {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "store": paths.root,
-                "worst": report.worst().label(),
-                "findings": findings,
-            }))?
-        );
+        let mut object = serde_json::json!({
+            "store": paths.root,
+            "worst": report.worst().label(),
+            "findings": findings,
+        });
+        if fix {
+            object["fix"] = serde_json::json!({
+                "dry_run": dry_run,
+                "repaired": repaired,
+                "unfixable": unfixable,
+            });
+        }
+        println!("{}", serde_json::to_string(&object)?);
         return Ok(exit_for(&report, verify));
     }
 
@@ -2368,7 +2414,7 @@ fn cmd_extract_modules(paths: &Paths, id: &str, dir: Option<&Path>, dry_run: boo
             println!(
                 "    {:<46} -> {}",
                 member,
-                dir.join(verify::basename(member)).display()
+                dir.join(grub::basename(member)).display()
             );
         }
         println!("\n--dry-run: nothing was written.");
@@ -2385,7 +2431,7 @@ fn cmd_extract_modules(paths: &Paths, id: &str, dir: Option<&Path>, dry_run: boo
         // early archive and refuses rather than returning empty bytes when the member
         // is not there.
         let bytes = image::verify_member(&image, member)?;
-        let dest = dir.join(verify::basename(member));
+        let dest = dir.join(grub::basename(member));
         std::fs::write(&dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
         total += bytes.len() as u64;
         println!("  {} bytes  {}", bytes.len(), dest.display());

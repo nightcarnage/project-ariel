@@ -563,9 +563,220 @@ pub fn strip_boot_image(cmdline: &str) -> String {
         .collect::<String>()
 }
 
+/// The last path component, so a GRUB path and a store path can be compared
+/// without insisting they be spelled identically.
+pub(crate) fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// The initrd the entry chains ahead of the real image, when `/boot` has one.
+const ACPI_OVERRIDE: &str = "acpi_override.cpio";
+
+/// What an existing entry does differently from what its manifest implies.
+///
+/// Empty means the block is what the manifest describes. Compared semantically,
+/// never as text: [`entry_from_manifest`] writes a `# Restored by: snaptune`
+/// header where the original writer wrote `# Created: <timestamp>`, so a text
+/// comparison would report every healthy entry as drifted.
+///
+/// **The arguments are compared, not just the kernel.** A `linux` line naming the
+/// right kernel with different arguments boots something the snapshot does not
+/// describe. Nothing checked that before: the entry check took the first token of
+/// the line and discarded the rest, so `iommu=off` typed into a menu entry was
+/// invisible to every verb. The stored cmdline is the authority, and
+/// `BOOT_IMAGE=` is dropped from both sides first — it is rewritten on use, and
+/// the stored copy can carry it twice.
+///
+/// The initrd chain is compared in order, because the override has to come first
+/// to be an early override.
+pub fn entry_drift(
+    entry: &CustomEntry,
+    manifest: &Manifest,
+    expected_cmdline: Option<&str>,
+) -> Vec<String> {
+    // Each comparison is made only where the manifest records the thing being
+    // compared. A field the manifest does not carry is not evidence that the entry
+    // is wrong, and `entry_from_manifest` will refuse to rebuild from such a
+    // manifest anyway — so `--fix` reports those rather than guessing.
+    let mut problems = Vec::new();
+
+    let mut kernel: Option<&str> = None;
+    let mut arguments = String::new();
+    let mut initrds: Vec<String> = Vec::new();
+    for line in &entry.body {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("linux ") {
+            let mut words = rest.split_whitespace();
+            kernel = words.next();
+            arguments = words.collect::<Vec<_>>().join(" ");
+        } else if let Some(rest) = line.strip_prefix("initrd ") {
+            initrds = rest.split_whitespace().map(str::to_string).collect();
+        }
+    }
+
+    match (kernel, manifest.vmlinuz()) {
+        (Some(actual), Some(want)) if basename(actual) == basename(&want) => {}
+        (Some(actual), Some(want)) => problems.push(format!(
+            "the entry boots {actual}, the manifest names {want}"
+        )),
+        (None, Some(_)) => problems.push("the entry has no `linux` line".to_string()),
+        (_, None) => {}
+    }
+
+    // The authority is the snapshot's own `.cmdline` file, NOT the manifest's
+    // `cmdline` field: that field is a capture of whatever the machine was running
+    // when the snapshot was taken, so it can miss a token added later — and on
+    // blade 104 one snapshot's manifest records *another* snapshot's cmdline
+    // outright. The per-snapshot file is what the entry was built from.
+    if let Some(cmdline) = expected_cmdline {
+        // `BOOT_IMAGE=` is rewritten on use, so it is dropped from both sides — the
+        // stored copy can carry it twice.
+        let stripped = strip_boot_image(&cmdline);
+        let expected: Vec<&str> = stripped.split_whitespace().collect();
+        let actual: Vec<&str> = arguments
+            .split_whitespace()
+            .filter(|word| !word.starts_with("BOOT_IMAGE="))
+            .collect();
+        if expected != actual {
+            problems.push(format!(
+                "the kernel arguments differ: {}",
+                describe_token_diff(&expected, &actual)
+            ));
+        }
+    }
+
+    if let Some(want_initramfs) = manifest.initramfs() {
+        // The acpi override is optional — it is chained when the file exists, so
+        // whether it is there at all is not drift — but when it is present it has to
+        // come first, or it is not an early override. Anything else chained in is
+        // something the manifest does not describe.
+        let want = basename(&want_initramfs).to_string();
+        let chained: Vec<String> = initrds.iter().map(|p| basename(p).to_string()).collect();
+        if !chained.iter().any(|name| *name == want) {
+            problems.push(format!("the entry's initrd does not include {want}"));
+        }
+        if let Some(index) = chained.iter().position(|name| name == ACPI_OVERRIDE) {
+            if index != 0 {
+                problems.push(
+                    "the acpi override is chained after the initramfs, so it is not an \
+                     early override"
+                        .to_string(),
+                );
+            }
+        }
+        let extra: Vec<&str> = chained
+            .iter()
+            .filter(|name| **name != want && name.as_str() != ACPI_OVERRIDE)
+            .map(String::as_str)
+            .collect();
+        if !extra.is_empty() {
+            problems.push(format!(
+                "the entry chains {}, which the manifest does not name",
+                extra.join(", ")
+            ));
+        }
+    }
+
+    problems
+}
+
+/// "no longer set: …; newly set: …" — order-insensitive, which is the useful way
+/// to read a drifted kernel command line.
+fn describe_token_diff(expected: &[&str], actual: &[&str]) -> String {
+    let gone: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|word| !actual.contains(word))
+        .collect();
+    let added: Vec<&str> = actual
+        .iter()
+        .copied()
+        .filter(|word| !expected.contains(word))
+        .collect();
+    let mut parts = Vec::new();
+    if !gone.is_empty() {
+        parts.push(format!("no longer set: {}", gone.join(" ")));
+    }
+    if !added.is_empty() {
+        parts.push(format!("newly set: {}", added.join(" ")));
+    }
+    if parts.is_empty() {
+        "the same tokens in a different order".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A snapshot whose entry is exactly what its recorded cmdline describes.
+    const SETTLED: &str = "snapshot:\n  id: \"snap-aaaaaaaa\"\n  description: \"t\"\n\
+boot_files:\n  vmlinuz: \"/boot/vmlinuz-snap-aaaaaaaa\"\n\
+  initramfs: \"/boot/initramfs-snap-aaaaaaaa.img\"\n\
+grub:\n  root_uuid: \"UUID=x\"\n";
+
+    const SETTLED_CMDLINE: &str = "BOOT_IMAGE=/boot/vmlinuz-snap-aaaaaaaa root=UUID=x rw iommu=pt";
+
+    fn settled_entry() -> CustomEntry {
+        let custom = "# === snap-aaaaaaaa: t ===\n\
+             menuentry 'x' --id 'snap-aaaaaaaa' {\n\
+             \x20   linux /boot/vmlinuz-snap-aaaaaaaa root=UUID=x rw iommu=pt\n\
+             \x20   initrd /boot/initramfs-snap-aaaaaaaa.img\n}\n";
+        parse_custom(custom).pop().expect("one entry")
+    }
+
+    /// The healthy case must be silent, or `doctor --fix` would rewrite a store it
+    /// had no business touching. `BOOT_IMAGE=` is present on the recorded side and
+    /// dropped from the comparison, which is exactly how the real store reads.
+    #[test]
+    fn a_settled_entry_has_no_drift() {
+        let manifest = Manifest::parse(SETTLED).expect("parses");
+        assert_eq!(
+            entry_drift(&settled_entry(), &manifest, Some(SETTLED_CMDLINE)),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The hole this exists to close: the entry names the right kernel, so every
+    /// check before this one passed, while the arguments it passes are not the
+    /// ones the snapshot was built and recorded with.
+    #[test]
+    fn a_changed_kernel_argument_is_drift() {
+        let manifest = Manifest::parse(SETTLED).expect("parses");
+        let entry = settled_entry();
+        let drifted = entry_drift(&entry, &manifest, Some("root=UUID=x rw"));
+        assert_eq!(drifted.len(), 1, "{drifted:?}");
+        assert!(drifted[0].contains("newly set: iommu=pt"), "{drifted:?}");
+    }
+
+    /// Dropping the initramfs from the chain is not a boot this snapshot describes.
+    #[test]
+    fn a_missing_initrd_is_drift() {
+        let manifest = Manifest::parse(SETTLED).expect("parses");
+        let custom = "# === snap-aaaaaaaa: t ===\n\
+             menuentry 'x' --id 'snap-aaaaaaaa' {\n\
+             \x20   linux /boot/vmlinuz-snap-aaaaaaaa root=UUID=x rw iommu=pt\n}\n";
+        let entry = parse_custom(custom).pop().expect("one entry");
+        let drifted = entry_drift(&entry, &manifest, Some(SETTLED_CMDLINE));
+        assert!(
+            drifted.iter().any(|p| p.contains("does not include")),
+            "{drifted:?}"
+        );
+    }
+
+    /// A manifest that records nothing is not evidence that the entry is wrong.
+    /// Failing here would turn every incomplete or hand-written manifest into a
+    /// false alarm on a store that boots perfectly.
+    #[test]
+    fn a_manifest_that_says_nothing_claims_no_drift() {
+        let manifest = Manifest::parse("snapshot:\n  id: \"snap-aaaaaaaa\"\n").expect("parses");
+        assert_eq!(
+            entry_drift(&settled_entry(), &manifest, None),
+            Vec::<String>::new()
+        );
+    }
 
     const CUSTOM: &str = r#"#!/bin/sh
 exec tail -n +3 $0

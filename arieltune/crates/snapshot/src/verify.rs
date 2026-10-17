@@ -138,7 +138,13 @@ pub fn one(paths: &Paths, snapshot: &Snapshot) -> Report {
     }
 
     // --- the menu entry ----------------------------------------------------
-    report_entry(&mut report, paths, sid, snapshot.hidden, &get);
+    report_entry(
+        &mut report,
+        paths,
+        sid,
+        snapshot.hidden,
+        snapshot.manifest.as_ref(),
+    );
 
     // --- the id, re-derived ------------------------------------------------
     //
@@ -185,19 +191,13 @@ fn local(base: &Path, recorded: &Path) -> PathBuf {
     }
 }
 
-/// The last path component, so a GRUB path and a store path can be compared without
-/// insisting they be spelled identically.
-pub(crate) fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
 /// The entry in `40_custom` must exist, carry this id, and boot this snapshot.
 fn report_entry(
     report: &mut Report,
     paths: &Paths,
     sid: &str,
     hidden: bool,
-    get: &impl Fn(&str) -> Option<String>,
+    manifest: Option<&manifest::Manifest>,
 ) {
     let text = match std::fs::read_to_string(&paths.grub_custom) {
         Ok(text) => text,
@@ -236,49 +236,28 @@ fn report_entry(
         return;
     };
 
-    // The `linux` and `initrd` lines, against what the manifest says they are. Compared
-    // by file name rather than by full path: a GRUB entry names the file where GRUB
-    // will read it, while the manifest records where the store keeps it, and the two
-    // need not be spelled the same for the entry to boot the right kernel. That the
-    // manifest's own path exists is the `files` check's job, not this one's.
-    let want_kernel = get("boot_files.vmlinuz");
-    let want_initramfs = get("boot_files.initramfs");
-    let mut kernel: Option<String> = None;
-    let mut initrds: Vec<String> = Vec::new();
-    for line in &entry.body {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("linux ") {
-            kernel = rest.split_whitespace().next().map(str::to_string);
-        } else if let Some(rest) = line.strip_prefix("initrd ") {
-            initrds = rest.split_whitespace().map(str::to_string).collect();
-        }
-    }
-
-    let mut problems = Vec::new();
-    match (&kernel, &want_kernel) {
-        (Some(actual), Some(want)) if basename(actual) == basename(want) => {}
-        (Some(actual), Some(want)) => {
-            problems.push(format!(
-                "the entry boots {actual}, the manifest names {want}"
-            ));
-        }
-        (None, _) => problems.push("the entry has no `linux` line".to_string()),
-        (_, None) => problems.push("the manifest names no kernel to compare against".to_string()),
-    }
-    match &want_initramfs {
-        Some(want) => {
-            if !initrds.iter().any(|p| basename(p) == basename(want)) {
-                problems.push(format!("the entry's initrd does not include {want}"));
-            }
-        }
-        None => problems.push("the manifest names no initramfs".to_string()),
-    }
+    // Against the manifest, not against a couple of fields picked out of it.
+    // It is the only thing that knows the kernel *arguments*, and an entry
+    // naming the right kernel while passing different arguments boots something
+    // the snapshot does not describe. That was invisible here until
+    // `grub::entry_drift` existed: this check used to take the first token of the
+    // `linux` line and discard the rest.
+    let Some(manifest) = manifest else {
+        report.note(
+            "entry",
+            Severity::Warn,
+            "the manifest did not parse, so the entry cannot be compared against it",
+        );
+        return;
+    };
+    let cmdline = std::fs::read_to_string(paths.boot.join(format!("{sid}.cmdline"))).ok();
+    let problems = grub::entry_drift(entry, manifest, cmdline.as_deref());
 
     if problems.is_empty() {
         report.note(
             "entry",
             Severity::Ok,
-            "boots this snapshot's own kernel and image",
+            "boots this snapshot's own kernel and image, with the arguments it records",
         );
     } else {
         report.note("entry", Severity::Fail, problems.join("; "));
@@ -386,7 +365,7 @@ mod tests {
         std::fs::write(snap_dir.join("modules/module.ko.zst"), b"MODULE").unwrap();
         std::fs::write(boot.join(format!("vmlinuz-{id}")), b"KERNEL").unwrap();
         std::fs::write(boot.join(format!("initramfs-{id}.img")), b"IMAGE").unwrap();
-        std::fs::write(boot.join(format!("{id}.cmdline")), b"quiet").unwrap();
+        std::fs::write(boot.join(format!("{id}.cmdline")), b"root=UUID=x rw").unwrap();
 
         let module = snap_dir.join("modules/module.ko.zst");
         let md5 = id::file_md5_hex(&module);

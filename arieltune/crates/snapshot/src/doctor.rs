@@ -130,6 +130,53 @@ pub fn examine(paths: &Paths) -> Report {
         );
     }
 
+    // --- entry drift ------------------------------------------------------
+    //
+    // An entry that exists and names the right kernel can still pass different
+    // arguments, or chain a different initrd. Nothing looked for that until
+    // `grub::entry_drift` existed — it is how a menu edited by hand, or by
+    // something that did not use this tool, goes wrong quietly. The failure it
+    // describes is a boot that succeeds and is not what the manifest describes.
+    let custom = std::fs::read_to_string(&paths.grub_custom).unwrap_or_default();
+    let entries = grub::parse_custom(&custom);
+    let mut drifted: Vec<String> = Vec::new();
+    for snapshot in &snapshots {
+        if snapshot.hidden {
+            continue;
+        }
+        // A missing entry is the `menu` check's finding; an unparseable manifest
+        // is the `manifests` check's. Only compare where both exist.
+        let (Some(entry), Some(manifest)) = (
+            entries.iter().find(|e| e.id == snapshot.id),
+            snapshot.manifest.as_ref(),
+        ) else {
+            continue;
+        };
+        let cmdline =
+            std::fs::read_to_string(paths.boot.join(format!("{}.cmdline", snapshot.id))).ok();
+        let problems = grub::entry_drift(entry, manifest, cmdline.as_deref());
+        if !problems.is_empty() {
+            drifted.push(format!("{} ({})", snapshot.id, problems.join("; ")));
+        }
+    }
+    if drifted.is_empty() {
+        report.note(
+            "entries",
+            Severity::Ok,
+            "every entry carries the kernel, arguments and initrd its manifest records",
+        );
+    } else {
+        report.note(
+            "entries",
+            Severity::Fail,
+            format!(
+                "{} entry(ies) do not match their manifest: {} — `doctor --fix` rebuilds them",
+                drifted.len(),
+                drifted.join(", ")
+            ),
+        );
+    }
+
     // --- boot artefacts ---------------------------------------------------
     //
     // Split by visibility, because the same missing files mean different things.
@@ -448,6 +495,110 @@ fn free_bytes(path: &Path) -> Option<u64> {
     Some(stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
+/// A menu repair the caller can print, dry-run, or apply.
+pub struct Fix {
+    pub plan: write::Plan,
+    /// `id: what was wrong` for each entry that will be rebuilt.
+    pub repaired: Vec<String>,
+    /// Entries that cannot be rebuilt, and why.
+    pub unfixable: Vec<String>,
+}
+
+/// Bring the menu back to what the manifests describe.
+///
+/// Scoped to the menu, deliberately. It never deletes a snapshot, never changes the
+/// default, and never touches an artefact — a snapshot whose files are gone is
+/// reported as unfixable rather than repaired by deletion, because choosing what to
+/// throw away is `prune`'s decision to make with a human watching it happen.
+///
+/// This is the repair for the quiet failure: an entry edited outside this tool still
+/// boots something, just not the thing the manifest describes.
+pub fn plan_fix(paths: &Paths) -> anyhow::Result<Fix> {
+    let state = write::State::read(paths)?;
+    let snapshots = Store::new(paths.clone()).discover()?;
+
+    let acpi = paths.boot.join("acpi_override.cpio");
+    let acpi = acpi.is_file().then_some(acpi);
+
+    let mut custom = state.custom.clone();
+    let mut repaired: Vec<String> = Vec::new();
+    let mut unfixable: Vec<String> = Vec::new();
+
+    for snapshot in &snapshots {
+        if snapshot.hidden {
+            continue;
+        }
+        let id = snapshot.id.as_str();
+        let existing = grub::parse_custom(&custom)
+            .into_iter()
+            .find(|entry| entry.id == id);
+        let drift = match (&existing, snapshot.manifest.as_ref()) {
+            (Some(entry), Some(manifest)) => grub::entry_drift(
+                entry,
+                manifest,
+                std::fs::read_to_string(paths.boot.join(format!("{id}.cmdline")))
+                    .ok()
+                    .as_deref(),
+            ),
+            (Some(_), None) => vec!["the manifest does not parse".to_string()],
+            (None, _) => vec!["no entry at all".to_string()],
+        };
+        if drift.is_empty() {
+            continue;
+        }
+
+        let Some(manifest) = snapshot.manifest.as_ref() else {
+            unfixable.push(format!(
+                "{id}: the manifest does not parse, so there is nothing to rebuild from"
+            ));
+            continue;
+        };
+        let entry = match grub::entry_from_manifest(manifest, id, acpi.clone()) {
+            Ok(entry) => entry,
+            Err(err) => {
+                unfixable.push(format!("{id}: {err}"));
+                continue;
+            }
+        };
+
+        // Remove first, then append: an edited entry must not be left beside its
+        // replacement, and `remove_entry` is the same primitive `hide` and `prune`
+        // use, so the block boundaries are the ones already tested.
+        let (without, removed) = grub::remove_entry(&custom, id);
+        if removed {
+            custom = without;
+        }
+        custom.push_str(&entry);
+        repaired.push(format!("{id}: {}", drift.join("; ")));
+    }
+
+    let actions = if repaired.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            write::Action::Write {
+                path: paths.grub_custom.clone(),
+                contents: custom,
+                what: "rebuild the entries that drifted".to_string(),
+            },
+            write::regen_action(paths),
+        ]
+    };
+
+    Ok(Fix {
+        plan: write::Plan {
+            summary: match repaired.len() {
+                0 => "the menu already matches every manifest".to_string(),
+                1 => "rebuild 1 menu entry".to_string(),
+                n => format!("rebuild {n} menu entries"),
+            },
+            actions,
+        },
+        repaired,
+        unfixable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,7 +637,10 @@ mod tests {
             (format!("{id}.cmdline"), "cmdline"),
         ] {
             if !omit.contains(&kind) {
-                std::fs::write(dir.join("boot").join(file), b"x").unwrap();
+                // Empty for the cmdline: the fixture entry has no `linux` line,
+                // so anything here would read as arguments the entry dropped.
+                let body: &[u8] = if kind == "cmdline" { b"" } else { b"x" };
+                std::fs::write(dir.join("boot").join(file), body).unwrap();
             }
         }
         // The `# === <id>: … ===` marker is what `grub::parse_custom` keys the entry
