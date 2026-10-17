@@ -403,9 +403,14 @@ snaptune verify snap-0848359a        # all five checks for one
 snaptune verify --json               # one object, incl. per-check findings
 ```
 
-On the archive blade this reads as: 28 snapshots, `verify` exits 2, five of them
-fail `manifest` — and `doctor` names the same five. Two independently written
-checks agreeing is the point.
+The two agree because they are written independently: a manifest that will not
+parse fails `verify`'s `manifest` check and also lowers `doctor`'s count of
+manifests that parse cleanly. On the archive blade that reading once named five
+snapshots from both verbs — one stray `0` line, left at column 1 after
+`bc250_markers` by the old shell writer, made the YAML invalid in each. The
+snapshots still listed and still booted, because the fallback parser carried
+them; only the two verbs said anything. Deleting that one line cleared both
+reports at once, which is the argument for running them in this order.
 
 ### 5.7 Retire a snapshot
 
@@ -701,7 +706,7 @@ Two accessors deliberately behave differently from the rest:
   would answer with the module's own path, plausibly and wrongly.
 - `cmdline()` is **not safe to boot with**. It is the *live* cmdline at capture
   time, can name whichever kernel was booted then, and can contain `BOOT_IMAGE=`
-  twice — `snap-da794092` does, and so do 19 of the 28 snapshots in the archive
+  twice — `snap-da794092` does, and so do 19 of the 26 snapshots in the archive
   store, so this is the normal shape of the field rather than a quirk of one
   manifest. Regenerate it; do not reuse it.
 

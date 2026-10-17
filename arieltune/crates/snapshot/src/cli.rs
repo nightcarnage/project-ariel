@@ -273,11 +273,12 @@ pub enum Cmd {
     /// unless `--fix` is asked for.
     ///
     /// Checks the ways a store actually goes wrong rather than restating `list`: an
-    /// entry whose files were deleted (GRUB keeps the row and cannot boot it), a
-    /// snapshot with no entry, a `/boot` kernel nothing claims, an unparseable
-    /// manifest, and whether `GRUB_DEFAULT` is `saved` — because if it is not, `pin`
-    /// writes grubenv and silently does nothing, while the one-shot `boot` still
-    /// works. Names the offenders rather than only counting them.
+    /// entry that no longer carries the kernel, arguments or initrd its manifest
+    /// records, an entry whose files were deleted (GRUB keeps the row and cannot
+    /// boot it), a snapshot with no entry, a `/boot` kernel nothing claims, an
+    /// unparseable manifest, and whether `GRUB_DEFAULT` is `saved` — because if it
+    /// is not, `pin` writes grubenv and silently does nothing, while the one-shot
+    /// `boot` still works. Names the offenders rather than only counting them.
     ///
     /// `--verify` turns the report into a gate: a non-zero exit when anything is
     /// broken, so post-reboot scripts can ask.
